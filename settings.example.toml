@@ -1,0 +1,130 @@
+# Operator-facing config. Copy to settings.toml and edit.
+#
+#   cp settings.example.toml settings.toml
+#
+# settings.toml is gitignored — your real values + secrets stay local.
+
+[defaults]
+provider   = "bedrock"     # provider used when a model has no `provider` field
+max_tokens = 4000
+
+[default_model]
+model_id = "global.anthropic.claude-opus-4-7"
+
+# ---- sandbox: environments shown in the sidebar + base Docker images ----
+
+[sandbox]
+environments = [
+    "python:3.10",
+    "python:3.11",
+    "python:3.12",
+    "python:3.13",
+]
+
+[sandbox.images]
+"python:3.10" = "python:3.10-slim"
+"python:3.11" = "python:3.11-slim"
+"python:3.12" = "python:3.12-slim"
+"python:3.13" = "python:3.13-slim"
+
+# ---- providers: backends the scanner can call ----
+#
+# Two kinds:
+#   bedrock_converse  — boto3 Bedrock Converse API (SigV4 via AWS_PROFILE/SSO/role)
+#   openai_compat     — OpenAI Responses API over HTTP (Bearer token);
+#                       used for bedrock-mantle, LiteLLM, in-house proxies, etc.
+#
+# Required fields:
+#   bedrock_converse: name, kind, region
+#   openai_compat   : name, kind, endpoint, api_key
+
+[[providers]]
+name   = "bedrock"
+kind   = "bedrock_converse"
+region = "us-west-2"
+# endpoint = "https://vpce-xxx.bedrock-runtime.us-west-2.vpce.amazonaws.com"  # VPCE / FIPS
+
+# Uncomment and fill if you also want to call bedrock-mantle / LiteLLM / etc.
+# [[providers]]
+# name     = "mantle"
+# kind     = "openai_compat"
+# endpoint = "https://bedrock-mantle.us-east-2.api.aws/openai/v1"
+# api_key  = "REPLACE_ME"
+
+# [[providers]]
+# name     = "litellm"
+# kind     = "openai_compat"
+# endpoint = "https://litellm.acme.internal/v1"
+# api_key  = "REPLACE_ME"
+
+
+# ---- models: catalog. each model points at one provider. ----
+#
+# `provider` is optional — defaults to [defaults].provider above.
+# Pricing is USD per 1M tokens.
+
+[[models]]
+label    = "Opus 4.7"
+model_id = "global.anthropic.claude-opus-4-7"
+input_per_m  = 15.0
+output_per_m = 75.0
+
+[[models]]
+label    = "Opus 4.8"
+model_id = "global.anthropic.claude-opus-4-8"
+input_per_m  = 15.0
+output_per_m = 75.0
+
+[[models]]
+label    = "Opus 4.6"
+model_id = "global.anthropic.claude-opus-4-6-v1"
+input_per_m  = 15.0
+output_per_m = 75.0
+
+[[models]]
+label    = "Sonnet 4.6"
+model_id = "global.anthropic.claude-sonnet-4-6"
+input_per_m  = 3.0
+output_per_m = 15.0
+
+[[models]]
+label    = "Sonnet 4.5"
+model_id = "global.anthropic.claude-sonnet-4-5-20250929-v1:0"
+input_per_m  = 3.0
+output_per_m = 15.0
+
+[[models]]
+label    = "Haiku 4.5"
+model_id = "global.anthropic.claude-haiku-4-5-20251001"
+input_per_m  = 1.0
+output_per_m = 5.0
+
+[[models]]
+label    = "Kimi K2.5"
+model_id = "moonshotai.kimi-k2.5"
+input_per_m      = 0.60
+output_per_m     = 3.00
+supports_caching = false
+
+[[models]]
+label    = "Kimi K2 Thinking"
+model_id = "moonshot.kimi-k2-thinking"
+input_per_m      = 0.60
+output_per_m     = 2.50
+supports_caching = false
+
+# Example: same model served via mantle (uncomment the [[providers]] above first).
+# [[models]]
+# label    = "GPT-5.5"
+# provider = "mantle"
+# model_id = "openai.gpt-5.5"
+# input_per_m      = 5.50
+# output_per_m     = 33.00
+# supports_caching = false
+
+# [[models]]
+# label    = "Fable 5"
+# provider = "mantle"
+# model_id = "global.anthropic.claude-fable-5"
+# input_per_m  = 10.0
+# output_per_m = 50.0

@@ -1,0 +1,52 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 320" width="100%">
+  <g transform="translate(40,20)">
+    <g transform="translate(80,0)">
+      <rect x="0" y="0" width="280" height="220" rx="10" fill="#fff5f5" stroke="#fecaca"/>
+      <text x="140" y="24" text-anchor="middle" font-size="11" font-weight="700" fill="#9ca3af" letter-spacing="3">WHERE TO LOOK</text>
+      <g transform="translate(20,46)">
+        <rect x="0" y="0" width="240" height="44" rx="6" fill="#eff6ff" stroke="#1d4ed8" stroke-width="1.4"/>
+        <text x="14" y="28" font-size="14" font-weight="800" fill="#111827">Filter</text>
+      </g>
+      <g transform="translate(20,98)">
+        <rect x="0" y="0" width="240" height="44" rx="6" fill="#eff6ff" stroke="#1d4ed8" stroke-width="1.4"/>
+        <text x="14" y="28" font-size="14" font-weight="800" fill="#111827">Rank</text>
+      </g>
+      <g transform="translate(20,150)">
+        <rect x="0" y="0" width="240" height="44" rx="6" fill="#fde8e3" stroke="#b91c1c" stroke-width="1.6"/>
+        <text x="14" y="28" font-size="14" font-weight="800" fill="#111827">Selector</text>
+      </g>
+    </g>
+
+    <g transform="translate(440,0)">
+      <rect x="0" y="0" width="280" height="220" rx="10" fill="#fff5f5" stroke="#fecaca"/>
+      <text x="140" y="24" text-anchor="middle" font-size="11" font-weight="700" fill="#9ca3af" letter-spacing="3">FIND &amp; VERIFY</text>
+      <g transform="translate(20,46)">
+        <rect x="0" y="0" width="240" height="44" rx="6" fill="#eff6ff" stroke="#1d4ed8" stroke-width="1.4"/>
+        <text x="14" y="28" font-size="14" font-weight="800" fill="#111827">SandboxPrepare</text>
+      </g>
+      <g transform="translate(20,98)">
+        <rect x="0" y="0" width="240" height="96" rx="6" fill="#fde8e3" stroke="#b91c1c" stroke-width="1.6"/>
+        <text x="14" y="28" font-size="14" font-weight="800" fill="#111827">Hunter</text>
+        <text x="14" y="52" font-size="11" fill="#374151">independent session</text>
+        <text x="14" y="72" font-size="10" fill="#6b7280" font-style="italic">read · grep · exec PoC</text>
+      </g>
+    </g>
+
+    <g transform="translate(800,0)">
+      <rect x="0" y="0" width="220" height="220" rx="10" fill="#fff5f5" stroke="#fecaca"/>
+      <text x="110" y="24" text-anchor="middle" font-size="11" font-weight="700" fill="#9ca3af" letter-spacing="3">IS IT REAL?</text>
+      <g transform="translate(20,46)">
+        <rect x="0" y="0" width="180" height="44" rx="6" fill="#eff6ff" stroke="#1d4ed8" stroke-width="1.4"/>
+        <text x="14" y="28" font-size="14" font-weight="800" fill="#111827">Clusterer</text>
+      </g>
+      <g transform="translate(20,98)">
+        <rect x="0" y="0" width="180" height="96" rx="6" fill="#fde8e3" stroke="#b91c1c" stroke-width="1.6"/>
+        <text x="14" y="28" font-size="14" font-weight="800" fill="#111827">Reviewer</text>
+        <text x="14" y="52" font-size="11" fill="#374151">× G (per group)</text>
+        <text x="14" y="72" font-size="10" fill="#6b7280" font-style="italic">re-runs PoC</text>
+      </g>
+    </g>
+  </g>
+
+  <text x="540" y="290" text-anchor="middle" font-size="13" fill="#374151" font-style="italic">Hunter · Reviewer run <tspan font-weight="800">per file</tspan></text>
+</svg>

@@ -1,0 +1,166 @@
+# ----- Python -----
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+develop-eggs/
+.eggs/
+sdist/
+wheels/
+share/python-wheels/
+MANIFEST
+pip-wheel-metadata/
+
+# ----- Virtual envs -----
+.venv/
+venv/
+env/
+ENV/
+.python-version
+
+# ----- Test / coverage -----
+.tox/
+.nox/
+.coverage
+.coverage.*
+htmlcov/
+.cache/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.pyre/
+.pytype/
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+
+# ----- Jupyter -----
+.ipynb_checkpoints/
+*/.ipynb_checkpoints/*
+profile_default/
+ipython_config.py
+
+# ----- Local config / secrets -----
+settings.toml
+*.pem
+*.key
+*.crt
+*.p12
+secrets/
+.secrets/
+credentials.json
+
+# ----- Project-specific runtime artifacts -----
+runs/*
+!runs/.gitkeep
+workspace/*
+!workspace/.gitkeep
+output/
+outputs/
+tmp/
+temp/
+.scratch/
+scratch/
+
+# ----- Logs -----
+*.log
+logs/
+pip-log.txt
+pip-delete-this-directory.txt
+
+# ----- Archives / large blobs -----
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.7z
+*.rar
+*.gz
+*.bz2
+*.xz
+
+# ----- Databases / vector stores -----
+*.sqlite
+*.sqlite3
+*.db
+chroma_db/
+.chroma/
+faiss_index/
+
+# ----- Models / weights -----
+*.bin
+*.safetensors
+*.gguf
+*.ckpt
+*.pt
+*.pth
+*.onnx
+*.h5
+models/
+
+# ----- OS junk -----
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+
+# ----- Editor / IDE -----
+.idea/
+*.iml
+*.swp
+*.swo
+*~
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+.history/
+.cursor/
+.aider*
+
+# ----- Node (in case any tooling pulls it in) -----
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# ----- Docker / build caches -----
+.docker/
+*.pid
+
+# ----- Devcontainer (local-only environment) -----
+.devcontainer/
+
+# ----- Project dirs: keep folder, drop contents -----
+poc/*
+!poc/.gitkeep
+
+# ----- Project dirs: drop entirely -----
+docs/
+notes/
+tools/
+docker/local/
+prompts/hunters/*/
+prompts/rankers/*/
+
+# ----- Claude / AI tool caches (keep shared config, drop local state) -----
+.claude/*
+!.claude/settings.json
+
+# ----- Misc -----
+*.bak
+*.tmp
+*.orig
+CLAUDE.md

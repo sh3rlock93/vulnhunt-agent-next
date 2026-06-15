@@ -1,0 +1,181 @@
+# Vulnerability Hunting Agent
+
+> An LLM agent that **reads code, forms hypotheses, writes a PoC, and executes it in a Docker sandbox** — then ships only the bugs it could actually trigger.
+
+[**한국어 README**](README.ko.md)  ·  Apache-2.0  ·  Python 3.11+
+
+---
+
+A reproduction of the **Anthropic "Project Mythos" scaffold** (file-level
+parallel hunters + a reviewer stage) on a publicly accessible frontier
+model — no preview model required.
+
+The scaffold is intentionally small (~150 LOC per file), boring on
+purpose, and easy to fork.
+
+---
+
+## Per-file independent hunts
+
+<p align="center">
+  <img src="assets/img/per_file_loop.svg" alt="Per-file loop: Hunters → Clusterer → Reviewer" width="100%">
+</p>
+
+For every top-ranked file the scanner runs an independent hunter
+session — fresh context, no shared history.
+
+A separate **Reviewer** stage re-runs each finding's PoC and is allowed
+to drop a group entirely if it doesn't reproduce. Per-file bounding
+gives deterministic coverage and clean parallelism.
+
+These three pieces (Hunter · Clusterer · Reviewer) **adapt the Mythos
+building blocks (Ranker · Hunters · Reviewer)** for public-model access.
+
+---
+
+## Pipeline
+
+<p align="center">
+  <img src="assets/img/three_groups.svg" alt="Three groups: Filter · Hunters · Reviewer" width="100%">
+</p>
+
+```
+Filter → Rank → Selector → Sandbox Prepare → Hunt (Hunter → Cluster → Review) → Report
+```
+
+1. **Filter** — drop tests, vendored, generated code (no LLM).
+2. **Rank** — score every source file 1–5 for security relevance.
+3. **Selector** — pick which files Hunters will run on.
+4. **Sandbox Prepare** — build a per-repo Docker image (deterministic
+   install per environment: pip / mvn). Or use a custom image you've built.
+5. **Hunt** — *one independent session per file*. Reads, greps, writes
+   a PoC into `/workspace`, executes it in a network-isolated Docker
+   container. `network: none`, `/code` read-only, `/workspace` tmpfs.
+6. **Cluster** — group near-duplicate findings within a file.
+7. **Review** — verdict + CVSS + writeup.
+8. **Report** — JSON + Markdown.
+
+Each Hunter is a fresh session. They don't share history; the diversity
+of independent runs is the point.
+
+---
+
+## Quick start
+
+> **Requirements:** Python 3.11+, Docker, AWS credentials with Bedrock access (Opus 4.7 enabled).
+
+```bash
+# 1. install
+git clone https://github.com/ksgsslee/vulnhunt-agent.git
+cd vulnhunt-agent
+pip install -e .
+
+# 2. config — copy the template, edit provider/region/keys
+cp settings.example.toml settings.toml
+
+# 3. credentials (Bedrock direct: SSO/role/AWS_PROFILE all work)
+aws sso login
+
+# 4. run the UI
+streamlit run src/vulnhunt_agent/app.py
+```
+
+In the sidebar: pick a repo (git URL or local path), pick an
+**Environment** (e.g. `python:3.12`, `java:21`), click **Save**,
+then run each step from top to bottom.
+
+**Troubleshooting** — if Bedrock returns `AccessDeniedException`, enable
+model access for your chosen model in the Bedrock console. The model and
+provider catalog lives in [settings.toml](settings.example.toml).
+
+<p align="center">
+  <img src="assets/img/ui_screenshot.png" alt="Streamlit UI — mid-run" width="90%">
+</p>
+
+When a run finishes, the Final Report ranks every grouped finding by
+CVSS; each row expands into a writeup with a Reviewer summary, the CWE /
+CVSS vector, and the PoC that reproduced in the sandbox.
+
+---
+
+## Configuration
+
+Two locations at the repo root, both edited by the operator:
+
+**[settings.toml](settings.example.toml)** (gitignored) — copy from
+`settings.example.toml`. Holds the **`[[providers]]`** list (Bedrock
+direct, bedrock-mantle, LiteLLM, in-house OpenAI-compatible proxies)
+and the **`[[models]]`** catalog. Each model points at one provider.
+Swap the hunter / reviewer / ranker model independently from the sidebar.
+
+**[prompts/](prompts/)** — every prompt lives here:
+- `prompts/hunters/python.md`, `java.md` — broad language-aware
+  review prompts.
+- `prompts/rankers/<lang>.md` — per-language ranker hint.
+
+That's it — no `.env`, no `~/.scanner/`, no scattered config.
+
+---
+
+## Project layout
+
+```
+src/vulnhunt_agent/
+  agents/        hunter, reviewer, clusterer, queue
+  pipeline/      filter → rank → selector → sandbox_prepare → hunt → finalize
+  core/          llm, settings, run_store, cvss, events
+  ui/            streamlit (sidebar, steps, result_cards, cost)
+  sandbox/       Docker executor
+  repo/          git/local source resolver
+prompts/
+  hunters/*.md           # language hunters
+  rankers/<lang>.md      # per-language ranker hint
+settings.example.toml    # template for settings.toml (gitignored)
+```
+
+Code style (see [CLAUDE.md](CLAUDE.md)): ~150 LOC per file, ~30 LOC per
+function, no `Protocol`/`ABC`/`Generic` until there are two
+implementations, no defensive `try/except` for cases that can't happen.
+
+---
+
+## Externally validated findings
+
+Findings produced by single runs of this scaffold:
+
+- **[Published]**
+  [GHSA-pjwx-r37v-7724](https://github.com/langchain-ai/langchain/security/advisories/GHSA-pjwx-r37v-7724) —
+  `langchain-core` (Python), CWE-502, CVSS 8.2 (High)
+
+- **[Public fix]**
+  [Django #37170](https://code.djangoproject.com/ticket/37170) —
+  `django.views.debug` (Python), information disclosure in the
+  exception report filter (acknowledged by Django security team;
+  fix scheduled for the next release)
+
+- **[CVE assignment confirmed]**
+  Jenkins core (Java) — CVE assignment confirmed; advisory release
+  scheduled per the Jenkins LTS cadence
+
+Linked as evidence that the scaffold produces findings that survive
+third-party review. Other findings on other targets are still under
+disclosure and intentionally not listed.
+
+---
+
+## Contact
+
+Questions, feedback, or interested in extended detection coverage:
+<localhost.detect@gmail.com>.
+
+---
+
+## Further reading
+
+- **Mythos preview write-up (Anthropic)** — <https://red.anthropic.com/2026/mythos-preview/>
+
+---
+
+## License
+
+[Apache-2.0](LICENSE)
