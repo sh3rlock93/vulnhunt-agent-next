@@ -10,9 +10,6 @@ A reproduction of the **Anthropic "Project Mythos" scaffold** (file-level
 parallel hunters + a reviewer stage) on a publicly accessible frontier
 model — no preview model required.
 
-The scaffold is intentionally small (~150 LOC per file), boring on
-purpose, and easy to fork.
-
 ---
 
 ## Per-file independent hunts
@@ -133,10 +130,6 @@ prompts/
 settings.example.toml    # template for settings.toml (gitignored)
 ```
 
-Code style (see [CLAUDE.md](CLAUDE.md)): ~150 LOC per file, ~30 LOC per
-function, no `Protocol`/`ABC`/`Generic` until there are two
-implementations, no defensive `try/except` for cases that can't happen.
-
 ---
 
 ## Externally validated findings
@@ -165,8 +158,7 @@ disclosure and intentionally not listed.
 
 ## Contact
 
-Questions, feedback, or interested in extended detection coverage:
-<localhost.detect@gmail.com>.
+<localhost.detect@gmail.com>
 
 ---
 

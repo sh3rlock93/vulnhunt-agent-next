@@ -10,9 +10,6 @@
 공개 접근 가능한 frontier 모델 위에 재구성한 것입니다 — 프리뷰 모델은 필요하지
 않습니다.
 
-스캐폴드 자체는 의도적으로 작게(파일당 ~150 LOC) 유지되어 있고, 단순하고
-포크하기 쉽도록 설계됐습니다.
-
 ---
 
 ## File-level 독립 hunt
@@ -130,10 +127,6 @@ prompts/
 settings.example.toml    # settings.toml 의 template (settings.toml 은 gitignored)
 ```
 
-코드 스타일 ([CLAUDE.md](CLAUDE.md) 참조): 파일당 ~150 LOC, 함수당 ~30 LOC,
-구현체가 둘 이상 생기기 전엔 `Protocol` / `ABC` / `Generic` 도입 X, 일어날 수
-없는 케이스에 대한 방어적 `try/except` X.
-
 ---
 
 ## Externally validated findings
@@ -159,8 +152,7 @@ settings.example.toml    # settings.toml 의 template (settings.toml 은 gitigno
 
 ## Contact
 
-질문, 피드백, 또는 확장 detection coverage 관심이 있으시면:
-<localhost.detect@gmail.com>.
+<localhost.detect@gmail.com>
 
 ---
 
