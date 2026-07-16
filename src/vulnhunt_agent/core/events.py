@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import json
-from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+from ..infrastructure.events import JsonlEventAdapter
 
 
 class EventBus:
@@ -11,18 +11,10 @@ class EventBus:
 
     def __init__(self, log_path: Path):
         self.log_path = log_path
-        self.log_path.parent.mkdir(parents=True, exist_ok=True)
+        self._adapter = JsonlEventAdapter(log_path)
 
     def emit(self, type: str, **data: Any) -> None:
-        event = {
-            "ts": datetime.now().isoformat(timespec="seconds"),
-            "type": type,
-            **data,
-        }
-        with self.log_path.open("a") as f:
-            f.write(json.dumps(event, ensure_ascii=False) + "\n")
+        self._adapter.append(type, **data)
 
     def read_all(self) -> list[dict]:
-        if not self.log_path.exists():
-            return []
-        return [json.loads(line) for line in self.log_path.read_text().splitlines() if line]
+        return self._adapter.read_all()
