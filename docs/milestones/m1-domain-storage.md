@@ -1,6 +1,6 @@
 # Milestone 1 — Domain contracts and durable state
 
-Status: In validation
+Status: Complete
 
 ## Scope
 
@@ -25,7 +25,7 @@ Status: In validation
 - [x] Legacy `confirmed` results import no higher than `poc_ready`.
 - [x] Findings without matching reproduction evidence fail the strict report policy.
 - [x] Existing baseline pipeline and Hunter contract tests remain green.
-- [ ] CI passes on Python 3.11, 3.12, and 3.13.
+- [x] CI passes on Python 3.11, 3.12, and 3.13.
 
 ## Verification commands
 
@@ -39,6 +39,7 @@ python -m pytest --cov=vulnhunt_agent --cov-report=term-missing \
 Local forward-compatibility run on Python 3.14.5: 31 tests passed with 57.51% branch
 coverage, and Ruff and mypy reported no findings. The supported-version CI matrix remains
 the release authority for Python 3.11–3.13.
+GitHub Actions runs `29491833405` and `29491851917` passed all three matrix jobs.
 
 ## Explicit boundary
 
