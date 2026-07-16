@@ -34,7 +34,12 @@ async def run_reviews(
             qstore.persist(task)
             bus.emit("review_start", file=task.file, group=gid, size=len(group_findings))
             trace = (review_dir / "trace.jsonl").open("a")
-            on_event = lambda t, **d: trace.write(json.dumps({"type": t, **d}, ensure_ascii=False) + "\n")
+
+            def on_event(event_type, **data):
+                return trace.write(
+                    json.dumps({"type": event_type, **data}, ensure_ascii=False) + "\n"
+                )
+
             try:
                 tools = HunterTools(repo, sandbox=None, poc_root=poc_roots)
                 agent = ReviewerAgent(

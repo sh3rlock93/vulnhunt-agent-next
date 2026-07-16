@@ -1,0 +1,15 @@
+{
+  "fixture": "python_insecure_app",
+  "weakness": "CWE-918",
+  "entrypoint": {
+    "path": "insecure_app/app.py",
+    "symbol": "fetch_url"
+  },
+  "sink": {
+    "path": "insecure_app/app.py",
+    "symbol": "urllib.request.urlopen"
+  },
+  "excluded_paths": [
+    "tests/test_placeholder.py"
+  ]
+}

@@ -30,7 +30,12 @@ async def run_clusterer(
     bus.emit("cluster_start", file=task.file, n_findings=len(findings))
 
     trace = (qstore.task_dir(task) / "cluster.trace.jsonl").open("a")
-    on_event = lambda t, **d: trace.write(json.dumps({"type": t, **d}, ensure_ascii=False) + "\n")
+
+    def on_event(event_type, **data):
+        return trace.write(
+            json.dumps({"type": event_type, **data}, ensure_ascii=False) + "\n"
+        )
+
     try:
         agent = ClustererAgent(client=client, on_event=on_event)
         result = await agent.cluster(task.file, findings)

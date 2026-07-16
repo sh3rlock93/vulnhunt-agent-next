@@ -1,7 +1,6 @@
 """Per-step result cards. Visual summaries of each step's output."""
 from __future__ import annotations
 
-import json
 from datetime import datetime
 
 import streamlit as st

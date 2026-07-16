@@ -2,7 +2,8 @@
 
 from . import cleanup
 from .base import ExecResult
-from .container import ENVIRONMENTS, ContainerExecutor, base_image_for, language_of
+from .container import ContainerExecutor, base_image_for, language_of
+from ..core.settings import ENVIRONMENTS
 
 __all__ = [
     "ENVIRONMENTS",

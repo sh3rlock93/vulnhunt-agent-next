@@ -3,9 +3,10 @@ from __future__ import annotations
 
 import asyncio
 import secrets
+import subprocess
 from pathlib import Path
 
-from ..core.settings import ENVIRONMENTS, ENV_TO_IMAGE
+from ..core.settings import ENV_TO_IMAGE
 from . import cleanup
 from .base import ExecResult
 
@@ -117,7 +118,7 @@ class ContainerExecutor:
             proc.kill()
             return ExecResult(exit_code=-1, stdout="", stderr="timeout", timed_out=True)
         return ExecResult(
-            exit_code=proc.returncode,
+            exit_code=proc.returncode if proc.returncode is not None else -1,
             stdout=stdout.decode(errors="replace"),
             stderr=stderr.decode(errors="replace"),
         )
@@ -135,16 +136,19 @@ class ContainerExecutor:
         proc = await self._run_cli("pull", self.image)
         _check(proc, f"pull '{self.image}'")
 
-    async def _run_cli(self, *args: str):
+    async def _run_cli(self, *args: str) -> subprocess.CompletedProcess[bytes]:
         proc = await asyncio.create_subprocess_exec(
             "docker", *args,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
         stdout, stderr = await proc.communicate()
-        proc.stdout = stdout
-        proc.stderr = stderr
-        return proc
+        return subprocess.CompletedProcess(
+            args=("docker", *args),
+            returncode=proc.returncode if proc.returncode is not None else -1,
+            stdout=stdout,
+            stderr=stderr,
+        )
 
 
 def _check(proc, action: str) -> None:

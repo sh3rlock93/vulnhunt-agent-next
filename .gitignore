@@ -150,6 +150,9 @@ poc/*
 # ----- Project dirs: drop entirely -----
 docs/*
 !docs/architecture-v2.md
+!docs/milestones/
+docs/milestones/*
+!docs/milestones/m0-baseline.md
 notes/
 tools/
 docker/local/

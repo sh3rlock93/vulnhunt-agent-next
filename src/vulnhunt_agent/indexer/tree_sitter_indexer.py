@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Literal
 
 import tree_sitter_c
 import tree_sitter_java
@@ -110,7 +111,7 @@ def _walk_python(node: Node, source: bytes, imports: list[str], symbols: list[Sy
             name = _field_text(child, "name", source)
             params = _field_text(child, "parameters", source) or "()"
             sig = f"def {name}{params}"
-            kind = "method" if parent_class else "function"
+            kind: Literal["method", "function"] = "method" if parent_class else "function"
             symbols.append(Symbol(
                 name=name, kind=kind, line=child.start_point[0] + 1,
                 signature=sig, parent=parent_class,
@@ -282,7 +283,7 @@ def _extract_js_symbol(node: Node, source: bytes, symbols: list[Symbol],
         return
     params = node.child_by_field_name("parameters")
     params_text = _text(params, source) if params else "()"
-    kind = "method" if parent_class else "function"
+    kind: Literal["method", "function"] = "method" if parent_class else "function"
     prefix = "method" if parent_class else "function"
     symbols.append(Symbol(
         name=name, kind=kind,

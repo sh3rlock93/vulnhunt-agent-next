@@ -37,8 +37,11 @@ async def run_hunt(store: RunStore, bus: EventBus) -> None:
     max_parallel = int(cfg.get("max_hunters_parallel", 3))
     max_iter = int(cfg.get("hunter_max_iterations", 100))
 
+    prepared_image = prepare.get("image")
     hunter_image = (
-        prepare.get("image") if prepare.get("status") == "ready" else base_image_for(env)
+        str(prepared_image)
+        if prepare.get("status") == "ready" and prepared_image
+        else base_image_for(env)
     )
     sandbox_info = finalize.sandbox_info(prepare, language_of(env))
 

@@ -4,7 +4,7 @@ import json
 from dataclasses import asdict, is_dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 RUNS_ROOT = Path(__file__).resolve().parents[3] / "runs"
 
@@ -66,7 +66,7 @@ class RunStore:
 
 def _to_jsonable(obj: Any) -> Any:
     if is_dataclass(obj):
-        return asdict(obj)
+        return asdict(cast(Any, obj))
     if isinstance(obj, list):
         return [_to_jsonable(x) for x in obj]
     if isinstance(obj, dict):
