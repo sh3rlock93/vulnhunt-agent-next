@@ -148,7 +148,8 @@ poc/*
 !poc/.gitkeep
 
 # ----- Project dirs: drop entirely -----
-docs/
+docs/*
+!docs/architecture-v2.md
 notes/
 tools/
 docker/local/
