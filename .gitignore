@@ -48,6 +48,7 @@ ipython_config.py
 
 # ----- Local config / secrets -----
 settings.toml
+!tests/fixtures/settings.toml
 *.pem
 *.key
 *.crt

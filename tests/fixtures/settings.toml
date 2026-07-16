@@ -1,0 +1,25 @@
+[defaults]
+provider = "test-bedrock"
+max_tokens = 4000
+
+[default_model]
+model_id = "test.model"
+
+[sandbox]
+environments = ["python:3.11", "python:3.12", "python:3.13"]
+
+[sandbox.images]
+"python:3.11" = "python:3.11-slim"
+"python:3.12" = "python:3.12-slim"
+"python:3.13" = "python:3.13-slim"
+
+[[providers]]
+name = "test-bedrock"
+kind = "bedrock_converse"
+region = "us-east-1"
+
+[[models]]
+label = "Test Model"
+model_id = "test.model"
+input_per_m = 1.0
+output_per_m = 2.0
