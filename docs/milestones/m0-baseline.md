@@ -1,6 +1,6 @@
 # Milestone 0 — Baseline and CI
 
-Status: Local gates passed; GitHub Actions verification pending
+Status: Complete
 
 ## Scope
 
@@ -19,7 +19,7 @@ Status: Local gates passed; GitHub Actions verification pending
 - [x] Analysis-engine coverage is at least 45%; UI and process entry points are excluded.
 - [x] Golden Filter → Rank → Selector output is stable.
 - [x] The vulnerable fixture proves attacker input reaches the expected sink without network access.
-- [ ] CI passes on Python 3.11, 3.12, and 3.13.
+- [x] CI passes on Python 3.11, 3.12, and 3.13.
 - [x] Existing `main` history remains available as `upstream/main` and `origin/main`.
 
 ## Local verification
@@ -35,6 +35,7 @@ python -m pytest --cov=vulnhunt_agent --cov-report=term-missing \
 
 Result: 17 tests passed, 45.38% branch coverage, and no Ruff or mypy findings.
 The CI matrix remains the release authority for the supported Python 3.11–3.13 range.
+GitHub Actions run `29489100441` passed all three matrix jobs.
 
 ## Explicit boundary
 
