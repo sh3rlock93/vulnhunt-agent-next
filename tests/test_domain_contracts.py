@@ -109,7 +109,7 @@ def test_legacy_confirmed_string_never_becomes_reproduced_or_reportable() -> Non
         converted,
         run_snapshot=HASH_A,
         evidence=[],
-        verdict=None,
+        verdicts=[],
     )
     assert not decision.allowed
     assert "independent reproduction evidence is missing" in decision.reasons
@@ -126,13 +126,19 @@ def test_strict_policy_promotes_only_snapshot_matched_reproduction() -> None:
         notes="Data flow and reproduction agree",
         reviewer="reviewer-1",
         cvss_vector="CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",
+        cwe_id="CWE-918",
+        evidence_ids=("ev-repro-1", "ev-repro-2"),
     )
+    second_verdict = verdict.model_copy(update={
+        "reviewer": "reviewer-2",
+        "prompt_version": "evidence-review-v1:alternate",
+    })
     policy = StrictReportPolicy()
     mismatch = policy.evaluate(
         finding,
         run_snapshot=HASH_B,
         evidence=[_reproduction(attempt=1), _reproduction(attempt=2)],
-        verdict=verdict,
+        verdicts=[verdict, second_verdict],
     )
     assert not mismatch.allowed
     assert (
@@ -144,7 +150,7 @@ def test_strict_policy_promotes_only_snapshot_matched_reproduction() -> None:
         finding,
         run_snapshot=HASH_A,
         evidence=[_reproduction(attempt=1)],
-        verdict=verdict,
+        verdicts=[verdict, second_verdict],
     )
     assert not one_attempt.allowed
 
@@ -168,7 +174,7 @@ def test_strict_policy_promotes_only_snapshot_matched_reproduction() -> None:
             _reproduction(attempt=2),
             failed_third,
         ],
-        verdict=verdict,
+        verdicts=[verdict, second_verdict],
     )
     assert not mixed.allowed
 
@@ -176,7 +182,7 @@ def test_strict_policy_promotes_only_snapshot_matched_reproduction() -> None:
         finding,
         run_snapshot=HASH_A,
         evidence=[_reproduction(attempt=1), _reproduction(attempt=2)],
-        verdict=verdict,
+        verdicts=[verdict, second_verdict],
     )
     assert promoted.state is FindingState.REPORTABLE
 

@@ -158,6 +158,7 @@ docs/milestones/*
 !docs/milestones/m2-sandbox-reproducer.md
 !docs/milestones/m25-codex-provider.md
 !docs/milestones/m3-c-native-analysis.md
+!docs/milestones/m4-evidence-review-reporting.md
 notes/
 tools/
 docker/local/

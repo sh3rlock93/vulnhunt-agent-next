@@ -95,8 +95,14 @@ async def test_reproducer_runs_twice_persists_evidence_and_unlocks_strict_report
             notes="Two clean runs reached the vulnerable sink",
             reviewer="reviewer-1",
             cvss_vector="CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",
+            cwe_id="CWE-918",
+            evidence_ids=tuple(item.evidence_id for item in outcome.evidence),
         )
     )
+    repository.save_verdict(verdict.model_copy(update={
+        "reviewer": "reviewer-2",
+        "prompt_version": "evidence-review-v1:alternate",
+    }))
     run = repository.get_run("run-1")
     assert run is not None
     bundle = StrictReportService(repository, artifacts).materialize(
@@ -106,7 +112,9 @@ async def test_reproducer_runs_twice_persists_evidence_and_unlocks_strict_report
         reviewer=verdict.reviewer,
         markdown="# Verified SSRF\n",
     )
-    assert bundle.report_path.read_text() == "# Verified SSRF\n"
+    assert bundle.report_path.read_text().startswith("# Unvalidated outbound URL\n")
+    assert bundle.json_path.is_file()
+    assert bundle.sarif_path.is_file()
     assert spec.source_snapshot in bundle.provenance_path.read_text()
     reportable = repository.get_candidate("cand-1")
     assert reportable is not None
@@ -189,6 +197,20 @@ def test_strict_report_never_materializes_without_reproduction_evidence(tmp_path
             notes="State was advanced without evidence",
             reviewer="reviewer-1",
             cvss_vector="CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",
+            cwe_id="CWE-918",
+            evidence_ids=("ev-missing-1", "ev-missing-2"),
+        )
+    )
+    repository.save_verdict(
+        ReviewVerdict(
+            candidate_id="cand-1",
+            verdict=Verdict.REAL,
+            notes="Second review also lacks independent evidence",
+            reviewer="reviewer-2",
+            prompt_version="evidence-review-v1:alternate",
+            cvss_vector="CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",
+            cwe_id="CWE-918",
+            evidence_ids=("ev-missing-1", "ev-missing-2"),
         )
     )
     with pytest.raises(ValueError, match="reproduction evidence is missing"):
@@ -224,6 +246,20 @@ async def test_strict_report_rejects_tampered_reproduction_artifact(tmp_path) ->
             notes="Evidence should be integrity checked",
             reviewer="reviewer-1",
             cvss_vector="CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",
+            cwe_id="CWE-918",
+            evidence_ids=tuple(item.evidence_id for item in outcome.evidence),
+        )
+    )
+    repository.save_verdict(
+        ReviewVerdict(
+            candidate_id="cand-1",
+            verdict=Verdict.REAL,
+            notes="Second reviewer cites the same clean reproductions",
+            reviewer="reviewer-2",
+            prompt_version="evidence-review-v1:alternate",
+            cvss_vector="CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",
+            cwe_id="CWE-918",
+            evidence_ids=tuple(item.evidence_id for item in outcome.evidence),
         )
     )
     stdout_digest = outcome.evidence[0].stdout_artifact

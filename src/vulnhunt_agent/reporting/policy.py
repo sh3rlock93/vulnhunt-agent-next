@@ -3,8 +3,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from ..domain.schemas import CandidateFinding, Evidence, EvidenceKind, ReviewVerdict, Verdict
+from ..domain.schemas import CandidateFinding, Evidence, EvidenceKind, ReviewVerdict
 from ..domain.states import FindingState, require_finding_transition
+from ..reviewing.consensus import decide_consensus
 
 
 @dataclass(frozen=True)
@@ -16,7 +17,7 @@ class PolicyDecision:
 class StrictReportPolicy:
     """Require independent, snapshot-matched reproduction before reporting."""
 
-    version = "strict-v1"
+    version = "strict-v2"
 
     def evaluate(
         self,
@@ -24,19 +25,19 @@ class StrictReportPolicy:
         *,
         run_snapshot: str | None,
         evidence: list[Evidence],
-        verdict: ReviewVerdict | None,
+        verdicts: list[ReviewVerdict],
     ) -> PolicyDecision:
         reasons: list[str] = []
         if finding.state is not FindingState.REVIEWER_VERIFIED:
             reasons.append("finding is not reviewer_verified")
         if not run_snapshot:
             reasons.append("run has no immutable source snapshot")
-        if verdict is None:
-            reasons.append("review verdict is missing")
-        elif verdict.candidate_id != finding.candidate_id:
-            reasons.append("review verdict belongs to another finding")
-        elif verdict.verdict is not Verdict.REAL:
-            reasons.append("review verdict is not real")
+        consensus = decide_consensus(finding, verdicts, evidence)
+        if consensus.status.value != "verified":
+            reasons.append(
+                "review consensus is not verified"
+                + (": " + "; ".join(consensus.reasons) if consensus.reasons else "")
+            )
         if not finding.preconditions:
             reasons.append("structured preconditions are missing")
 
@@ -78,13 +79,13 @@ class StrictReportPolicy:
         *,
         run_snapshot: str | None,
         evidence: list[Evidence],
-        verdict: ReviewVerdict | None,
+        verdicts: list[ReviewVerdict],
     ) -> CandidateFinding:
         decision = self.evaluate(
             finding,
             run_snapshot=run_snapshot,
             evidence=evidence,
-            verdict=verdict,
+            verdicts=verdicts,
         )
         if not decision.allowed:
             raise ValueError("strict report policy blocked finding: " + "; ".join(decision.reasons))

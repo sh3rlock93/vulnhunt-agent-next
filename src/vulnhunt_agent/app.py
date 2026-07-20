@@ -10,7 +10,7 @@ from vulnhunt_agent.pipeline import STEPS
 from vulnhunt_agent.ui.cost import render_cost_block
 from vulnhunt_agent.ui.sidebar import sidebar
 from vulnhunt_agent.ui.steps import BACKGROUND_STEPS, render_running_banner, render_step
-from vulnhunt_agent.ui.views import render_final_report
+from vulnhunt_agent.ui.views import render_evidence_status, render_final_report
 
 st.set_page_config(page_title="Vulnerability Hunting Agent", layout="wide")
 
@@ -27,6 +27,7 @@ def main_panel(store: RunStore) -> None:
         render_step(store, step)
 
     render_final_report(store)
+    render_evidence_status(store)
 
     st.divider()
     st.header("Cost")

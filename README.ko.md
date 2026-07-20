@@ -21,8 +21,10 @@
 상위 랭크 파일마다 독립 hunter 세션을 실행합니다 — fresh context,
 히스토리 공유 X.
 
-별도 **Reviewer** 단계가 PoC 를 재실행하고, 재현되지 않으면 group 통째로
-drop 합니다. 파일 단위 bound 가 결정론적 coverage 와 깔끔한 병렬화를 만듭니다.
+별도 **Reproducer**가 각 PoC를 깨끗한 컨테이너에서 두 번 실행합니다.
+증거만 읽는 **Reviewer**는 확정·기각하거나 선언형 재현 변형을 요청할 수 있지만
+직접 명령을 실행할 수 없습니다. 파일 단위 bound가 결정론적 coverage와
+깔끔한 병렬화를 만듭니다.
 
 이 세 조각(Hunter · Clusterer · Reviewer) 은 **Mythos 의 빌딩 블록(Ranker ·
 Hunters · Reviewer) 을 공개 모델 환경에 맞춰 변형(adapt)** 한 것입니다.
@@ -50,8 +52,9 @@ Filter → Rank → Selector → Sandbox Prepare → Hunt (Hunter → Cluster �
    `network: none`, `/code` read-only, `/workspace` tmpfs. C 네이티브 PoC
    바이너리는 분리된 실행 가능 tmpfs인 `/workspace/exec`에 컴파일됩니다.
 6. **Cluster** — 같은 파일 내 near-duplicate finding 을 group.
-7. **Review** — verdict + CVSS + writeup.
-8. **Report** — JSON + Markdown.
+7. **Review** — evidence citation + CVSS/CWE. High/Critical은 서로 다른
+   model/prompt 구성 두 개가 필요.
+8. **Report** — consensus를 통과한 canonical JSON + Markdown + SARIF 2.1.0.
 
 각 Hunter는 fresh 세션입니다. 히스토리를 공유하지 않고, 독립 실행의 다양성이
 그 자체로 이 도구의 핵심입니다.
@@ -93,6 +96,17 @@ tree-sitter-c로 인덱싱하고 Flex/Bison의 `.l`/`.y`도 랭킹과 파일 간
 [`docs/milestones/m3-c-native-analysis.md`](docs/milestones/m3-c-native-analysis.md)에
 정리되어 있습니다.
 
+증거 기반 review와 strict export 계약은
+[`docs/milestones/m4-evidence-review-reporting.md`](docs/milestones/m4-evidence-review-reporting.md)에
+정리되어 있습니다. V2 metadata store가 준비된 경우 다음 명령으로 consensus를
+통과한 finding을 내보낼 수 있습니다.
+
+```bash
+vulnhunt --db .vulnhunt/state.db export RUN_ID \
+  --artifacts .vulnhunt/artifacts \
+  --output output
+```
+
 기본 `openai_auto` provider는 설정한 key 환경변수를 먼저 확인합니다.
 값이 있으면 Responses API를 사용하고, 없으면 로그인된 Codex CLI를
 호출합니다. 실행 중 API 오류를 다른 과금 경로로 몰래 전환하지는 않습니다.
@@ -104,9 +118,10 @@ Responses API입니다. Bedrock은 명시적으로 선택할 수 있는 provider
   <img src="assets/img/ui_screenshot.png" alt="Streamlit UI — mid-run" width="90%">
 </p>
 
-run 이 끝나면 Final Report 가 group된 finding 을 CVSS 순으로 정렬해 보여주고,
-각 행을 펼치면 Reviewer 요약 · CWE / CVSS vector · 샌드박스에서 재현된 PoC 를
-포함한 writeup 이 나옵니다.
+V2 metadata가 있는 run은 UI에 finding state, evidence 수, Reviewer 수,
+consensus도 표시됩니다. Strict export에는 source snapshot, 재현 command/oracle,
+evidence ID, CVSS/CWE, Reviewer/policy provenance, 영향받는 code location이
+포함됩니다.
 
 ---
 
@@ -141,6 +156,8 @@ src/vulnhunt_agent/
   ui/            streamlit (sidebar, steps, result_cards, cost)
   sandbox/       Docker executor
   repo/          git/local source resolver
+  reviewing/     evidence packet, Reviewer agent, consensus
+  reporting/     strict policy, Markdown/JSON/SARIF exporter
 prompts/
   hunters/*.md           # language hunter
   rankers/<lang>.md      # 언어별 ranker hint
