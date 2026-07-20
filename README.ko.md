@@ -58,19 +58,24 @@ Filter → Rank → Selector → Sandbox Prepare → Hunt (Hunter → Cluster �
 
 ## Quick start
 
-> **요구사항:** Python 3.11+, Docker, Bedrock 접근 가능한 AWS 자격증명 (Opus 4.7).
+> **요구사항:** Python 3.11+, Docker, OpenAI Platform API key 또는
+> ChatGPT 구독으로 로그인한 Codex CLI.
 
 ```bash
 # 1. install
-git clone https://github.com/ksgsslee/vulnhunt-agent.git
-cd vulnhunt-agent
+git clone https://github.com/sh3rlock93/vulnhunt-agent-next.git
+cd vulnhunt-agent-next
 pip install -e .
 
-# 2. config — template 복사 후 provider/region/key 편집
+# 2. config
 cp settings.example.toml settings.toml
 
-# 3. credentials (Bedrock 직결: SSO / role / AWS_PROFILE 모두 OK)
-aws sso login
+# 3a. 기본 경로: OpenAI Responses API (Platform 과금)
+export OPENAI_API_KEY="..."
+
+# 3b. OPENAI_API_KEY가 없을 때 fallback: ChatGPT 구독
+codex login
+codex login status
 
 # 4. UI 실행
 streamlit run src/vulnhunt_agent/app.py
@@ -79,9 +84,12 @@ streamlit run src/vulnhunt_agent/app.py
 사이드바에서: repo (git URL 또는 로컬 경로) 선택 → **Environment** 선택
 (예: `python:3.12`, `java:21`) → **Save** → 위에서부터 단계별 실행.
 
-**Troubleshooting** — Bedrock 이 `AccessDeniedException` 를 반환하면 Bedrock
-콘솔에서 사용 모델의 액세스를 활성화하세요. 모델 + provider 카탈로그는
-[settings.toml](settings.example.toml) 에 있습니다.
+기본 `openai_auto` provider는 설정한 key 환경변수를 먼저 확인합니다.
+값이 있으면 Responses API를 사용하고, 없으면 로그인된 Codex CLI를
+호출합니다. 실행 중 API 오류를 다른 과금 경로로 몰래 전환하지는 않습니다.
+CLI fallback은 호출 오버헤드가 커서 로컬 사용에 적합하며 자동화의 기본 경로는
+Responses API입니다. Bedrock은 명시적으로 선택할 수 있는 provider로 계속
+지원합니다.
 
 <p align="center">
   <img src="assets/img/ui_screenshot.png" alt="Streamlit UI — mid-run" width="90%">
@@ -99,15 +107,18 @@ run 이 끝나면 Final Report 가 group된 finding 을 CVSS 순으로 정렬해
 
 **[settings.toml](settings.example.toml)** (gitignored) —
 `settings.example.toml` 에서 복사. **`[[providers]]`** 리스트
-(Bedrock 직결, bedrock-mantle, LiteLLM, 사내 OpenAI-compatible proxy
-등) + **`[[models]]`** 카탈로그를 모두 담음. model 마다 provider 한 개를
-가리킵니다. hunter / reviewer / ranker 모델은 사이드바에서 독립 swap.
+(`openai_auto`, Bedrock 직결, bedrock-mantle, LiteLLM, 사내
+OpenAI-compatible proxy 등) + **`[[models]]`** 카탈로그를 모두 담습니다.
+secret은 TOML에 넣지 말고 provider의 `api_key_env`로 전달합니다. model마다
+provider 한 개를 가리키며 hunter / reviewer / ranker 모델은 사이드바에서
+독립 swap할 수 있습니다.
 
 **[prompts/](prompts/)** — 모든 프롬프트가 여기:
 - `prompts/hunters/python.md`, `java.md` — 광범위한 언어별 review prompt.
 - `prompts/rankers/<lang>.md` — 언어별 ranker hint.
 
-이게 전부 — `.env`, `~/.scanner/`, 분산된 config 없음.
+dotenv는 자동 로드하지 않습니다. 구독 fallback 인증은 `codex login`에
+위임하며 Codex 자격증명 파일을 직접 읽거나 복사하지 않습니다.
 
 ---
 

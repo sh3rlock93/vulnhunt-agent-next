@@ -59,19 +59,24 @@ of independent runs is the point.
 
 ## Quick start
 
-> **Requirements:** Python 3.11+, Docker, AWS credentials with Bedrock access (Opus 4.7 enabled).
+> **Requirements:** Python 3.11+, Docker, and either an OpenAI Platform API
+> key or a Codex CLI login backed by a ChatGPT subscription.
 
 ```bash
 # 1. install
-git clone https://github.com/ksgsslee/vulnhunt-agent.git
-cd vulnhunt-agent
+git clone https://github.com/sh3rlock93/vulnhunt-agent-next.git
+cd vulnhunt-agent-next
 pip install -e .
 
-# 2. config — copy the template, edit provider/region/keys
+# 2. config
 cp settings.example.toml settings.toml
 
-# 3. credentials (Bedrock direct: SSO/role/AWS_PROFILE all work)
-aws sso login
+# 3a. preferred path: OpenAI Responses API (Platform billing)
+export OPENAI_API_KEY="..."
+
+# 3b. fallback when OPENAI_API_KEY is absent: ChatGPT subscription
+codex login
+codex login status
 
 # 4. run the UI
 streamlit run src/vulnhunt_agent/app.py
@@ -81,9 +86,12 @@ In the sidebar: pick a repo (git URL or local path), pick an
 **Environment** (e.g. `python:3.12`, `java:21`), click **Save**,
 then run each step from top to bottom.
 
-**Troubleshooting** — if Bedrock returns `AccessDeniedException`, enable
-model access for your chosen model in the Bedrock console. The model and
-provider catalog lives in [settings.toml](settings.example.toml).
+The default `openai_auto` provider checks the configured key environment
+variable first. It uses the Responses API when the key is non-empty; otherwise
+it invokes the logged-in Codex CLI. Runtime API failures do not silently switch
+billing paths. The CLI fallback has higher per-call overhead and is intended for
+local use; the Responses API remains the preferred automation path. Bedrock
+remains available as an explicit provider.
 
 <p align="center">
   <img src="assets/img/ui_screenshot.png" alt="Streamlit UI — mid-run" width="90%">
@@ -100,17 +108,20 @@ CVSS vector, and the PoC that reproduced in the sandbox.
 Two locations at the repo root, both edited by the operator:
 
 **[settings.toml](settings.example.toml)** (gitignored) — copy from
-`settings.example.toml`. Holds the **`[[providers]]`** list (Bedrock
-direct, bedrock-mantle, LiteLLM, in-house OpenAI-compatible proxies)
-and the **`[[models]]`** catalog. Each model points at one provider.
-Swap the hunter / reviewer / ranker model independently from the sidebar.
+`settings.example.toml`. Holds the **`[[providers]]`** list (`openai_auto`,
+Bedrock direct, bedrock-mantle, LiteLLM, in-house OpenAI-compatible proxies)
+and the **`[[models]]`** catalog. Secrets should be supplied through the
+provider's `api_key_env`, not committed to TOML. Each model points at one
+provider. Swap the hunter / reviewer / ranker model independently from the
+sidebar.
 
 **[prompts/](prompts/)** — every prompt lives here:
 - `prompts/hunters/python.md`, `java.md` — broad language-aware
   review prompts.
 - `prompts/rankers/<lang>.md` — per-language ranker hint.
 
-That's it — no `.env`, no `~/.scanner/`, no scattered config.
+No dotenv file is loaded. The subscription fallback delegates authentication
+to `codex login` and never reads or copies Codex credential files.
 
 ---
 

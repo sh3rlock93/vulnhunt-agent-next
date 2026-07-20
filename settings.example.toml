@@ -2,14 +2,14 @@
 #
 #   cp settings.example.toml settings.toml
 #
-# settings.toml is gitignored — your real values + secrets stay local.
+# settings.toml is gitignored. Keep secrets in named environment variables.
 
 [defaults]
-provider   = "bedrock"     # provider used when a model has no `provider` field
+provider   = "openai-auto" # provider used when a model has no `provider` field
 max_tokens = 4000
 
 [default_model]
-model_id = "global.anthropic.claude-opus-4-7"
+model_id = "gpt-5.6-sol"
 
 # ---- sandbox: environments shown in the sidebar + base Docker images ----
 
@@ -29,14 +29,26 @@ environments = [
 
 # ---- providers: backends the scanner can call ----
 #
-# Two kinds:
+# Three kinds:
+#   openai_auto      — OPENAI_API_KEY -> Responses API; otherwise `codex login`
 #   bedrock_converse  — boto3 Bedrock Converse API (SigV4 via AWS_PROFILE/SSO/role)
 #   openai_compat     — OpenAI Responses API over HTTP (Bearer token);
 #                       used for bedrock-mantle, LiteLLM, in-house proxies, etc.
 #
 # Required fields:
+#   openai_auto     : name, kind, api_key_env; endpoint is optional
 #   bedrock_converse: name, kind, region
-#   openai_compat   : name, kind, endpoint, api_key
+#   openai_compat   : name, kind, endpoint, api_key_env (or legacy api_key)
+
+[[providers]]
+name                  = "openai-auto"
+kind                  = "openai_auto"
+endpoint              = "https://api.openai.com/v1"
+api_key_env           = "OPENAI_API_KEY"
+reasoning_effort      = "medium"
+codex_command         = "codex"
+codex_timeout_seconds = 900
+codex_max_parallel    = 2
 
 [[providers]]
 name   = "bedrock"
@@ -49,58 +61,73 @@ region = "us-west-2"
 # name     = "mantle"
 # kind     = "openai_compat"
 # endpoint = "https://bedrock-mantle.us-east-2.api.aws/openai/v1"
-# api_key  = "REPLACE_ME"
+# api_key_env = "MANTLE_API_KEY"
 
 # [[providers]]
 # name     = "litellm"
 # kind     = "openai_compat"
 # endpoint = "https://litellm.acme.internal/v1"
-# api_key  = "REPLACE_ME"
+# api_key_env = "LITELLM_API_KEY"
 
 
 # ---- models: catalog. each model points at one provider. ----
 #
 # `provider` is optional — defaults to [defaults].provider above.
 # Pricing is USD per 1M tokens.
+# Omit pricing when a model can use subscription credits; the UI then reports
+# tokens but does not mislabel subscription consumption as a dollar estimate.
+
+[[models]]
+label            = "GPT-5.6 Sol"
+provider         = "openai-auto"
+model_id         = "gpt-5.6-sol"
+supports_caching = true
 
 [[models]]
 label    = "Opus 4.7"
+provider = "bedrock"
 model_id = "global.anthropic.claude-opus-4-7"
 input_per_m  = 15.0
 output_per_m = 75.0
 
 [[models]]
 label    = "Opus 4.8"
+provider = "bedrock"
 model_id = "global.anthropic.claude-opus-4-8"
 input_per_m  = 15.0
 output_per_m = 75.0
 
 [[models]]
 label    = "Opus 4.6"
+provider = "bedrock"
 model_id = "global.anthropic.claude-opus-4-6-v1"
 input_per_m  = 15.0
 output_per_m = 75.0
 
 [[models]]
 label    = "Sonnet 4.6"
+provider = "bedrock"
 model_id = "global.anthropic.claude-sonnet-4-6"
 input_per_m  = 3.0
 output_per_m = 15.0
 
 [[models]]
 label    = "Sonnet 4.5"
+provider = "bedrock"
 model_id = "global.anthropic.claude-sonnet-4-5-20250929-v1:0"
 input_per_m  = 3.0
 output_per_m = 15.0
 
 [[models]]
 label    = "Haiku 4.5"
+provider = "bedrock"
 model_id = "global.anthropic.claude-haiku-4-5-20251001"
 input_per_m  = 1.0
 output_per_m = 5.0
 
 [[models]]
 label    = "Kimi K2.5"
+provider = "bedrock"
 model_id = "moonshotai.kimi-k2.5"
 input_per_m      = 0.60
 output_per_m     = 3.00
@@ -108,6 +135,7 @@ supports_caching = false
 
 [[models]]
 label    = "Kimi K2 Thinking"
+provider = "bedrock"
 model_id = "moonshot.kimi-k2-thinking"
 input_per_m      = 0.60
 output_per_m     = 2.50

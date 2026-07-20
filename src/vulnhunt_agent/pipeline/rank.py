@@ -94,6 +94,12 @@ async def run_rank(store: RunStore, bus: EventBus) -> None:
 
     ranker_model = cfg.get("model_id_ranker") or cfg["model_id"]
     client = LLMClient(model_id=ranker_model, max_tokens=BATCH_MAX_TOKENS)
+    bus.emit(
+        "model_transport",
+        scope="ranker",
+        model_id=ranker_model,
+        transport=getattr(client, "transport", "bedrock_converse"),
+    )
     sem = asyncio.Semaphore(MAX_CONCURRENCY)
 
     system_prompt = SYSTEM_PROMPT

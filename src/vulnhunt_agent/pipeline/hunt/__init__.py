@@ -61,6 +61,18 @@ async def run_hunt(store: RunStore, bus: EventBus) -> None:
 
     hunter_client = LLMClient(model_id=cfg["model_id"])
     reviewer_client = _maybe_other_client(cfg, "model_id_reviewer", hunter_client, bus)
+    bus.emit(
+        "model_transport",
+        scope="hunter",
+        model_id=cfg["model_id"],
+        transport=getattr(hunter_client, "transport", "bedrock_converse"),
+    )
+    bus.emit(
+        "model_transport",
+        scope="reviewer",
+        model_id=cfg.get("model_id_reviewer") or cfg["model_id"],
+        transport=getattr(reviewer_client, "transport", "bedrock_converse"),
+    )
 
     hunter_sem = asyncio.Semaphore(max_parallel)
     review_sem = asyncio.Semaphore(max_parallel)
