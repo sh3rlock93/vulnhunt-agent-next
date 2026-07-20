@@ -23,7 +23,7 @@ from ...domain.states import RunState
 from ...infrastructure.sqlite_repository import SqliteRepository
 from ...prompts import hunters_for
 from ...sandbox import base_image_for, language_of
-from ...scheduling import build_shadow_plan, total_usage
+from ...scheduling import build_routing_plan, total_usage
 from .. import finalize
 from ..registry import Step, register
 from .cluster import run_clusterer
@@ -58,26 +58,44 @@ async def run_hunt(store: RunStore, bus: EventBus) -> None:
     hunters = _resolve_hunter_selection(
         store.dir / "steps", language_of(env)
     )
-    pairs = [(f, h) for f in files for h in hunters]
-    work_items = build_shadow_plan(
+    routing_plan = build_routing_plan(
         run_id=store.dir.name,
         source_snapshot=source_snapshot,
         selected_files=files,
-        hunters=hunters,
+        enabled_hunters=hunters,
         analysis=analysis,
     )
+    if routing_plan.uncovered_critical_sink_ids:
+        raise RuntimeError(
+            "signal router left critical sinks uncovered: "
+            + ", ".join(routing_plan.uncovered_critical_sink_ids)
+        )
+    work_items = routing_plan.work_items
+    pairs = [
+        (item.seed_file, item.hunter)
+        for item in work_items
+    ]
     by_pair = {
         (item.seed_file, item.hunter): item
         for item in work_items
     }
     store.save_step("hunt_plan", {
-        "mode": "shadow",
-        "policy_version": (
-            work_items[0].planning_policy if work_items
-            else "legacy-cartesian-shadow-v1"
+        "mode": "signal",
+        "policy_version": routing_plan.policy_version,
+        "execution_changed": True,
+        "legacy_pairs": routing_plan.legacy_sessions,
+        "scheduled_sessions": routing_plan.scheduled_sessions,
+        "session_reduction_percent": routing_plan.session_reduction_percent,
+        "detected_critical_sink_ids": list(
+            routing_plan.detected_critical_sink_ids
         ),
-        "execution_changed": False,
-        "legacy_pairs": len(pairs),
+        "covered_critical_sink_ids": list(
+            routing_plan.covered_critical_sink_ids
+        ),
+        "uncovered_critical_sink_ids": list(
+            routing_plan.uncovered_critical_sink_ids
+        ),
+        "forced_files": list(routing_plan.forced_files),
         "work_items": [
             item.model_dump(mode="json")
             for item in work_items
@@ -88,7 +106,7 @@ async def run_hunt(store: RunStore, bus: EventBus) -> None:
     queue = qstore.init_from_pairs(pairs)
 
     bus.emit("step_start", step="hunt",
-             total=len(queue.tasks), parallel=max_parallel, max_iter=max_iter,
+             total=len(work_items), parallel=max_parallel, max_iter=max_iter,
              image=hunter_image, hunters=hunters)
 
     hunter_client = LLMClient(model_id=cfg["model_id"])

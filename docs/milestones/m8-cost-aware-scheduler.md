@@ -1,6 +1,6 @@
 # M8 — Cost-aware slice scheduling
 
-Status: In progress (PR 1 of 6 complete)
+Status: In progress (PR 2 of 6 complete)
 
 ## Goal
 
@@ -42,11 +42,10 @@ cannot perturb identity.
 
 ## Remaining increments
 
-1. Signal-aware Hunter router.
-2. Slice queue and M7 lease integration.
-3. Hard budgets and adaptive iteration limits.
-4. Shared immutable context cache.
-5. Git-diff incremental scanning and final benchmark gates.
+1. Slice queue and M7 lease integration.
+2. Hard budgets and adaptive iteration limits.
+3. Shared immutable context cache.
+4. Git-diff incremental scanning and final benchmark gates.
 
 ## PR 1 acceptance gates
 
@@ -56,3 +55,36 @@ cannot perturb identity.
 - [x] Usage records never expose provider credentials.
 - [x] API pricing is optional and subscription usage remains unpriced.
 - [x] Repeated reads and PoC/sandbox activity are measured.
+
+## PR 2 — Signal-aware Hunter router
+
+The signal router replaces the Cartesian product in active execution. It scores
+file-local graph signals, grammar boundaries, and cross-file slice context
+against the six native specialists:
+
+- indexed writes, copies, sizes, and integer conversions → Bounds & Integers;
+- allocation/release and ownership signals → Memory Lifetime;
+- Flex/Bison files and parser-flow context → Parser State;
+- formats, commands, paths, environment, and dynamic loading → Injection & Format;
+- concurrency-state signals → Concurrency & Global State;
+- error-contract signals → Error Contracts.
+
+An ordinary file receives one primary specialist. A risk-5 cross-file sink may
+receive one secondary specialist when a second discipline is materially
+relevant. Critical specialists are forced even when they were not manually
+enabled, and a critical sink file omitted by an upstream selector is put back
+into the plan. Unknown critical categories receive a deterministic fallback.
+The hunt step refuses to start if the resulting plan reports any uncovered
+critical sink.
+
+On the parser-to-index-write regression fixture, routing reduces nine legacy
+sessions to four while preserving 100% of detected critical-sink coverage.
+
+## PR 2 acceptance gates
+
+- [x] Reordered files and enabled Hunters produce the same plan and work IDs.
+- [x] Every detected critical sink maps to at least one scheduled work item.
+- [x] A disabled but required critical specialist is automatically included.
+- [x] The libcue-shaped regression schedules Bounds and Parser specialists.
+- [x] The regression reduces Hunter sessions by more than 50%.
+- [x] The UI reports legacy sessions, scheduled sessions, reduction, and coverage.
