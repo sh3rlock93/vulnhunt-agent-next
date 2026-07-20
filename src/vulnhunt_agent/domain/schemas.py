@@ -390,6 +390,42 @@ class HunterWorkItem(DomainModel):
         return self
 
 
+class HunterRoutingPlan(DomainModel):
+    policy_version: str = Field(min_length=1)
+    mode: str = Field(default="signal", pattern=r"^(signal|legacy)$")
+    legacy_sessions: int = Field(ge=0)
+    work_items: tuple[HunterWorkItem, ...] = ()
+    detected_critical_sink_ids: tuple[str, ...] = ()
+    covered_critical_sink_ids: tuple[str, ...] = ()
+    uncovered_critical_sink_ids: tuple[str, ...] = ()
+    forced_files: tuple[str, ...] = ()
+
+    @model_validator(mode="after")
+    def validate_routing_coverage(self) -> "HunterRoutingPlan":
+        detected = set(self.detected_critical_sink_ids)
+        covered = set(self.covered_critical_sink_ids)
+        uncovered = set(self.uncovered_critical_sink_ids)
+        if covered | uncovered != detected or covered & uncovered:
+            raise ValueError("critical-sink routing coverage is inconsistent")
+        work_ids = [item.work_id for item in self.work_items]
+        if len(set(work_ids)) != len(work_ids):
+            raise ValueError("routing plan contains duplicate work IDs")
+        return self
+
+    @property
+    def scheduled_sessions(self) -> int:
+        return len(self.work_items)
+
+    @property
+    def session_reduction_percent(self) -> float:
+        if not self.legacy_sessions:
+            return 0.0
+        return round(
+            (1 - self.scheduled_sessions / self.legacy_sessions) * 100,
+            2,
+        )
+
+
 class BudgetPolicy(DomainModel):
     """Hard scheduling limits. Token limits work for API and subscription modes."""
 

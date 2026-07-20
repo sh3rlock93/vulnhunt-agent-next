@@ -20,11 +20,21 @@ def render_hunt_view(store: RunStore) -> None:
     _render_hunter_picker(store)
     plan = store.load_step("hunt_plan") or {}
     if plan:
+        mode = plan.get("mode", "legacy")
+        scheduled = plan.get("scheduled_sessions", len(plan.get("work_items", [])))
+        legacy = plan.get("legacy_pairs", scheduled)
+        reduction = plan.get("session_reduction_percent", 0)
         st.caption(
-            f"Scheduler: {plan.get('mode', 'legacy')} · "
-            f"{plan.get('legacy_pairs', len(plan.get('work_items', [])))} planned sessions · "
-            "shadow mode does not alter execution"
+            f"Scheduler: {mode} · {scheduled} sessions "
+            f"(legacy {legacy}, {reduction:.1f}% reduction) · "
+            f"critical sinks {len(plan.get('covered_critical_sink_ids', []))}/"
+            f"{len(plan.get('detected_critical_sink_ids', []))} covered"
         )
+        if plan.get("uncovered_critical_sink_ids"):
+            st.error(
+                "Critical sinks were not routed: "
+                + ", ".join(plan["uncovered_critical_sink_ids"])
+            )
 
     qstore = HuntQueueStore(store.dir / "hunters")
     queue = qstore.load()
