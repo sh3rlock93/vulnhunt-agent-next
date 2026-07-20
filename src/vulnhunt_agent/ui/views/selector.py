@@ -15,10 +15,18 @@ def render_selector_view(store: RunStore) -> None:
         return
 
     rows = [
-        {"selected": f["path"] in saved, "score": f["score"], "file": f["path"]}
+        {
+            "selected": f["path"] in saved,
+            "risk": f.get("analysis_priority", 0),
+            "score": f["score"],
+            "coverage": ", ".join(f.get("coverage_reasons", [])),
+            "file": f["path"],
+        }
         for f in files
     ]
-    rows.sort(key=lambda r: (not r["selected"], -r["score"], r["file"]))
+    rows.sort(key=lambda r: (
+        not r["selected"], -r["risk"], -r["score"], r["file"]
+    ))
 
     query = st.text_input("Search file", "", key="selector_search").strip().lower()
     shown = [r for r in rows if not query or query in r["file"].lower()]
@@ -28,7 +36,11 @@ def render_selector_view(store: RunStore) -> None:
         shown,
         column_config={
             "selected": st.column_config.CheckboxColumn("✓", width="small"),
+            "risk": st.column_config.NumberColumn(
+                "Graph risk", disabled=True, width="small"
+            ),
             "score": st.column_config.NumberColumn("Score", disabled=True, width="small"),
+            "coverage": st.column_config.TextColumn("Coverage", disabled=True),
             "file": st.column_config.TextColumn("File", disabled=True),
         },
         hide_index=True, use_container_width=True, key="selector_editor",

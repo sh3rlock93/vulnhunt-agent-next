@@ -159,11 +159,14 @@ docs/milestones/*
 !docs/milestones/m25-codex-provider.md
 !docs/milestones/m3-c-native-analysis.md
 !docs/milestones/m4-evidence-review-reporting.md
+!docs/milestones/m5-c-analysis-graph.md
 notes/
 tools/
 docker/local/
 prompts/hunters/*/
 prompts/rankers/*/
+!prompts/hunters/c/
+!prompts/hunters/c/*.md
 
 # ----- Claude / AI tool caches (keep shared config, drop local state) -----
 .claude/*

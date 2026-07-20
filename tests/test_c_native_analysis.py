@@ -9,6 +9,7 @@ from vulnhunt_agent.core.events import EventBus
 from vulnhunt_agent.core.run_store import RunStore
 from vulnhunt_agent.indexer.tree_sitter_indexer import TreeSitterIndexer
 from vulnhunt_agent.pipeline.filter_files import run_filter
+from vulnhunt_agent.pipeline.hunt import _resolve_hunter_selection
 from vulnhunt_agent.pipeline.rank import _index_with_text_fallbacks
 from vulnhunt_agent.pipeline.sandbox_prepare import _install_cmds, _verify_cmds
 from vulnhunt_agent.prompts import hunters_for, ranker_addendum
@@ -58,11 +59,39 @@ async def test_c_filter_and_tree_sitter_index(tmp_path) -> None:
 
 def test_c_prompt_catalog_is_native_and_sanitizer_aware() -> None:
     hunters = hunters_for("c")
-    assert [hunter.name for hunter in hunters] == ["c-native"]
-    assert hunters[0].default is True
-    assert "/workspace/exec" in hunters[0].system_prompt
-    assert "signed/unsigned" in hunters[0].system_prompt
+    assert len(hunters) == 6
+    assert {hunter.name for hunter in hunters} == {
+        "c-bounds-integers",
+        "c-concurrency-state",
+        "c-error-contracts",
+        "c-injection-format",
+        "c-memory-lifetime",
+        "c-parser-state",
+    }
+    assert {hunter.name for hunter in hunters if hunter.default} == {
+        "c-bounds-integers",
+        "c-memory-lifetime",
+        "c-parser-state",
+    }
+    assert "signed/unsigned" in next(
+        item.system_prompt for item in hunters
+        if item.name == "c-bounds-integers"
+    )
     assert "lexer/parser" in ranker_addendum("c")
+
+
+def test_c_hunt_defaults_work_without_rendering_the_ui(tmp_path) -> None:
+    steps = tmp_path / "steps"
+
+    assert set(_resolve_hunter_selection(steps, "c")) == {
+        "c-bounds-integers",
+        "c-memory-lifetime",
+        "c-parser-state",
+    }
+
+    steps.mkdir()
+    (steps / "hunter_selection.json").write_text('{"hunters": []}')
+    assert _resolve_hunter_selection(steps, "c") == []
 
 
 @pytest.mark.parametrize(

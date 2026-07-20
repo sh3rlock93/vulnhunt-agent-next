@@ -64,6 +64,9 @@ If nothing significant, return an empty findings array."""
 USER_TEMPLATE = """# Target file
 {target}
 
+# Deterministic analysis slices
+{analysis_context}
+
 # Stack (from arch analysis)
 {arch}
 
@@ -106,7 +109,11 @@ class HunterAgent:
         self.max_tokens_per_call = max_tokens_per_call
         self.on_event = on_event or (lambda *a, **k: None)
 
-    async def hunt(self, target_file: str) -> HuntResult:
+    async def hunt(
+        self,
+        target_file: str,
+        analysis_context: dict | None = None,
+    ) -> HuntResult:
         result = HuntResult()
         with_sandbox = self.tools.sandbox is not None
         specs = tool_specs(with_sandbox)
@@ -117,6 +124,9 @@ class HunterAgent:
             "role": "user",
             "content": [{"text": USER_TEMPLATE.format(
                 target=target_file,
+                analysis_context=json.dumps(
+                    analysis_context or {"slices": []}, ensure_ascii=False
+                ),
                 arch=json.dumps(self.arch, ensure_ascii=False),
                 sandbox_info=self.sandbox_info,
             )}],

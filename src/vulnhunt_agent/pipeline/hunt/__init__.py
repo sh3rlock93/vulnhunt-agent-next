@@ -1,4 +1,4 @@
-"""Step 5: Hunt — three-phase pipeline per file.
+"""Step 6: Hunt — three-phase pipeline per file.
 
   Phase A (hunters):  parallel HunterAgent per (file, hunter)
   Phase B (cluster):  ClustererAgent groups similar findings (skipped if
@@ -15,10 +15,12 @@ import json
 from dataclasses import asdict
 from pathlib import Path
 
+from ...analysis import context_for_file
 from ...agents.queue import HuntQueueStore, HuntTask
 from ...core.events import EventBus
 from ...core.llm import LLMClient
 from ...core.run_store import RunStore
+from ...prompts import hunters_for
 from ...sandbox import base_image_for, language_of
 from .. import finalize
 from ..registry import Step, register
@@ -47,9 +49,12 @@ async def run_hunt(store: RunStore, bus: EventBus) -> None:
     sandbox_info = finalize.sandbox_info(prepare, language_of(env))
 
     selector = store.load_step("file_selector") or {}
+    analysis = store.load_step("analysis_graph") or {}
     files = list(selector.get("selected", []))
 
-    hunters = _load_hunter_selection(store.dir / "steps")
+    hunters = _resolve_hunter_selection(
+        store.dir / "steps", language_of(env)
+    )
     pairs = [(f, h) for f in files for h in hunters]
 
     qstore = HuntQueueStore(store.dir / "hunters")
@@ -82,9 +87,10 @@ async def run_hunt(store: RunStore, bus: EventBus) -> None:
             return
         try:
             qstore.mark_file_running(task)
+            analysis_context = context_for_file(analysis, task.file)
             findings_by_cat = await run_hunters(
                 task, qstore, repo, hunter_client, hunter_image,
-                arch, sandbox_info, max_iter, hunter_sem, bus,
+                arch, analysis_context, sandbox_info, max_iter, hunter_sem, bus,
                 sandbox_enabled,
             )
             all_findings, origins = flatten(findings_by_cat)
@@ -111,16 +117,21 @@ async def run_hunt(store: RunStore, bus: EventBus) -> None:
     _save_summary(store, qstore, bus, hunter_image)
 
 
-def _load_hunter_selection(steps_dir: Path) -> list[str]:
+def _resolve_hunter_selection(steps_dir: Path, language: str) -> list[str]:
     # New runs use hunter_selection.json with "hunters"; older runs used
-    # category_selection.json with "categories" — read either.
+    # category_selection.json with "categories". An existing empty selection
+    # is intentional; only an absent file receives catalog defaults.
     new = steps_dir / "hunter_selection.json"
     if new.exists():
         return list(json.loads(new.read_text()).get("hunters", []))
     old = steps_dir / "category_selection.json"
     if old.exists():
         return list(json.loads(old.read_text()).get("categories", []))
-    return []
+    return [
+        hunter.name
+        for hunter in hunters_for(language)
+        if hunter.default
+    ]
 
 
 def _maybe_other_client(cfg: dict, key: str, fallback: LLMClient, bus: EventBus) -> LLMClient:
@@ -150,7 +161,7 @@ def _save_summary(store: RunStore, qstore: HuntQueueStore, bus: EventBus, image:
 
 register(Step(
     name="hunt",
-    title="5. Hunter Agents",
+    title="6. Hunter Agents",
     fn=run_hunt,
     depends_on=["file_selector", "sandbox_prepare"],
 ))

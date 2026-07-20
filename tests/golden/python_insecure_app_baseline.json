@@ -37,19 +37,30 @@
     "files": [
       {
         "path": "insecure_app/app.py",
-        "score": 5
+        "score": 5,
+        "analysis_priority": 0,
+        "coverage_reasons": [],
+        "slice_ids": []
       },
       {
         "path": "insecure_app/auth.py",
-        "score": 4
+        "score": 4,
+        "analysis_priority": 0,
+        "coverage_reasons": [],
+        "slice_ids": []
       },
       {
         "path": "insecure_app/__init__.py",
-        "score": 1
+        "score": 1,
+        "analysis_priority": 0,
+        "coverage_reasons": [],
+        "slice_ids": []
       }
     ],
     "selected": [
       "insecure_app/app.py"
-    ]
+    ],
+    "coverage_complete": true,
+    "coverage_selected": []
   }
 }

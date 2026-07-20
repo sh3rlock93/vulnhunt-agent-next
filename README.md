@@ -38,23 +38,29 @@ building blocks (Ranker · Hunters · Reviewer)** for public-model access.
 </p>
 
 ```
-Filter → Rank → Selector → Sandbox Prepare → Hunt (Hunter → Cluster → Review) → Report
+Filter → C Analysis Graph → Rank → Selector → Sandbox Prepare
+       → Hunt (Hunter Portfolio → Dedup/Cluster → Review) → Report
 ```
 
 1. **Filter** — drop tests, vendored, generated code (no LLM).
-2. **Rank** — score every source file 1–5 for security relevance.
-3. **Selector** — pick which files Hunters will run on.
-4. **Sandbox Prepare** — build a per-repo Docker image (deterministic
+2. **C Analysis Graph** — resolve calls, parser flow, entrypoints, and risky
+   sinks; plan at least one slice for every detected entrypoint and critical
+   sink (no LLM).
+3. **Rank** — score every source file 1–5 for security relevance.
+4. **Selector** — choose the union of graph-required and top-ranked files.
+5. **Sandbox Prepare** — build a per-repo Docker image (deterministic
    install/build per environment: pip / mvn / npm / CMake / Make / Meson /
    Autotools). Or use a custom image you've built.
-5. **Hunt** — *one independent session per file*. Reads, greps, writes
+6. **Hunt** — run fresh specialist sessions per file. Each receives a bounded
+   graph slice, reads and greps the source, writes
    a PoC into `/workspace`, executes it in a network-isolated Docker
    container. `network: none`, `/code` read-only, `/workspace` tmpfs. Native
    PoCs are compiled into the isolated executable tmpfs at `/workspace/exec`.
-6. **Cluster** — group near-duplicate findings within a file.
-7. **Review** — evidence citations + CVSS/CWE; high/critical findings require
+7. **Dedup / Cluster** — fingerprint exact duplicates first, then semantically
+   group only the remaining representatives.
+8. **Review** — evidence citations + CVSS/CWE; high/critical findings require
    two distinct model/prompt configurations.
-8. **Report** — consensus-gated canonical JSON + Markdown + SARIF 2.1.0.
+9. **Report** — consensus-gated canonical JSON + Markdown + SARIF 2.1.0.
 
 Each Hunter is a fresh session. They don't share history; the diversity
 of independent runs is the point.
@@ -95,6 +101,9 @@ Meson, or Autotools projects with ASan/UBSan. C/H files use tree-sitter-c;
 Flex/Bison `.l`/`.y` sources are also retained for ranking and cross-file tracing.
 The pinned libcue benchmark and its blind-test procedure are documented in
 [`docs/milestones/m3-c-native-analysis.md`](docs/milestones/m3-c-native-analysis.md).
+The deterministic graph, coverage policy, six-Hunter C portfolio, and
+positive/negative graph benchmark are documented in
+[`docs/milestones/m5-c-analysis-graph.md`](docs/milestones/m5-c-analysis-graph.md).
 
 The evidence-review and strict-export contract is documented in
 [`docs/milestones/m4-evidence-review-reporting.md`](docs/milestones/m4-evidence-review-reporting.md).
@@ -137,7 +146,9 @@ provider. Swap the hunter / reviewer / ranker model independently from the
 sidebar.
 
 **[prompts/](prompts/)** — every prompt lives here:
-- `prompts/hunters/python.md`, `c.md` — broad language-aware review prompts.
+- `prompts/hunters/python.md` — broad Python review prompt.
+- `prompts/hunters/c/*.md` — six C specialist prompts; bounds, lifetime, and
+  parser-state specialists are enabled by default.
 - `prompts/rankers/<lang>.md` — per-language ranker hint.
 
 No dotenv file is loaded. The subscription fallback delegates authentication
@@ -149,8 +160,9 @@ to `codex login` and never reads or copies Codex credential files.
 
 ```
 src/vulnhunt_agent/
+  analysis/      deterministic C graph, slices, context, dedup
   agents/        hunter, reviewer, clusterer, queue
-  pipeline/      filter → rank → selector → sandbox_prepare → hunt → finalize
+  pipeline/      filter → graph → rank → selector → sandbox → hunt → finalize
   core/          llm, settings, run_store, cvss, events
   ui/            streamlit (sidebar, steps, result_cards, cost)
   sandbox/       Docker executor
@@ -158,7 +170,8 @@ src/vulnhunt_agent/
   reviewing/     evidence packets, Reviewer agent, consensus
   reporting/     strict policy, Markdown/JSON/SARIF exporters
 prompts/
-  hunters/*.md           # language hunters
+  hunters/*.md           # broad language hunters
+  hunters/c/*.md         # C specialist portfolio
   rankers/<lang>.md      # per-language ranker hint
 settings.example.toml    # template for settings.toml (gitignored)
 ```
