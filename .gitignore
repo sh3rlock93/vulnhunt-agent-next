@@ -157,6 +157,7 @@ docs/milestones/*
 !docs/milestones/m1-domain-storage.md
 !docs/milestones/m2-sandbox-reproducer.md
 !docs/milestones/m25-codex-provider.md
+!docs/milestones/m3-c-native-analysis.md
 notes/
 tools/
 docker/local/

@@ -99,7 +99,7 @@ def render_prepare_settings(store: RunStore) -> None:
     current_image = cfg.get("custom_image") or ""
 
     st.markdown(
-        "- **Auto**: deterministic install (pip / mvn / npm) from meta files.\n"
+        "- **Auto**: deterministic prepare (pip / mvn / npm / native build) from meta files.\n"
         "- **Use existing image**: skip install, reuse your prebuilt image. "
         "Handy when auto fails (multi-module Maven, custom builds). "
         "Image needs the language toolchain + ripgrep."
@@ -126,11 +126,11 @@ def render_prepare_settings(store: RunStore) -> None:
         )
         with st.expander("How to build a custom image", expanded=False):
             st.markdown(
-                "Image must contain: **language toolchain** (jdk/python/node), "
+                "Image must contain: **language toolchain** (jdk/python/node/C), "
                 "**ripgrep**, and **target deps already resolved offline** "
                 "(hunt step has no network)."
             )
-            tabs = st.tabs(["Python", "Java", "Node"])
+            tabs = st.tabs(["Python", "Java", "Node", "C"])
             with tabs[0]:
                 st.code(
                     "FROM python:3.12-slim\n"
@@ -177,6 +177,25 @@ def render_prepare_settings(store: RunStore) -> None:
                     "After hunt mounts your repo at /code, point NODE_PATH to "
                     "/opt/node_modules or symlink it into /code."
                 )
+            with tabs[3]:
+                st.code(
+                    "FROM gcc:13-bookworm\n"
+                    "RUN apt-get update \\\n"
+                    " && apt-get install -y --no-install-recommends \\\n"
+                    "      ripgrep cmake ninja-build meson flex bison \\\n"
+                    "      autoconf automake libtool pkg-config \\\n"
+                    " && rm -rf /var/lib/apt/lists/*\n"
+                    "# Bake sanitizer-built target artifacts into the image.\n"
+                    "COPY <repo-path> /code\n"
+                    "RUN cmake -S /code -B /opt/vulnhunt/build \\\n"
+                    "      -DBUILD_SHARED_LIBS=OFF \\\n"
+                    "      -DCMAKE_C_FLAGS='-O1 -g -fno-omit-frame-pointer "
+                    "-fsanitize=address,undefined' \\\n"
+                    " && cmake --build /opt/vulnhunt/build --parallel 2",
+                    language="dockerfile",
+                )
+                st.code("docker build -t my-c-asan-env:latest -f Dockerfile.c .",
+                        language="bash")
 
     if mode != current_mode or image != current_image:
         cfg["prepare_mode"] = mode

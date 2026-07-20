@@ -44,10 +44,12 @@ Filter → Rank → Selector → Sandbox Prepare → Hunt (Hunter → Cluster �
 2. **Rank** — score every source file 1–5 for security relevance.
 3. **Selector** — pick which files Hunters will run on.
 4. **Sandbox Prepare** — build a per-repo Docker image (deterministic
-   install per environment: pip / mvn). Or use a custom image you've built.
+   install/build per environment: pip / mvn / npm / CMake / Make / Meson /
+   Autotools). Or use a custom image you've built.
 5. **Hunt** — *one independent session per file*. Reads, greps, writes
    a PoC into `/workspace`, executes it in a network-isolated Docker
-   container. `network: none`, `/code` read-only, `/workspace` tmpfs.
+   container. `network: none`, `/code` read-only, `/workspace` tmpfs. Native
+   PoCs are compiled into the isolated executable tmpfs at `/workspace/exec`.
 6. **Cluster** — group near-duplicate findings within a file.
 7. **Review** — verdict + CVSS + writeup.
 8. **Report** — JSON + Markdown.
@@ -86,6 +88,12 @@ In the sidebar: pick a repo (git URL or local path), pick an
 **Environment** (e.g. `python:3.12`, `java:21`), click **Save**,
 then run each step from top to bottom.
 
+For a native C repository, select `c:gcc-13`. Auto prepare builds CMake, Make,
+Meson, or Autotools projects with ASan/UBSan. C/H files use tree-sitter-c;
+Flex/Bison `.l`/`.y` sources are also retained for ranking and cross-file tracing.
+The pinned libcue benchmark and its blind-test procedure are documented in
+[`docs/milestones/m3-c-native-analysis.md`](docs/milestones/m3-c-native-analysis.md).
+
 The default `openai_auto` provider checks the configured key environment
 variable first. It uses the Responses API when the key is non-empty; otherwise
 it invokes the logged-in Codex CLI. Runtime API failures do not silently switch
@@ -116,8 +124,7 @@ provider. Swap the hunter / reviewer / ranker model independently from the
 sidebar.
 
 **[prompts/](prompts/)** — every prompt lives here:
-- `prompts/hunters/python.md`, `java.md` — broad language-aware
-  review prompts.
+- `prompts/hunters/python.md`, `c.md` — broad language-aware review prompts.
 - `prompts/rankers/<lang>.md` — per-language ranker hint.
 
 No dotenv file is loaded. The subscription fallback delegates authentication

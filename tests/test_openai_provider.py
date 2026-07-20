@@ -135,6 +135,26 @@ def test_codex_response_maps_host_tool_call_and_usage() -> None:
     }]
 
 
+def test_codex_response_uses_first_complete_tool_argument_object() -> None:
+    payload = {
+        "text": "",
+        "tool_calls": [{
+            "id": "call_read_1",
+            "name": "read_file",
+            "arguments": '{"path":"cd.c","start":1}{"ignored":true}',
+        }],
+    }
+
+    response = _parse_codex_response(
+        payload, "", allowed_tool_names={"read_file"}
+    )
+
+    assert response.content_blocks[0]["toolUse"]["input"] == {
+        "path": "cd.c",
+        "start": 1,
+    }
+
+
 @pytest.mark.parametrize(
     "payload, message",
     [

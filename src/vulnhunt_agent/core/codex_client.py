@@ -243,10 +243,7 @@ def _parse_codex_response(
         arguments_text = call.get("arguments")
         if not isinstance(arguments_text, str):
             raise RuntimeError("Codex tool arguments must be encoded as a JSON string.")
-        try:
-            arguments = json.loads(arguments_text)
-        except json.JSONDecodeError as exc:
-            raise RuntimeError("Codex returned invalid JSON tool arguments.") from exc
+        arguments = _decode_tool_arguments(arguments_text)
         if not isinstance(arguments, dict):
             raise RuntimeError("Codex tool arguments must decode to a JSON object.")
         call_id = call.get("id")
@@ -272,6 +269,24 @@ def _parse_codex_response(
         stop_reason="tool_use" if tool_calls else "end_turn",
         content_blocks=blocks,
     )
+
+
+def _decode_tool_arguments(arguments_text: str) -> Any:
+    """Decode one tool argument object.
+
+    Structured output occasionally appends a second JSON value to the string
+    despite the schema. The host executes one declared tool call at a time, so
+    accept the first complete value and discard only trailing data. Inputs still
+    pass the normal tool name, path, and argv validation boundary.
+    """
+    try:
+        return json.loads(arguments_text)
+    except json.JSONDecodeError:
+        try:
+            value, _ = json.JSONDecoder().raw_decode(arguments_text.lstrip())
+            return value
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("Codex returned invalid JSON tool arguments.") from exc
 
 
 def _parse_usage(jsonl_output: str) -> dict[str, int]:

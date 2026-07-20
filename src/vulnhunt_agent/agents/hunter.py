@@ -20,9 +20,11 @@ For every concrete hypothesis, try to produce a Proof-of-Concept that exercises 
 - `exec` accepts an argv array, not a shell command. Pass each argument as a
   separate item and do not use pipes, redirects, command substitution, or `sh -c`.
 - The container is already prepared: the target is installed/importable when
-  the user message says so. **Do not run `pip install`** — network is disabled
-  and the install will fail. Import the target directly. If a sandbox-specific
-  workaround is needed, use `sys.path.insert(0, "/code")` instead.
+  the user message says so. **Do not install packages or rebuild the target** —
+  network is disabled and source/build artifacts are immutable. Use the prepared
+  runtime and artifacts directly.
+- Native PoC source belongs under `/workspace`; native binaries must be written
+  below `/workspace/exec`, the only executable temporary filesystem.
 - If those tools are NOT available, produce the PoC as a code block embedded in
   the finding's `poc_file` field — do not claim it executed.
 

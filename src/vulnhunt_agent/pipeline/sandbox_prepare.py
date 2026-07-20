@@ -21,12 +21,57 @@ from .registry import Step, register
 INSTALL_TIMEOUT = 1800   # 30 min — large Java repos need it
 VERIFY_TIMEOUT = 60
 
+_C_SANITIZER_FLAGS = (
+    "-O1 -g -fno-omit-frame-pointer -fsanitize=address,undefined"
+)
+
 
 def _ripgrep_install_cmd() -> str:
     return (
         "if ! command -v rg >/dev/null 2>&1; then "
         "apt-get update && apt-get install -y --no-install-recommends ripgrep "
         "&& rm -rf /var/lib/apt/lists/*; fi"
+    )
+
+
+def _c_install_cmds(repo: Path) -> list[str]:
+    toolchain = (
+        "apt-get update && apt-get install -y --no-install-recommends "
+        "cmake ninja-build meson flex bison autoconf automake libtool pkg-config "
+        "&& rm -rf /var/lib/apt/lists/*"
+    )
+    flags = _C_SANITIZER_FLAGS
+
+    if (repo / "CMakeLists.txt").exists():
+        return [
+            toolchain,
+            "cmake -S /code -B /opt/vulnhunt/build "
+            "-DCMAKE_BUILD_TYPE=Debug -DBUILD_SHARED_LIBS=OFF "
+            f"-DCMAKE_C_FLAGS='{flags}'",
+            "cmake --build /opt/vulnhunt/build --parallel 2",
+        ]
+    if (repo / "meson.build").exists():
+        return [
+            toolchain,
+            "meson setup /opt/vulnhunt/build /code "
+            "--buildtype=debug --default-library=static "
+            f"-Dc_args='{flags}'",
+            "meson compile -C /opt/vulnhunt/build -j 2",
+        ]
+    if (repo / "configure").exists() or (repo / "configure.ac").exists():
+        bootstrap = (
+            "if [ ! -x /code/configure ]; then cd /code && autoreconf -fi; fi; "
+            "mkdir -p /opt/vulnhunt/build && cd /opt/vulnhunt/build && "
+            f"CFLAGS='{flags}' /code/configure --disable-shared --enable-static"
+        )
+        return [toolchain, bootstrap, "make -C /opt/vulnhunt/build -j2"]
+    if (repo / "Makefile").exists() or (repo / "GNUmakefile").exists():
+        return [
+            toolchain,
+            f"make -C /code -j2 CFLAGS='{flags}'",
+        ]
+    raise RuntimeError(
+        "c repo has no CMakeLists.txt / meson.build / configure(.ac) / Makefile"
     )
 
 
@@ -78,6 +123,8 @@ def _install_cmds(repo: Path, env: str) -> list[str]:
         if (repo / "package.json").exists():
             return ["npm install --prefix /code"]
         raise RuntimeError("node repo has no package.json")
+    if lang == "c":
+        return _c_install_cmds(repo)
     raise RuntimeError(f"unsupported language: {lang}")
 
 
@@ -86,6 +133,7 @@ def _verify_cmds(env: str) -> list[str]:
         "python": ["python --version"],
         "java":   ["javac -version"],
         "node":   ["node --version"],
+        "c":      ["cc --version"],
     }[language_of(env)]
 
 

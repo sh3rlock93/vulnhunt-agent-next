@@ -13,6 +13,7 @@ LANG_EXTENSIONS = {
     "python":     {".py"},
     "node":       {".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx"},
     "java":       {".java", ".kt"},
+    "c":          {".c", ".h", ".l", ".y"},
 }
 
 SKIP_DIRS = {

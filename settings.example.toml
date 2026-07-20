@@ -19,6 +19,7 @@ environments = [
     "python:3.11",
     "python:3.12",
     "python:3.13",
+    "c:gcc-13",
 ]
 
 [sandbox.images]
@@ -26,6 +27,7 @@ environments = [
 "python:3.11" = "python:3.11-slim"
 "python:3.12" = "python:3.12-slim"
 "python:3.13" = "python:3.13-slim"
+"c:gcc-13" = "gcc:13-bookworm"
 
 # ---- providers: backends the scanner can call ----
 #

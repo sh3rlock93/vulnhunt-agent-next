@@ -72,7 +72,9 @@ SANDBOX_TOOLS = [
             "name": "write_poc",
             "description": (
                 "Write a PoC file into the sandbox workspace (/workspace). "
-                "Use to create Python scripts, test inputs, etc. Path is relative."
+                "Use to create scripts, native source, and test inputs. "
+                "Path is relative; native binaries must be compiled to "
+                "/workspace/exec."
             ),
             "inputSchema": {"json": {
                 "type": "object",

@@ -43,10 +43,12 @@ Filter → Rank → Selector → Sandbox Prepare → Hunt (Hunter → Cluster �
 2. **Rank** — 모든 source file 을 보안 관련도 1–5 점으로 채점.
 3. **Selector** — Hunter 가 실행할 파일을 고름.
 4. **Sandbox Prepare** — repo 별 Docker 이미지 빌드 (environment 단위 결정론
-   install: pip / mvn). 또는 직접 빌드한 custom image 사용 가능.
+   install/build: pip / mvn / npm / CMake / Make / Meson / Autotools).
+   또는 직접 빌드한 custom image 사용 가능.
 5. **Hunt** — *파일 당 독립 세션 1개*. 코드를 읽고, grep 하고,
    `/workspace` 에 PoC 를 작성한 뒤 network-isolated Docker 컨테이너에서 실행.
-   `network: none`, `/code` read-only, `/workspace` tmpfs.
+   `network: none`, `/code` read-only, `/workspace` tmpfs. C 네이티브 PoC
+   바이너리는 분리된 실행 가능 tmpfs인 `/workspace/exec`에 컴파일됩니다.
 6. **Cluster** — 같은 파일 내 near-duplicate finding 을 group.
 7. **Review** — verdict + CVSS + writeup.
 8. **Report** — JSON + Markdown.
@@ -84,6 +86,13 @@ streamlit run src/vulnhunt_agent/app.py
 사이드바에서: repo (git URL 또는 로컬 경로) 선택 → **Environment** 선택
 (예: `python:3.12`, `java:21`) → **Save** → 위에서부터 단계별 실행.
 
+C 저장소는 `c:gcc-13`을 선택하면 됩니다. Auto prepare가 CMake, Make,
+Meson, Autotools 프로젝트를 ASan/UBSan으로 빌드합니다. C/H 파일은
+tree-sitter-c로 인덱싱하고 Flex/Bison의 `.l`/`.y`도 랭킹과 파일 간 추적
+대상에 포함합니다. 고정된 libcue 벤치마크와 블라인드 검증 절차는
+[`docs/milestones/m3-c-native-analysis.md`](docs/milestones/m3-c-native-analysis.md)에
+정리되어 있습니다.
+
 기본 `openai_auto` provider는 설정한 key 환경변수를 먼저 확인합니다.
 값이 있으면 Responses API를 사용하고, 없으면 로그인된 Codex CLI를
 호출합니다. 실행 중 API 오류를 다른 과금 경로로 몰래 전환하지는 않습니다.
@@ -114,7 +123,7 @@ provider 한 개를 가리키며 hunter / reviewer / ranker 모델은 사이드�
 독립 swap할 수 있습니다.
 
 **[prompts/](prompts/)** — 모든 프롬프트가 여기:
-- `prompts/hunters/python.md`, `java.md` — 광범위한 언어별 review prompt.
+- `prompts/hunters/python.md`, `c.md` — 광범위한 언어별 review prompt.
 - `prompts/rankers/<lang>.md` — 언어별 ranker hint.
 
 dotenv는 자동 로드하지 않습니다. 구독 fallback 인증은 `codex login`에
