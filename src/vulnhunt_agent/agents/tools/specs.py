@@ -88,17 +88,27 @@ SANDBOX_TOOLS = [
         "toolSpec": {
             "name": "exec",
             "description": (
-                "Run a shell command inside the sandbox (isolated, no network). "
+                "Run an argv command directly inside the sandbox (isolated, no network). "
                 "Use to execute PoC, inspect behavior, confirm the vulnerability. "
                 "Returns exit_code, stdout, stderr."
             ),
             "inputSchema": {"json": {
                 "type": "object",
                 "properties": {
-                    "cmd": {"type": "string", "description": "Shell command."},
+                    "argv": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "minItems": 1,
+                        "description": "Executable and arguments, without shell syntax.",
+                    },
+                    "cwd": {
+                        "type": "string",
+                        "default": "/workspace",
+                        "description": "Absolute directory below /workspace or /code.",
+                    },
                     "timeout": {"type": "integer", "default": 60},
                 },
-                "required": ["cmd"],
+                "required": ["argv"],
             }},
         }
     },

@@ -53,16 +53,22 @@ class StrictReportPolicy:
         if not reproductions:
             reasons.append("independent reproduction evidence is missing")
         else:
-            valid_reproduction = any(
-                item.run_id == finding.run_id
-                and item.producer == "reproducer"
-                and item.source_snapshot == run_snapshot
-                and item.oracle is not None
-                and item.oracle.result == "passed"
-                for item in reproductions
-            )
-            if not valid_reproduction:
-                reasons.append("no passed reproduction matches the run snapshot")
+            groups: dict[str, list[Evidence]] = {}
+            for item in reproductions:
+                if item.reproduction_group:
+                    groups.setdefault(item.reproduction_group, []).append(item)
+            if not any(
+                _valid_reproduction_group(
+                    items,
+                    run_id=finding.run_id,
+                    candidate_id=finding.candidate_id,
+                    run_snapshot=run_snapshot,
+                )
+                for items in groups.values()
+            ):
+                reasons.append(
+                    "no deterministic two-attempt reproduction matches the run snapshot"
+                )
 
         return PolicyDecision(allowed=not reasons, reasons=tuple(reasons))
 
@@ -84,3 +90,32 @@ class StrictReportPolicy:
             raise ValueError("strict report policy blocked finding: " + "; ".join(decision.reasons))
         require_finding_transition(finding.state, FindingState.REPORTABLE)
         return finding.model_copy(update={"state": FindingState.REPORTABLE})
+
+
+def _valid_reproduction_group(
+    evidence: list[Evidence],
+    *,
+    run_id: str,
+    candidate_id: str,
+    run_snapshot: str | None,
+) -> bool:
+    if len(evidence) < 2:
+        return False
+    attempts = {item.attempt for item in evidence}
+    images = {item.image_digest for item in evidence}
+    commands = {item.command for item in evidence}
+    return (
+        attempts == set(range(1, len(evidence) + 1))
+        and len(images) == 1
+        and len(commands) == 1
+        and all(
+            item.run_id == run_id
+            and item.candidate_id == candidate_id
+            and item.producer == "reproducer"
+            and item.source_snapshot == run_snapshot
+            and not item.timed_out
+            and item.oracle is not None
+            and item.oracle.result == "passed"
+            for item in evidence
+        )
+    )

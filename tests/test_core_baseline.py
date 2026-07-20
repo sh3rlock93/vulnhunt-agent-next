@@ -71,7 +71,7 @@ def test_run_store_and_queue_resume_state(tmp_path) -> None:
     assert reloaded.tasks[0].hunters[0].findings_count == 1
 
 
-def test_finalize_scores_and_materializes_report(tmp_path) -> None:
+def test_legacy_reviewer_output_is_quarantined_from_final_reports(tmp_path) -> None:
     review = ReviewResult(
         reviewed=[{
             "title": "Remote command execution",
@@ -86,14 +86,19 @@ def test_finalize_scores_and_materializes_report(tmp_path) -> None:
     )
 
     finalize.enrich_with_cvss(review)
-    finalize.materialize_reports(tmp_path, review)
+    with pytest.raises(RuntimeError, match="StrictReportService"):
+        finalize.materialize_reports(tmp_path, review)
+    assert finalize.quarantine_unverified_reports(review) == 1
+    finalize.materialize_manual_review(tmp_path, review)
 
     assert review.reviewed[0]["cvss_score"] == 9.8
     assert review.reviewed[0]["severity"] == "critical"
-    assert "Score 9.8 critical CVSS:3.1" in review.reports[0]["markdown"]
-    report_files = list((tmp_path / "reports").glob("*/report.md"))
+    assert review.reports == []
+    assert "Score 9.8 critical CVSS:3.1" in review.manual_review_reports[0]["markdown"]
+    assert not (tmp_path / "reports").exists()
+    report_files = list((tmp_path / "manual_review").glob("*/report.md"))
     assert len(report_files) == 1
-    assert report_files[0].read_text() == review.reports[0]["markdown"]
+    assert report_files[0].read_text() == review.manual_review_reports[0]["markdown"]
 
 
 def test_rewrite_poc_paths_only_strips_workspace_prefix() -> None:

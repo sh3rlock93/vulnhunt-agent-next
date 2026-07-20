@@ -8,7 +8,14 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Iterator
 
-from ..domain.schemas import ArtifactRef, CandidateFinding, Evidence, ReviewVerdict, RunRecord
+from ..domain.schemas import (
+    ArtifactRef,
+    CandidateFinding,
+    Evidence,
+    PocSpec,
+    ReviewVerdict,
+    RunRecord,
+)
 from ..domain.states import (
     FindingState,
     RunState,
@@ -169,6 +176,25 @@ class SqliteRepository:
             )
             return updated
 
+    def attach_run_snapshot(self, run_id: str, digest: str) -> RunRecord:
+        with self._write_transaction():
+            run = self._required_run(run_id)
+            validated = RunRecord.model_validate(
+                run.model_copy(update={"source_snapshot": digest})
+            )
+            if run.source_snapshot is not None:
+                if run.source_snapshot != validated.source_snapshot:
+                    raise RepositoryConflictError("run snapshot is immutable once attached")
+                return run
+            if run.state is not RunState.SNAPSHOTTING:
+                raise StateTransitionError("run snapshot may only attach while snapshotting")
+            updated = validated.model_copy(update={"updated_at": datetime.now(UTC)})
+            self.connection.execute(
+                "UPDATE runs SET payload_json = ? WHERE run_id = ?",
+                (_dump(updated), run_id),
+            )
+            return updated
+
     def ensure_task(
         self,
         run_id: str,
@@ -208,6 +234,19 @@ class SqliteRepository:
             }
             for row in rows
         ]
+
+    def set_task_status(
+        self, run_id: str, task_type: str, task_key: str, status: str
+    ) -> None:
+        cursor = self.connection.execute(
+            """
+            UPDATE tasks SET status = ?
+            WHERE run_id = ? AND task_type = ? AND task_key = ?
+            """,
+            (status, run_id, task_type, task_key),
+        )
+        if cursor.rowcount != 1:
+            raise KeyError(f"unknown task: {run_id}/{task_type}/{task_key}")
 
     def save_candidate(self, finding: CandidateFinding) -> tuple[CandidateFinding, bool]:
         finding = CandidateFinding.model_validate(finding)
@@ -307,9 +346,66 @@ class SqliteRepository:
             )
             return updated
 
+    def attach_candidate_poc(self, candidate_id: str, poc: PocSpec) -> CandidateFinding:
+        poc = PocSpec.model_validate(poc)
+        if self.get_artifact(poc.artifact) is None:
+            raise KeyError(f"unknown PoC artifact: {poc.artifact}")
+        with self._write_transaction():
+            finding = self._required_candidate(candidate_id)
+            if finding.poc is not None:
+                if finding.poc != poc:
+                    raise RepositoryConflictError("candidate PoC is immutable once attached")
+                return finding
+            if finding.state not in {
+                FindingState.HYPOTHESIS,
+                FindingState.STATICALLY_SUPPORTED,
+            }:
+                raise StateTransitionError("PoC must attach before poc_ready")
+            updated = CandidateFinding.model_validate(
+                finding.model_copy(
+                    update={"poc": poc, "updated_at": datetime.now(UTC)}
+                )
+            )
+            self.connection.execute(
+                "UPDATE findings SET payload_json = ? WHERE candidate_id = ?",
+                (_dump(updated), candidate_id),
+            )
+            return updated
+
+    def attach_candidate_evidence(
+        self, candidate_id: str, evidence_ids: tuple[str, ...]
+    ) -> CandidateFinding:
+        with self._write_transaction():
+            finding = self._required_candidate(candidate_id)
+            known = {
+                item.evidence_id
+                for item in self.list_evidence(finding.run_id)
+                if item.candidate_id == candidate_id
+            }
+            missing = sorted(set(evidence_ids) - known)
+            if missing:
+                raise KeyError("unknown evidence: " + ", ".join(missing))
+            merged = tuple(dict.fromkeys((*finding.evidence_ids, *evidence_ids)))
+            if merged == finding.evidence_ids:
+                return finding
+            updated = CandidateFinding.model_validate(
+                finding.model_copy(
+                    update={"evidence_ids": merged, "updated_at": datetime.now(UTC)}
+                )
+            )
+            self.connection.execute(
+                "UPDATE findings SET payload_json = ? WHERE candidate_id = ?",
+                (_dump(updated), candidate_id),
+            )
+            return updated
+
     def save_evidence(self, evidence: Evidence) -> Evidence:
         evidence = Evidence.model_validate(evidence)
         self._required_run(evidence.run_id)
+        if evidence.candidate_id is not None:
+            candidate = self._required_candidate(evidence.candidate_id)
+            if candidate.run_id != evidence.run_id:
+                raise ValueError("evidence candidate does not belong to the run")
         row = self.connection.execute(
             "SELECT payload_json FROM evidence WHERE evidence_id = ?",
             (evidence.evidence_id,),
@@ -333,6 +429,14 @@ class SqliteRepository:
             (run_id,),
         ).fetchall()
         return [Evidence.model_validate_json(row["payload_json"]) for row in rows]
+
+    def list_candidate_evidence(self, candidate_id: str) -> list[Evidence]:
+        finding = self._required_candidate(candidate_id)
+        return [
+            item
+            for item in self.list_evidence(finding.run_id)
+            if item.candidate_id == candidate_id
+        ]
 
     def save_verdict(self, verdict: ReviewVerdict) -> ReviewVerdict:
         verdict = ReviewVerdict.model_validate(verdict)

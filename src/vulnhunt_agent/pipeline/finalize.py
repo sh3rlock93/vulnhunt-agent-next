@@ -43,10 +43,26 @@ def enrich_with_cvss(review: ReviewResult) -> None:
 
 
 def materialize_reports(review_dir: Path, review: ReviewResult) -> None:
-    """Drop reports/<NN>_<slug>/report.md per reportable item under the group's review_dir."""
-    reports_root = review_dir / "reports"
+    """Reject the legacy path that could write unverified final reports."""
+    raise RuntimeError(
+        "unverified Reviewer output cannot be materialized as a final report; "
+        "use StrictReportService"
+    )
+
+
+def quarantine_unverified_reports(review: ReviewResult) -> int:
+    """Move LLM-only reports out of the final-report contract."""
+    count = len(review.reports)
+    review.manual_review_reports.extend(review.reports)
+    review.reports.clear()
+    return count
+
+
+def materialize_manual_review(review_dir: Path, review: ReviewResult) -> None:
+    """Persist unverified legacy output where the Final Report UI cannot consume it."""
+    reports_root = review_dir / "manual_review"
     reports_root.mkdir(parents=True, exist_ok=True)
-    for i, rep in enumerate(review.reports):
+    for i, rep in enumerate(review.manual_review_reports):
         idx = rep.get("finding_idx")
         title = ""
         if isinstance(idx, int) and 0 <= idx < len(review.reviewed):

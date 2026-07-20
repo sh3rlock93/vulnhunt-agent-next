@@ -61,7 +61,11 @@ class HunterTools:
             if name == "write_poc":
                 return await self._write_poc(inp["path"], inp["content"])
             if name == "exec":
-                return await self._exec(inp["cmd"], inp.get("timeout", 60))
+                return await self._exec(
+                    tuple(inp["argv"]),
+                    inp.get("timeout", 60),
+                    inp.get("cwd", "/workspace"),
+                )
             return f"ERROR: unknown tool {name}"
         except Exception as e:
             return f"ERROR: {e}"
@@ -70,7 +74,7 @@ class HunterTools:
 
     def _safe_path(self, rel: str) -> Path:
         p = (self.repo / rel).resolve()
-        if not str(p).startswith(str(self.repo)):
+        if p != self.repo and self.repo not in p.parents:
             raise ValueError(f"path escapes repo: {rel}")
         return p
 
@@ -119,7 +123,7 @@ class HunterTools:
             return "ERROR: no PoC directory available for this session"
         for root in self.poc_roots:
             p = (root / rel).resolve()
-            if not str(p).startswith(str(root)):
+            if p != root and root not in p.parents:
                 continue
             if p.is_file():
                 text = p.read_text(errors="replace")
@@ -136,15 +140,15 @@ class HunterTools:
         await self.sandbox.write_file(path, content)
         if self.poc_root:
             mirror = (self.poc_root / path).resolve()
-            if str(mirror).startswith(str(self.poc_root)):
+            if mirror == self.poc_root or self.poc_root in mirror.parents:
                 mirror.parent.mkdir(parents=True, exist_ok=True)
                 mirror.write_text(content)
         return f"OK: wrote {len(content)} bytes to /workspace/{path}"
 
-    async def _exec(self, cmd: str, timeout: int) -> str:
+    async def _exec(self, argv: tuple[str, ...], timeout: int, cwd: str) -> str:
         if not self.sandbox:
             return "ERROR: sandbox not available"
-        r = await self.sandbox.exec(cmd, timeout=timeout)
+        r = await self.sandbox.exec_argv(argv, timeout=timeout, cwd=cwd)
         out = (r.stdout or "")[: self.EXEC_OUTPUT_CAP]
         err = (r.stderr or "")[: self.EXEC_OUTPUT_CAP]
         return (

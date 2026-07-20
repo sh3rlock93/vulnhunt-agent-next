@@ -42,3 +42,21 @@ jobs:
           --cov-report=term-missing
           --cov-report=xml
           --cov-fail-under=45
+
+  docker-sandbox:
+    name: Hardened Docker sandbox
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install project and development tools
+        run: python -m pip install -e ".[dev]"
+      - name: Pull test runtime
+        run: docker pull python:3.12-slim
+      - name: Run real sandbox escape contract
+        env:
+          VULNHUNT_RUN_DOCKER_TESTS: "1"
+        run: python -m pytest tests/test_docker_sandbox_integration.py

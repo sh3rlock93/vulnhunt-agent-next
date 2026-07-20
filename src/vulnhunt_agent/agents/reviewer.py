@@ -151,6 +151,7 @@ the JSON.
 class ReviewResult:
     reviewed: list[dict] = field(default_factory=list)
     reports: list[dict] = field(default_factory=list)
+    manual_review_reports: list[dict] = field(default_factory=list)
     iterations: int = 0
     input_tokens: int = 0
     output_tokens: int = 0

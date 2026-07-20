@@ -38,9 +38,10 @@ async def run_hunt(store: RunStore, bus: EventBus) -> None:
     max_iter = int(cfg.get("hunter_max_iterations", 100))
 
     prepared_image = prepare.get("image")
+    sandbox_enabled = prepare.get("status") == "ready" and bool(prepared_image)
     hunter_image = (
         str(prepared_image)
-        if prepare.get("status") == "ready" and prepared_image
+        if sandbox_enabled
         else base_image_for(env)
     )
     sandbox_info = finalize.sandbox_info(prepare, language_of(env))
@@ -72,6 +73,7 @@ async def run_hunt(store: RunStore, bus: EventBus) -> None:
             findings_by_cat = await run_hunters(
                 task, qstore, repo, hunter_client, hunter_image,
                 arch, sandbox_info, max_iter, hunter_sem, bus,
+                sandbox_enabled,
             )
             all_findings, origins = flatten(findings_by_cat)
             if not all_findings:
