@@ -32,6 +32,16 @@ Mark `status`:
 - "confirmed" only if you ran the PoC and observed evidence of the bug.
 - "unverified" if you didn't or couldn't execute it.
 
+For each confirmed finding, include a machine-readable `reproduction` recipe:
+- `setup_argvs` is the ordered list of `exec` argv calls needed before the
+  triggering execution (for C this normally contains the compiler invocation);
+- `argv`, `cwd`, and `timeout` must exactly match an `exec` call you actually made;
+- `oracle` must be a concrete stable signal observed in that final call. Use
+  `combined_regex` for ASan/UBSan evidence and escape regex metacharacters;
+- `poc_file` must name a file written with `write_poc`.
+The harness rejects recipes that do not match the recorded tool calls. For an
+unverified finding set `reproduction` to null.
+
 Do NOT fabricate execution results.
 
 Before stopping, self-check: did you read the *callers* of suspicious functions, not just their definitions? Did you check sibling files in the same module? For each "looks safe" sink, what input would make it unsafe — and does that input flow in? If any of these is unanswered, keep exploring.
@@ -53,7 +63,18 @@ When done, STOP calling tools and output ONLY this JSON:
       "attack": "<how it would be exploited>",
       "evidence": "<code snippets or trace, concise>",
       "poc_file": "<path in /workspace OR inline code block>",
-      "exec_output": "<key output from running the PoC, else ''>"
+      "exec_output": "<key output from running the PoC, else ''>",
+      "reproduction": null | {
+        "setup_argvs": [["cc", "..."]],
+        "argv": ["<executable>", "<arg>", "..."],
+        "cwd": "/workspace",
+        "timeout": 60,
+        "oracle": {
+          "type": "exit_code|stdout_regex|stderr_regex|combined_regex",
+          "expected_exit_code": null,
+          "pattern": "<observed non-trivial regex or null>"
+        }
+      }
     }
   ]
 }
@@ -80,6 +101,8 @@ Investigate this file and anything it touches. Produce the final JSON report whe
 @dataclass
 class HuntResult:
     findings: list[dict] = field(default_factory=list)
+    executions: list[dict] = field(default_factory=list)
+    written_pocs: list[str] = field(default_factory=list)
     iterations: int = 0
     input_tokens: int = 0
     output_tokens: int = 0
@@ -161,6 +184,7 @@ class HunterAgent:
                 if parsed is not None:
                     result.findings = parsed.get("findings", [])
                     result.stopped = "final_json"
+                    self._attach_tool_ledger(result)
                     return result
                 messages.append({
                     "role": "user",
@@ -186,4 +210,13 @@ class HunterAgent:
             messages.append({"role": "user", "content": tool_results})
 
         result.stopped = "max_iter"
+        self._attach_tool_ledger(result)
         return result
+
+    def _attach_tool_ledger(self, result: HuntResult) -> None:
+        result.executions = list(
+            getattr(self.tools, "execution_records", [])
+        )
+        result.written_pocs = list(
+            getattr(self.tools, "written_pocs", [])
+        )

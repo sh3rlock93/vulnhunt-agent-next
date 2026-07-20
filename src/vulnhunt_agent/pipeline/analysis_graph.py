@@ -7,6 +7,8 @@ from ..analysis import build_c_analysis_graph, build_coverage_plan
 from ..analysis.models import CAnalysisGraph
 from ..core.events import EventBus
 from ..core.run_store import RunStore
+from ..core.v2_run import advance_run
+from ..domain.states import RunState
 from ..sandbox import language_of
 from .registry import Step, register
 
@@ -45,12 +47,17 @@ async def run_analysis_graph(store: RunStore, bus: EventBus) -> None:
         },
     }
     store.save_step("analysis_graph", result)
+    advance_run(
+        store,
+        RunState.PLANNING,
+        reason="analysis graph and coverage planning started",
+    )
     bus.emit("step_done", step="analysis_graph", **result["summary"])
 
 
 register(Step(
     name="analysis_graph",
-    title="2. C Analysis Graph",
+    title="3. C Analysis Graph",
     fn=run_analysis_graph,
     depends_on=["filtered_files"],
 ))

@@ -4,7 +4,9 @@ import json
 from typing import Any, cast
 
 from vulnhunt_agent.agents.hunter import HunterAgent
+from vulnhunt_agent.agents.tools.executor import HunterTools
 from vulnhunt_agent.core.llm import LLMResponse
+from vulnhunt_agent.sandbox.base import ExecResult
 
 
 def _response(*, text: str = "", blocks: list[dict], in_tokens: int, out_tokens: int):
@@ -101,3 +103,55 @@ async def test_hunter_tool_loop_and_final_json_contract() -> None:
     first_prompt = client.messages_seen[0][0]["content"][0]["text"]
     assert "c-coverage-v1" in first_prompt
     assert "slice-1" in first_prompt
+
+
+class FakeContainer:
+    def __init__(self) -> None:
+        self.writes: list[tuple[str, str]] = []
+
+    async def write_file(self, path: str, content: str) -> None:
+        self.writes.append((path, content))
+
+    async def exec_argv(self, argv, *, timeout, cwd) -> ExecResult:
+        return ExecResult(
+            exit_code=1,
+            stdout="",
+            stderr="AddressSanitizer: heap-buffer-overflow",
+            duration_ms=12,
+        )
+
+
+async def test_hunter_tools_persist_exact_poc_and_execution_ledger(tmp_path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    pocs = tmp_path / "pocs"
+    sandbox = FakeContainer()
+    tools = HunterTools(
+        source,
+        sandbox=cast(Any, sandbox),
+        poc_root=pocs,
+    )
+
+    await tools.dispatch("write_poc", {
+        "path": "native/poc.c",
+        "content": "int main(void) { return 0; }\n",
+    })
+    output = await tools.dispatch("exec", {
+        "argv": ["/workspace/exec/poc"],
+        "cwd": "/code",
+        "timeout": 27,
+    })
+
+    assert tools.written_pocs == ["native/poc.c"]
+    assert (pocs / "native" / "poc.c").is_file()
+    assert tools.execution_records == [{
+        "argv": ["/workspace/exec/poc"],
+        "cwd": "/code",
+        "timeout": 27,
+        "exit_code": 1,
+        "timed_out": False,
+        "duration_ms": 12,
+        "stdout": "",
+        "stderr": "AddressSanitizer: heap-buffer-overflow",
+    }]
+    assert "exit_code=1" in output

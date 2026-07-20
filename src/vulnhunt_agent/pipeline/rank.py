@@ -1,4 +1,4 @@
-"""Step 3: FileRanker — LLM scores files 1..5 in parallel batches."""
+"""Step 4: FileRanker — LLM scores files 1..5 in parallel batches."""
 from __future__ import annotations
 
 import asyncio
@@ -159,7 +159,7 @@ async def run_rank(store: RunStore, bus: EventBus) -> None:
 
 register(Step(
     name="ranked_files",
-    title="3. File Ranker (optional)",
+    title="4. File Ranker (optional)",
     fn=run_rank,
     depends_on=["analysis_graph"],
 ))

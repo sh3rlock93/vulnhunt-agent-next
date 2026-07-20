@@ -25,6 +25,7 @@ class SandboxJob:
     cwd: str
     env: dict[str, str]
     timeout_seconds: int
+    setup_argvs: tuple[tuple[str, ...], ...] = ()
     capture_files: tuple[str, ...] = ()
 
 
@@ -32,6 +33,7 @@ class SandboxJob:
 class SandboxExecution:
     image_digest: str
     result: ExecResult
+    setup_results: tuple[ExecResult, ...] = ()
 
 
 class SandboxBackend(Protocol):

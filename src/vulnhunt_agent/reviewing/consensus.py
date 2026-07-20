@@ -128,6 +128,7 @@ def _valid_reproduction_evidence_ids(
             len(items) >= 2
             and attempts == set(range(1, len(items) + 1))
             and len({item.image_digest for item in items}) == 1
+            and len({item.setup_commands for item in items}) == 1
             and len({item.command for item in items}) == 1
             and all(
                 item.run_id == finding.run_id

@@ -104,6 +104,9 @@ The pinned libcue benchmark and its blind-test procedure are documented in
 The deterministic graph, coverage policy, six-Hunter C portfolio, and
 positive/negative graph benchmark are documented in
 [`docs/milestones/m5-c-analysis-graph.md`](docs/milestones/m5-c-analysis-graph.md).
+The immutable source snapshot, exact Hunter command ledger, two clean native
+reproductions, and strict end-to-end report promotion are documented in
+[`docs/milestones/m6-verified-pipeline.md`](docs/milestones/m6-verified-pipeline.md).
 
 The evidence-review and strict-export contract is documented in
 [`docs/milestones/m4-evidence-review-reporting.md`](docs/milestones/m4-evidence-review-reporting.md).

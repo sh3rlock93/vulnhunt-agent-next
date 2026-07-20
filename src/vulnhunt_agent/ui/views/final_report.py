@@ -18,15 +18,21 @@ _SEVERITY_BADGE = {
 
 def render_final_report(store: RunStore) -> None:
     hunters_dir = store.dir / "hunters"
-    if not hunters_dir.exists():
+    verified_dir = store.dir / "verified"
+    if not hunters_dir.exists() and not verified_dir.exists():
         return
 
-    entries = list(_collect_entries(hunters_dir))
+    entries = list(_collect_verified_entries(verified_dir))
+    if not entries and hunters_dir.exists():
+        entries = list(_collect_entries(hunters_dir))
 
     st.divider()
     st.header("Final Report")
     if not entries:
-        st.info("No reports yet — Reviewer produces a report only for verdict=real findings.")
+        st.info(
+            "No strict reports yet — findings require two clean reproductions "
+            "and evidence-aware review."
+        )
         return
 
     entries.sort(key=lambda e: (-e["score"], e["finished_at"] or "9999"))
@@ -57,6 +63,31 @@ def render_final_report(store: RunStore) -> None:
         return
 
     _render_detail(entries[selected_rows[0]])
+
+
+def _collect_verified_entries(verified_dir):
+    reports_dir = verified_dir / "reports"
+    if not reports_dir.exists():
+        return
+    for report_dir in sorted(reports_dir.iterdir()):
+        json_path = report_dir / "report.json"
+        markdown_path = report_dir / "report.md"
+        if not json_path.is_file() or not markdown_path.is_file():
+            continue
+        report = json.loads(json_path.read_text())
+        finding = report["finding"]
+        classification = report["classification"]
+        yield {
+            "score": float(classification["cvss_score"]),
+            "severity": classification["severity"],
+            "title": finding["title"],
+            "notes": "; ".join(
+                item["notes"] for item in report.get("reviews", [])
+            ),
+            "file": finding["entrypoint"]["path"],
+            "finished_at": "",
+            "md": markdown_path.read_text(),
+        }
 
 
 def _collect_entries(hunters_dir):

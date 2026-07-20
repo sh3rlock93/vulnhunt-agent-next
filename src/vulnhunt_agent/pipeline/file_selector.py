@@ -73,7 +73,7 @@ async def run_file_selector(store: RunStore, bus: EventBus) -> None:
 
 register(Step(
     name="file_selector",
-    title="4. File Selector",
+    title="5. File Selector",
     fn=run_file_selector,
     depends_on=["analysis_graph"],   # rank remains optional
 ))

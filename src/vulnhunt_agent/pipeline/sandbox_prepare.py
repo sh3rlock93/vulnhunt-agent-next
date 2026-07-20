@@ -14,6 +14,8 @@ from pathlib import Path
 
 from ..core.events import EventBus
 from ..core.run_store import RunStore
+from ..core.v2_run import advance_run, source_snapshot_path
+from ..domain.states import RunState
 from ..sandbox import ContainerExecutor, base_image_for, language_of
 from .registry import Step, register
 
@@ -146,6 +148,8 @@ async def run_prepare(store: RunStore, bus: EventBus) -> None:
     cfg = store.load_config() or {}
     repo = Path(cfg["repo_path"])
     env = cfg["environment"]
+    source_archive = source_snapshot_path(store)
+    advance_run(store, RunState.BUILDING, reason="sandbox preparation started")
 
     bus.emit("step_start", step="sandbox_prepare", repo=str(repo), env=env)
 
@@ -162,6 +166,11 @@ async def run_prepare(store: RunStore, bus: EventBus) -> None:
             "error": "",
             "source": "custom",
         })
+        advance_run(
+            store,
+            RunState.HUNTING,
+            reason="custom sandbox image registered",
+        )
         bus.emit("step_done", step="sandbox_prepare", status="ready",
                  image=custom, source="custom")
         return
@@ -174,6 +183,7 @@ async def run_prepare(store: RunStore, bus: EventBus) -> None:
     sandbox = ContainerExecutor(
         repo=repo, image=base,
         network="bridge", code_writable=True,
+        source_archive=source_archive,
     )
     image_tag = _image_tag(repo)
     install_log: list[dict] = []
@@ -221,12 +231,17 @@ async def run_prepare(store: RunStore, bus: EventBus) -> None:
         "error": error,
     }
     store.save_step("sandbox_prepare", result)
+    advance_run(
+        store,
+        RunState.HUNTING,
+        reason=f"sandbox preparation finished with status {status}",
+    )
     bus.emit("step_done", step="sandbox_prepare", status=status, image=result["image"])
 
 
 register(Step(
     name="sandbox_prepare",
-    title="5. Sandbox Prepare",
+    title="6. Sandbox Prepare",
     fn=run_prepare,
-    depends_on=[],
+    depends_on=["source_snapshot"],
 ))

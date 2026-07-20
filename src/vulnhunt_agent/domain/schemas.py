@@ -111,6 +111,7 @@ class OracleSpec(DomainModel):
 
 class PocSpec(DomainModel):
     artifact: str = Field(pattern=SHA256_PATTERN)
+    setup_argvs: tuple[tuple[str, ...], ...] = Field(default=(), max_length=16)
     argv: tuple[str, ...] = Field(min_length=1, max_length=256)
     cwd: str = "."
 
@@ -119,8 +120,9 @@ class PocSpec(DomainModel):
         cwd = PurePosixPath(self.cwd.replace("\\", "/"))
         if cwd.is_absolute() or ".." in cwd.parts:
             raise ValueError("PoC cwd must stay inside the workspace")
-        if any(not arg or "\0" in arg for arg in self.argv):
-            raise ValueError("PoC argv entries may not be empty or contain NUL")
+        _validate_command(self.argv, label="PoC argv")
+        for command in self.setup_argvs:
+            _validate_command(command, label="PoC setup argv")
         return self
 
 
@@ -132,6 +134,7 @@ class ReproductionSpec(DomainModel):
     image: str = Field(min_length=1)
     poc_artifact: str = Field(pattern=SHA256_PATTERN)
     poc_path: str = Field(min_length=1)
+    setup_argvs: tuple[tuple[str, ...], ...] = Field(default=(), max_length=16)
     argv: tuple[str, ...] = Field(min_length=1, max_length=256)
     cwd: str = "."
     env: dict[str, str] = Field(default_factory=dict, max_length=32)
@@ -152,8 +155,9 @@ class ReproductionSpec(DomainModel):
             _validate_relative_path(path, label="capture path")
             if PurePosixPath(path) == PurePosixPath("."):
                 raise ValueError("capture path must identify a file")
-        if any(not arg or "\0" in arg for arg in self.argv):
-            raise ValueError("reproduction argv entries may not be empty or contain NUL")
+        _validate_command(self.argv, label="reproduction argv")
+        for command in self.setup_argvs:
+            _validate_command(command, label="reproduction setup argv")
         for key, value in self.env.items():
             if re.fullmatch(r"[A-Z_][A-Z0-9_]*", key) is None:
                 raise ValueError(f"invalid environment variable name: {key}")
@@ -185,6 +189,7 @@ class Evidence(DomainModel):
     attempt: int | None = Field(default=None, ge=1)
     source_snapshot: str | None = Field(default=None, pattern=SHA256_PATTERN)
     image_digest: str | None = Field(default=None, pattern=SHA256_PATTERN)
+    setup_commands: tuple[tuple[str, ...], ...] = ()
     command: tuple[str, ...] = ()
     exit_code: int | None = None
     timed_out: bool = False
@@ -218,8 +223,10 @@ class Evidence(DomainModel):
                 )
             if self.producer != "reproducer":
                 raise ValueError("reproduction evidence must be produced by reproducer")
-        if any(not arg for arg in self.command):
-            raise ValueError("evidence command entries may not be empty")
+        if self.command:
+            _validate_command(self.command, label="evidence command")
+        for command in self.setup_commands:
+            _validate_command(command, label="evidence setup command")
         for digest in self.artifact_ids:
             if re.fullmatch(SHA256_PATTERN, digest) is None:
                 raise ValueError(f"evidence has invalid artifact digest: {digest}")
@@ -390,3 +397,10 @@ def _validate_relative_path(value: str, *, label: str) -> None:
     path = PurePosixPath(value.replace("\\", "/"))
     if path.is_absolute() or ".." in path.parts:
         raise ValueError(f"{label} must be relative and may not traverse parents")
+
+
+def _validate_command(command: tuple[str, ...], *, label: str) -> None:
+    if not command or len(command) > 256:
+        raise ValueError(f"{label} must contain 1..256 entries")
+    if any(not arg or "\0" in arg for arg in command):
+        raise ValueError(f"{label} entries may not be empty or contain NUL")
