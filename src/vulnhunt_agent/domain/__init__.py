@@ -2,12 +2,15 @@
 
 from .schemas import (
     ArtifactRef,
+    BudgetPolicy,
+    BudgetUsage,
     CandidateFinding,
     CodeLocation,
     ConsensusDecision,
     ConsensusStatus,
     Evidence,
     EvidenceKind,
+    HunterWorkItem,
     OracleSpec,
     OracleType,
     OracleResult,
@@ -26,6 +29,8 @@ from .states import FindingState, RunState, StateTransitionError
 
 __all__ = [
     "ArtifactRef",
+    "BudgetPolicy",
+    "BudgetUsage",
     "CandidateFinding",
     "CodeLocation",
     "ConsensusDecision",
@@ -33,6 +38,7 @@ __all__ = [
     "Evidence",
     "EvidenceKind",
     "FindingState",
+    "HunterWorkItem",
     "OracleSpec",
     "OracleType",
     "OracleResult",

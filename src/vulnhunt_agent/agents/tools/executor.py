@@ -34,6 +34,9 @@ class HunterTools:
         self._seen_greps: set[tuple] = set()
         self.execution_records: list[dict] = []
         self.written_pocs: list[str] = []
+        self.tool_calls = 0
+        self.repeated_reads = 0
+        self.poc_write_calls = 0
         for root in self.poc_roots:
             root.mkdir(parents=True, exist_ok=True)
 
@@ -43,16 +46,19 @@ class HunterTools:
         return self.poc_roots[0] if self.poc_roots else None
 
     async def dispatch(self, name: str, inp: dict) -> str:
+        self.tool_calls += 1
         try:
             if name == "read_file":
                 read_key = ("read", inp["path"], inp.get("start", 1), inp.get("end"))
                 if read_key in self._seen_reads:
+                    self.repeated_reads += 1
                     return f"(already read {inp['path']} with the same range earlier in this session)"
                 self._seen_reads.add(read_key)
                 return self._read_file(inp["path"], inp.get("start", 1), inp.get("end"))
             if name == "grep":
                 grep_key = ("grep", inp["pattern"], inp.get("path"))
                 if grep_key in self._seen_greps:
+                    self.repeated_reads += 1
                     return f"(already ran grep for {inp['pattern']!r} earlier in this session)"
                 self._seen_greps.add(grep_key)
                 return self._grep(inp["pattern"], inp.get("path"), inp.get("max_results", 100))
@@ -61,6 +67,7 @@ class HunterTools:
             if name == "read_poc":
                 return self._read_poc(inp["path"])
             if name == "write_poc":
+                self.poc_write_calls += 1
                 return await self._write_poc(inp["path"], inp["content"])
             if name == "exec":
                 return await self._exec(

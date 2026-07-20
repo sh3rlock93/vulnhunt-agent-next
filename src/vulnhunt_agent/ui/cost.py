@@ -13,6 +13,7 @@ import streamlit as st
 
 from ..core import settings as app_settings
 from ..core.run_store import RunStore
+from ..infrastructure.sqlite_repository import SqliteRepository
 
 SCOPES = ("ranker", "hunter", "reviewer")
 
@@ -45,6 +46,16 @@ def render_cost_block(store: RunStore) -> None:
         st.caption(
             "Dollar estimates are unavailable when token prices are not configured; "
             "subscription credits are not converted to dollars."
+        )
+    operations = _collect_operations(store)
+    if operations:
+        st.caption(
+            "Hunter usage: "
+            f"{operations['sessions']:,} sessions · "
+            f"{operations['calls']:,} model calls · "
+            f"{operations['repeated_reads']:,} repeated reads · "
+            f"{operations['poc_writes']:,} PoC writes · "
+            f"{operations['exec_calls']:,} sandbox executions"
         )
 
     distinct = {specs[k].model_id for k in specs}
@@ -111,6 +122,25 @@ def _collect_usage(store: RunStore) -> dict[str, dict]:
     d = store.load_step("ranked_files") or {}
     _add(out["ranker"], _usage_from(d.get("_usage")))
 
+    metered_hunter = False
+    db_path = store.dir / "state.db"
+    if db_path.exists():
+        try:
+            with SqliteRepository(db_path, read_only=True) as repository:
+                metrics = repository.list_budget_usage(
+                    store.dir.name, scope="hunter"
+                )
+            for item in metrics:
+                _add(out["hunter"], {
+                    "input": item.input_tokens,
+                    "output": item.output_tokens,
+                    "cache_read": item.cache_read_tokens,
+                    "cache_write": item.cache_write_tokens,
+                })
+            metered_hunter = bool(metrics)
+        except Exception:
+            metered_hunter = False
+
     hunters_dir = store.dir / "hunters"
     if not hunters_dir.exists():
         return out
@@ -120,7 +150,7 @@ def _collect_usage(store: RunStore) -> dict[str, dict]:
             continue
         # hunter findings: hunts/<cat>/findings.json
         hunts = file_dir / "hunts"
-        if hunts.exists():
+        if hunts.exists() and not metered_hunter:
             for cat_dir in hunts.iterdir():
                 _accumulate(cat_dir / "findings.json", out["hunter"])
         # clusterer runs on the reviewer model — fold its tokens into reviewer scope
@@ -131,6 +161,35 @@ def _collect_usage(store: RunStore) -> dict[str, dict]:
             for g_dir in reviews.iterdir():
                 _accumulate(g_dir / "review.json", out["reviewer"])
     return out
+
+
+def _collect_operations(store: RunStore) -> dict[str, int]:
+    db_path = store.dir / "state.db"
+    if not db_path.exists():
+        return {}
+    try:
+        with SqliteRepository(db_path, read_only=True) as repository:
+            items = repository.list_budget_usage(
+                store.dir.name, scope="hunter"
+            )
+    except Exception:
+        return {}
+    if not items:
+        return {}
+    fields = (
+        "sessions",
+        "calls",
+        "iterations",
+        "tool_calls",
+        "repeated_reads",
+        "poc_writes",
+        "exec_calls",
+        "wall_time_ms",
+    )
+    return {
+        field: sum(getattr(item, field) for item in items)
+        for field in fields
+    }
 
 
 def _accumulate(path, into: dict) -> None:

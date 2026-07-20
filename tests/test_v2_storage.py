@@ -59,7 +59,7 @@ def test_sqlite_wal_state_transitions_and_idempotency(tmp_path) -> None:
         repository.save_run(run)
         assert repository.journal_mode() == "wal"
         assert repository.foreign_keys_enabled()
-        assert repository.schema_version() == 2
+        assert repository.schema_version() == 3
         assert repository.ensure_task("run-1", "hunter", "app.py::ssrf")
         assert not repository.ensure_task("run-1", "hunter", "app.py::ssrf")
 
