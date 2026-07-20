@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import json
+import re
+import secrets
 import sqlite3
 from contextlib import contextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Iterator
 
@@ -15,6 +17,7 @@ from ..domain.schemas import (
     PocSpec,
     ReviewVerdict,
     RunRecord,
+    TaskLease,
 )
 from ..domain.states import (
     FindingState,
@@ -28,6 +31,21 @@ from ..domain.states import (
 class RepositoryConflictError(RuntimeError):
     """An idempotency key or stable object ID was reused for different data."""
 
+
+class TaskLeaseLostError(RuntimeError):
+    """A worker attempted to mutate a task after losing its lease."""
+
+
+_SCHEMA_VERSION = 2
+_TASK_LEASE_COLUMNS = {
+    "lease_owner": "TEXT",
+    "lease_token": "TEXT",
+    "lease_acquired_at": "TEXT",
+    "heartbeat_at": "TEXT",
+    "lease_expires_at": "TEXT",
+    "last_error": "TEXT",
+    "completed_at": "TEXT",
+}
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS runs (
@@ -43,6 +61,13 @@ CREATE TABLE IF NOT EXISTS tasks (
     status TEXT NOT NULL,
     attempt INTEGER NOT NULL DEFAULT 1,
     payload_json TEXT NOT NULL,
+    lease_owner TEXT,
+    lease_token TEXT,
+    lease_acquired_at TEXT,
+    heartbeat_at TEXT,
+    lease_expires_at TEXT,
+    last_error TEXT,
+    completed_at TEXT,
     UNIQUE(run_id, task_type, task_key)
 );
 CREATE TABLE IF NOT EXISTS findings (
@@ -90,7 +115,6 @@ CREATE TABLE IF NOT EXISTS legacy_imports (
 );
 CREATE INDEX IF NOT EXISTS findings_run_state ON findings(run_id, state);
 CREATE INDEX IF NOT EXISTS tasks_run_status ON tasks(run_id, status);
-PRAGMA user_version=1;
 """
 
 
@@ -107,11 +131,30 @@ class SqliteRepository:
         self.connection.row_factory = sqlite3.Row
         self.connection.execute("PRAGMA foreign_keys=ON")
         self.connection.execute("PRAGMA busy_timeout=5000")
-        if not read_only:
+        if read_only:
+            version = self.schema_version()
+            if version > _SCHEMA_VERSION:
+                self.connection.close()
+                raise RuntimeError(
+                    f"database schema {version} is newer than supported {_SCHEMA_VERSION}"
+                )
+        else:
             mode = self.connection.execute("PRAGMA journal_mode=WAL").fetchone()[0]
             if str(mode).casefold() != "wal":
+                self.connection.close()
                 raise RuntimeError("SQLite WAL mode is required")
-            self.connection.executescript(_SCHEMA)
+            version = self.schema_version()
+            if version > _SCHEMA_VERSION:
+                self.connection.close()
+                raise RuntimeError(
+                    f"database schema {version} is newer than supported {_SCHEMA_VERSION}"
+                )
+            try:
+                self.connection.executescript(_SCHEMA)
+                self._migrate_schema()
+            except BaseException:
+                self.connection.close()
+                raise
 
     def close(self) -> None:
         self.connection.close()
@@ -217,9 +260,21 @@ class SqliteRepository:
         return cursor.rowcount == 1
 
     def list_tasks(self, run_id: str) -> list[dict]:
-        rows = self.connection.execute(
+        lease_columns = (
             """
-            SELECT task_type, task_key, status, attempt, payload_json
+            lease_owner, heartbeat_at, lease_expires_at, last_error, completed_at
+            """
+            if self._task_lease_schema_available()
+            else
+            """
+            NULL AS lease_owner, NULL AS heartbeat_at, NULL AS lease_expires_at,
+            NULL AS last_error, NULL AS completed_at
+            """
+        )
+        rows = self.connection.execute(
+            f"""
+            SELECT task_type, task_key, status, attempt, payload_json,
+                   {lease_columns}
             FROM tasks WHERE run_id = ? ORDER BY task_type, task_key
             """,
             (run_id,),
@@ -231,9 +286,226 @@ class SqliteRepository:
                 "status": row["status"],
                 "attempt": row["attempt"],
                 "payload": json.loads(row["payload_json"]),
+                "lease_owner": row["lease_owner"],
+                "heartbeat_at": row["heartbeat_at"],
+                "lease_expires_at": row["lease_expires_at"],
+                "last_error": row["last_error"],
+                "completed_at": row["completed_at"],
             }
             for row in rows
         ]
+
+    def acquire_task_lease(
+        self,
+        run_id: str,
+        task_type: str,
+        task_key: str,
+        *,
+        worker_id: str,
+        lease_seconds: int = 60,
+        max_attempts: int = 3,
+        now: datetime | None = None,
+    ) -> TaskLease | None:
+        if not worker_id.strip():
+            raise ValueError("worker_id must be non-empty")
+        _validate_lease_policy(lease_seconds, max_attempts)
+        current = _as_utc(now)
+        with self._write_transaction():
+            row = self._required_task_row(run_id, task_type, task_key)
+            attempt = int(row["attempt"])
+            if row["status"] == "running":
+                expires_at = _parse_timestamp(row["lease_expires_at"])
+                if expires_at is not None and expires_at > current:
+                    return None
+                if attempt >= max_attempts:
+                    self._mark_task_attempts_exhausted(
+                        run_id, task_type, task_key, current
+                    )
+                    return None
+                attempt += 1
+            elif row["status"] != "pending":
+                return None
+
+            token = secrets.token_urlsafe(24)
+            expires_at = current + timedelta(seconds=lease_seconds)
+            self.connection.execute(
+                """
+                UPDATE tasks
+                SET status = 'running', attempt = ?, lease_owner = ?,
+                    lease_token = ?, lease_acquired_at = ?, heartbeat_at = ?,
+                    lease_expires_at = ?, last_error = NULL, completed_at = NULL
+                WHERE run_id = ? AND task_type = ? AND task_key = ?
+                """,
+                (
+                    attempt,
+                    worker_id,
+                    token,
+                    current.isoformat(),
+                    current.isoformat(),
+                    expires_at.isoformat(),
+                    run_id,
+                    task_type,
+                    task_key,
+                ),
+            )
+            return TaskLease(
+                run_id=run_id,
+                task_type=task_type,
+                task_key=task_key,
+                worker_id=worker_id,
+                lease_token=token,
+                attempt=attempt,
+                acquired_at=current,
+                heartbeat_at=current,
+                expires_at=expires_at,
+                payload=json.loads(row["payload_json"]),
+            )
+
+    def heartbeat_task_lease(
+        self,
+        lease: TaskLease,
+        *,
+        lease_seconds: int = 60,
+        now: datetime | None = None,
+    ) -> TaskLease:
+        lease = TaskLease.model_validate(lease)
+        _validate_lease_seconds(lease_seconds)
+        current = _as_utc(now)
+        expires_at = current + timedelta(seconds=lease_seconds)
+        with self._write_transaction():
+            row = self._required_task_row(
+                lease.run_id, lease.task_type, lease.task_key
+            )
+            self._require_live_lease(row, lease, current)
+            self.connection.execute(
+                """
+                UPDATE tasks SET heartbeat_at = ?, lease_expires_at = ?
+                WHERE run_id = ? AND task_type = ? AND task_key = ?
+                """,
+                (
+                    current.isoformat(),
+                    expires_at.isoformat(),
+                    lease.run_id,
+                    lease.task_type,
+                    lease.task_key,
+                ),
+            )
+        return lease.model_copy(update={
+            "heartbeat_at": current,
+            "expires_at": expires_at,
+        })
+
+    def finish_task_lease(
+        self,
+        lease: TaskLease,
+        *,
+        status: str,
+        error: str = "",
+        now: datetime | None = None,
+    ) -> None:
+        lease = TaskLease.model_validate(lease)
+        _validate_terminal_status(status)
+        current = _as_utc(now)
+        with self._write_transaction():
+            row = self._required_task_row(
+                lease.run_id, lease.task_type, lease.task_key
+            )
+            self._require_live_lease(row, lease, current)
+            self._finish_task_lease_locked(
+                lease,
+                status=status,
+                error=error,
+                current=current,
+            )
+
+    def finish_task_lease_and_transition_finding(
+        self,
+        lease: TaskLease,
+        *,
+        status: str,
+        candidate_id: str,
+        target: FindingState,
+        idempotency_key: str,
+        reason: str,
+        error: str = "",
+        now: datetime | None = None,
+    ) -> CandidateFinding:
+        lease = TaskLease.model_validate(lease)
+        _validate_terminal_status(status)
+        current = _as_utc(now)
+        with self._write_transaction():
+            row = self._required_task_row(
+                lease.run_id, lease.task_type, lease.task_key
+            )
+            self._require_live_lease(row, lease, current)
+            finding = self._required_candidate(candidate_id)
+            if finding.run_id != lease.run_id:
+                raise ValueError("task lease and candidate belong to different runs")
+            updated = self._transition_finding_locked(
+                candidate_id,
+                target,
+                idempotency_key=idempotency_key,
+                reason=reason,
+            )
+            self._finish_task_lease_locked(
+                lease,
+                status=status,
+                error=error,
+                current=current,
+            )
+            return updated
+
+    def reclaim_expired_tasks(
+        self,
+        run_id: str,
+        *,
+        max_attempts: int = 3,
+        now: datetime | None = None,
+    ) -> dict[str, object]:
+        _validate_max_attempts(max_attempts)
+        current = _as_utc(now)
+        requeued: list[str] = []
+        failed: list[str] = []
+        with self._write_transaction():
+            self._required_run(run_id)
+            rows = self.connection.execute(
+                """
+                SELECT task_type, task_key, attempt, lease_expires_at
+                FROM tasks
+                WHERE run_id = ? AND status = 'running'
+                ORDER BY task_type, task_key
+                """,
+                (run_id,),
+            ).fetchall()
+            for row in rows:
+                expires_at = _parse_timestamp(row["lease_expires_at"])
+                if expires_at is not None and expires_at > current:
+                    continue
+                identity = f"{row['task_type']}:{row['task_key']}"
+                if int(row["attempt"]) >= max_attempts:
+                    self._mark_task_attempts_exhausted(
+                        run_id, row["task_type"], row["task_key"], current
+                    )
+                    failed.append(identity)
+                    continue
+                self.connection.execute(
+                    """
+                    UPDATE tasks
+                    SET status = 'pending', attempt = attempt + 1,
+                        lease_owner = NULL, lease_token = NULL,
+                        lease_acquired_at = NULL, heartbeat_at = NULL,
+                        lease_expires_at = NULL,
+                        last_error = 'worker lease expired', completed_at = NULL
+                    WHERE run_id = ? AND task_type = ? AND task_key = ?
+                    """,
+                    (run_id, row["task_type"], row["task_key"]),
+                )
+                requeued.append(identity)
+        return {
+            "run_id": run_id,
+            "requeued": requeued,
+            "failed": failed,
+        }
 
     def set_task_status(
         self, run_id: str, task_type: str, task_key: str, status: str
@@ -242,11 +514,14 @@ class SqliteRepository:
             """
             UPDATE tasks SET status = ?
             WHERE run_id = ? AND task_type = ? AND task_key = ?
+              AND lease_token IS NULL
             """,
             (status, run_id, task_type, task_key),
         )
         if cursor.rowcount != 1:
-            raise KeyError(f"unknown task: {run_id}/{task_type}/{task_key}")
+            raise KeyError(
+                f"unknown or actively leased task: {run_id}/{task_type}/{task_key}"
+            )
 
     def save_candidate(self, finding: CandidateFinding) -> tuple[CandidateFinding, bool]:
         finding = CandidateFinding.model_validate(finding)
@@ -322,29 +597,12 @@ class SqliteRepository:
         reason: str = "",
     ) -> CandidateFinding:
         with self._write_transaction():
-            replay = self._transition_replay(
-                "finding", candidate_id, idempotency_key, target.value
-            )
-            if replay:
-                return self._required_candidate(candidate_id)
-            finding = self._required_candidate(candidate_id)
-            require_finding_transition(finding.state, target)
-            updated = finding.model_copy(
-                update={"state": target, "updated_at": datetime.now(UTC)}
-            )
-            self.connection.execute(
-                "UPDATE findings SET state = ?, payload_json = ? WHERE candidate_id = ?",
-                (target.value, _dump(updated), candidate_id),
-            )
-            self._record_transition(
-                "finding",
+            return self._transition_finding_locked(
                 candidate_id,
-                idempotency_key,
-                finding.state.value,
-                target.value,
-                reason,
+                target,
+                idempotency_key=idempotency_key,
+                reason=reason,
             )
-            return updated
 
     def attach_candidate_poc(self, candidate_id: str, poc: PocSpec) -> CandidateFinding:
         poc = PocSpec.model_validate(poc)
@@ -521,12 +779,117 @@ class SqliteRepository:
     def schema_version(self) -> int:
         return int(self.connection.execute("PRAGMA user_version").fetchone()[0])
 
+    def _migrate_schema(self) -> None:
+        with self._write_transaction():
+            version = self.schema_version()
+            if version > _SCHEMA_VERSION:
+                raise RuntimeError(
+                    f"database schema {version} is newer than supported {_SCHEMA_VERSION}"
+                )
+            columns = {
+                row["name"]
+                for row in self.connection.execute("PRAGMA table_info(tasks)").fetchall()
+            }
+            for name, declaration in _TASK_LEASE_COLUMNS.items():
+                if name not in columns:
+                    self.connection.execute(
+                        f"ALTER TABLE tasks ADD COLUMN {name} {declaration}"
+                    )
+            self.connection.execute(f"PRAGMA user_version={_SCHEMA_VERSION}")
+
+    def _task_lease_schema_available(self) -> bool:
+        columns = {
+            row["name"]
+            for row in self.connection.execute("PRAGMA table_info(tasks)").fetchall()
+        }
+        return set(_TASK_LEASE_COLUMNS).issubset(columns)
+
+    def _required_task_row(
+        self, run_id: str, task_type: str, task_key: str
+    ) -> sqlite3.Row:
+        row = self.connection.execute(
+            """
+            SELECT * FROM tasks
+            WHERE run_id = ? AND task_type = ? AND task_key = ?
+            """,
+            (run_id, task_type, task_key),
+        ).fetchone()
+        if row is None:
+            raise KeyError(f"unknown task: {run_id}/{task_type}/{task_key}")
+        return row
+
+    def _require_live_lease(
+        self,
+        row: sqlite3.Row,
+        lease: TaskLease,
+        current: datetime,
+    ) -> None:
+        expires_at = _parse_timestamp(row["lease_expires_at"])
+        if (
+            row["status"] != "running"
+            or row["lease_owner"] != lease.worker_id
+            or row["lease_token"] != lease.lease_token
+            or int(row["attempt"]) != lease.attempt
+            or expires_at is None
+            or expires_at <= current
+        ):
+            raise TaskLeaseLostError(
+                f"task lease is no longer active: "
+                f"{lease.run_id}/{lease.task_type}/{lease.task_key}"
+            )
+
+    def _finish_task_lease_locked(
+        self,
+        lease: TaskLease,
+        *,
+        status: str,
+        error: str,
+        current: datetime,
+    ) -> None:
+        self.connection.execute(
+            """
+            UPDATE tasks
+            SET status = ?, lease_owner = NULL, lease_token = NULL,
+                lease_acquired_at = NULL, heartbeat_at = NULL,
+                lease_expires_at = NULL, last_error = ?, completed_at = ?
+            WHERE run_id = ? AND task_type = ? AND task_key = ?
+            """,
+            (
+                status,
+                error[:2000] or None,
+                current.isoformat(),
+                lease.run_id,
+                lease.task_type,
+                lease.task_key,
+            ),
+        )
+
+    def _mark_task_attempts_exhausted(
+        self,
+        run_id: str,
+        task_type: str,
+        task_key: str,
+        current: datetime,
+    ) -> None:
+        self.connection.execute(
+            """
+            UPDATE tasks
+            SET status = 'failed', lease_owner = NULL, lease_token = NULL,
+                lease_acquired_at = NULL, heartbeat_at = NULL,
+                lease_expires_at = NULL,
+                last_error = 'worker lease expired; attempts exhausted',
+                completed_at = ?
+            WHERE run_id = ? AND task_type = ? AND task_key = ?
+            """,
+            (current.isoformat(), run_id, task_type, task_key),
+        )
+
     @contextmanager
     def _write_transaction(self) -> Iterator[None]:
         self.connection.execute("BEGIN IMMEDIATE")
         try:
             yield
-        except Exception:
+        except BaseException:
             self.connection.execute("ROLLBACK")
             raise
         else:
@@ -543,6 +906,38 @@ class SqliteRepository:
         if finding is None:
             raise KeyError(f"unknown candidate: {candidate_id}")
         return finding
+
+    def _transition_finding_locked(
+        self,
+        candidate_id: str,
+        target: FindingState,
+        *,
+        idempotency_key: str,
+        reason: str,
+    ) -> CandidateFinding:
+        replay = self._transition_replay(
+            "finding", candidate_id, idempotency_key, target.value
+        )
+        if replay:
+            return self._required_candidate(candidate_id)
+        finding = self._required_candidate(candidate_id)
+        require_finding_transition(finding.state, target)
+        updated = finding.model_copy(
+            update={"state": target, "updated_at": datetime.now(UTC)}
+        )
+        self.connection.execute(
+            "UPDATE findings SET state = ?, payload_json = ? WHERE candidate_id = ?",
+            (target.value, _dump(updated), candidate_id),
+        )
+        self._record_transition(
+            "finding",
+            candidate_id,
+            idempotency_key,
+            finding.state.value,
+            target.value,
+            reason,
+        )
+        return updated
 
     def _transition_replay(
         self, entity_type: str, entity_id: str, idempotency_key: str, target: str
@@ -599,3 +994,42 @@ def _dump_json(value: object) -> str:
 
 def _candidate_seed(finding: CandidateFinding) -> dict:
     return finding.model_dump(exclude={"state", "created_at", "updated_at"})
+
+
+def _as_utc(value: datetime | None) -> datetime:
+    current = value or datetime.now(UTC)
+    if current.tzinfo is None:
+        raise ValueError("lease timestamps must be timezone-aware")
+    return current.astimezone(UTC)
+
+
+def _parse_timestamp(value: str | None) -> datetime | None:
+    if value is None:
+        return None
+    parsed = datetime.fromisoformat(value)
+    if parsed.tzinfo is None:
+        raise ValueError("stored lease timestamp is not timezone-aware")
+    return parsed.astimezone(UTC)
+
+
+def _validate_lease_policy(lease_seconds: int, max_attempts: int) -> None:
+    _validate_lease_seconds(lease_seconds)
+    _validate_max_attempts(max_attempts)
+
+
+def _validate_lease_seconds(lease_seconds: int) -> None:
+    if not 1 <= lease_seconds <= 86_400:
+        raise ValueError("lease_seconds must be between 1 and 86400")
+
+
+def _validate_max_attempts(max_attempts: int) -> None:
+    if not 1 <= max_attempts <= 100:
+        raise ValueError("max_attempts must be between 1 and 100")
+
+
+def _validate_terminal_status(status: str) -> None:
+    if (
+        status in {"pending", "running"}
+        or re.fullmatch(r"[a-z][a-z0-9_]{0,63}", status) is None
+    ):
+        raise ValueError("finished task status must be terminal")
