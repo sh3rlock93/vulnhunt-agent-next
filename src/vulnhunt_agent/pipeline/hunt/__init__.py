@@ -14,7 +14,7 @@ import uuid
 from dataclasses import asdict
 from pathlib import Path
 
-from ...analysis import context_for_work_item
+from ...analysis import SharedContextCache
 from ...agents.durable_queue import DurableHuntQueueStore
 from ...agents.queue import HuntTask
 from ...core.events import EventBus
@@ -159,6 +159,23 @@ async def run_hunt(store: RunStore, bus: EventBus) -> None:
         for work_id in allocation.deferred
         if by_work_id[work_id].required
     )
+    context_cache = SharedContextCache(
+        store.dir / "cache" / "context",
+        repo,
+        source_snapshot=source_snapshot,
+        analysis=analysis,
+    )
+    analysis_contexts = {
+        item.work_id: context_cache.get(item)
+        for item in work_items
+        if item.work_id in admitted_ids
+    }
+    context_cache_stats = context_cache.stats()
+    hunt_plan["context_cache"] = context_cache_stats
+    hunt_plan["context_cache_keys"] = {
+        work_id: context["cache_key"]
+        for work_id, context in sorted(analysis_contexts.items())
+    }
     store.save_step("hunt_plan", hunt_plan)
 
     bus.emit("step_start", step="hunt",
@@ -222,7 +239,7 @@ async def run_hunt(store: RunStore, bus: EventBus) -> None:
         ))
         try:
             qstore.mark_file_running(task)
-            analysis_context = context_for_work_item(analysis, item)
+            analysis_context = analysis_contexts[item.work_id]
             iteration_limit = adaptive_iteration_limit(
                 item,
                 configured_cap=max_iter,
@@ -317,6 +334,7 @@ async def run_hunt(store: RunStore, bus: EventBus) -> None:
         total_usage(persisted_usage),
         budget_policy,
         budget_controller.snapshot(),
+        context_cache_stats,
     )
     advance_run(
         store,
@@ -412,6 +430,7 @@ def _save_summary(
     usage: dict[str, int | float | None],
     policy: BudgetPolicy,
     budget_state: dict[str, int | float | bool],
+    context_cache: dict[str, int | str],
 ) -> None:
     final = qstore.load()
     summary = {
@@ -429,6 +448,7 @@ def _save_summary(
         "usage": usage,
         "budget": policy.model_dump(mode="json"),
         "budget_state": budget_state,
+        "context_cache": context_cache,
         "unanalysed_work_ids": sorted(
             task.work_id
             for task in final.tasks

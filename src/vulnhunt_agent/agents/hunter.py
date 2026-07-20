@@ -86,7 +86,7 @@ If nothing significant, return an empty findings array."""
 USER_TEMPLATE = """# Target file
 {target}
 
-# Deterministic analysis slices
+# Shared immutable analysis context
 {analysis_context}
 
 # Stack (from arch analysis)
@@ -95,6 +95,8 @@ USER_TEMPLATE = """# Target file
 # Sandbox state
 {sandbox_info}
 
+The shared excerpts are a starting point, not a read boundary. Use read_file or
+grep whenever you need missing ranges, callers, headers, or sibling files.
 Investigate this file and anything it touches. Produce the final JSON report when done.
 """
 
