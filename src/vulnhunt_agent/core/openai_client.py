@@ -1,5 +1,4 @@
-"""OpenAI Responses API client for openai_compat providers (bedrock-mantle,
-LiteLLM, in-house OpenAI-compatible proxies).
+"""OpenAI Responses API client.
 
 Speaks Bedrock Converse-shaped messages on the outside (so HunterAgent /
 ReviewerAgent are unchanged), translates to OpenAI Responses API on the
@@ -9,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import uuid
 
 from openai import OpenAI
@@ -17,27 +17,41 @@ from . import settings as _settings
 from .llm import LLMResponse
 
 
-class OpenAIBedrockClient:
-    """Drop-in replacement for LLMClient targeting openai_compat providers.
+class OpenAIResponsesClient:
+    """Drop-in replacement for LLMClient targeting a Responses API endpoint.
 
     Outside surface (chat()) returns content_blocks shaped like Anthropic's
     Converse output, so the agent loops don't change.
     """
 
-    def __init__(self, model_id: str, max_tokens: int | None = None):
+    transport = "responses_api"
+
+    def __init__(
+        self,
+        model_id: str,
+        max_tokens: int | None = None,
+        *,
+        api_key: str | None = None,
+    ):
         self.model_id = model_id
         _, provider = _settings.resolve(model_id)
-        if not provider.endpoint:
+        endpoint = provider.endpoint
+        if provider.kind == "openai_auto":
+            endpoint = endpoint or "https://api.openai.com/v1"
+        if not endpoint:
             raise RuntimeError(
                 f"provider {provider.name!r} (openai_compat) needs `endpoint`."
             )
-        if not provider.api_key:
+        resolved_key = api_key or resolve_api_key(provider)
+        if not resolved_key:
+            key_hint = provider.api_key_env or "OPENAI_API_KEY"
             raise RuntimeError(
-                f"provider {provider.name!r} (openai_compat) needs `api_key` "
-                "in settings.toml."
+                f"provider {provider.name!r} needs an API key in {key_hint}."
             )
         self.max_tokens = max_tokens or _settings.MAX_TOKENS
-        self._client = OpenAI(api_key=provider.api_key, base_url=provider.endpoint)
+        self.reasoning_effort = provider.reasoning_effort
+        self.preserve_reasoning = provider.kind == "openai_auto"
+        self._client = OpenAI(api_key=resolved_key, base_url=endpoint)
 
     async def chat(
         self,
@@ -57,13 +71,28 @@ class OpenAIBedrockClient:
             "input": oai_input,
             "max_output_tokens": max_tokens or self.max_tokens,
         }
+        if self.preserve_reasoning:
+            kwargs["store"] = False
+            kwargs["include"] = ["reasoning.encrypted_content"]
         if system:
             kwargs["instructions"] = system
         if oai_tools:
             kwargs["tools"] = oai_tools
+        if self.reasoning_effort:
+            kwargs["reasoning"] = {"effort": self.reasoning_effort}
 
         resp = await asyncio.to_thread(self._client.responses.create, **kwargs)
         return _to_anthropic_response(resp)
+
+
+def resolve_api_key(provider: _settings.ProviderSpec) -> str | None:
+    """Resolve a provider key without inspecting Codex's credential store."""
+    if provider.api_key:
+        return provider.api_key.strip() or None
+    env_name = provider.api_key_env
+    if env_name:
+        return os.environ.get(env_name, "").strip() or None
+    return None
 
 
 # ---------- conversion: Anthropic Converse -> OpenAI Responses ----------
@@ -124,6 +153,10 @@ def _to_openai_input(messages: list[dict]) -> list[dict]:
                     "call_id": tr["toolUseId"],
                     "output": output_text,
                 })
+            elif "openaiReasoning" in block:
+                reasoning = block["openaiReasoning"]
+                if isinstance(reasoning, dict) and reasoning.get("type") == "reasoning":
+                    out.append(reasoning)
         if text_parts:
             out.append({"role": role, "content": "\n".join(text_parts)})
     return out
@@ -140,7 +173,17 @@ def _to_anthropic_response(resp) -> LLMResponse:
 
     for item in (resp.output or []):
         itype = getattr(item, "type", None)
-        if itype == "message":
+        if itype == "reasoning":
+            if hasattr(item, "model_dump"):
+                reasoning = item.model_dump(exclude_none=True)
+            else:
+                reasoning = {
+                    key: getattr(item, key)
+                    for key in ("id", "type", "summary", "encrypted_content", "status")
+                    if getattr(item, key, None) is not None
+                }
+            blocks.append({"openaiReasoning": reasoning})
+        elif itype == "message":
             for c in (item.content or []):
                 ctype = getattr(c, "type", None)
                 if ctype in ("output_text", "text"):
@@ -160,12 +203,19 @@ def _to_anthropic_response(resp) -> LLMResponse:
             }})
 
     usage = getattr(resp, "usage", None)
+    input_total = getattr(usage, "input_tokens", 0) if usage else 0
+    input_details = getattr(usage, "input_tokens_details", None) if usage else None
+    cached = getattr(input_details, "cached_tokens", 0) if input_details else 0
     return LLMResponse(
         text="".join(text_chunks),
-        input_tokens=getattr(usage, "input_tokens", 0) if usage else 0,
+        input_tokens=max(input_total - cached, 0),
         output_tokens=getattr(usage, "output_tokens", 0) if usage else 0,
-        cache_read_tokens=0,
+        cache_read_tokens=cached,
         cache_write_tokens=0,
         stop_reason=stop_reason,
         content_blocks=blocks,
     )
+
+
+# Backwards-compatible import for callers that used the old class name.
+OpenAIBedrockClient = OpenAIResponsesClient

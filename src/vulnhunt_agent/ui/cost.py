@@ -23,22 +23,36 @@ def render_cost_block(store: RunStore) -> None:
     prices = {k: _prices(specs[k]) for k in specs}
 
     costs = {k: _cost(usage[k], prices[k]) for k in usage}
-    total = sum(costs.values())
-    no_cache = sum(_cost_no_cache(usage[k], prices[k]) for k in usage)
-    saved = no_cache - total
+    priced_costs = [cost for cost in costs.values() if cost is not None]
+    all_priced = len(priced_costs) == len(costs)
+    total = sum(priced_costs)
+    no_cache_values = [_cost_no_cache(usage[k], prices[k]) for k in usage]
+    no_cache = sum(cost for cost in no_cache_values if cost is not None)
+    saved = no_cache - total if all_priced else 0
     saved_pct = (saved / no_cache * 100) if no_cache else 0
     total_tokens = sum(sum(u.values()) for u in usage.values())
 
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Total cost", f"${total:,.2f}")
-    c2.metric("w/o cache", f"${no_cache:,.2f}")
-    c3.metric("saved", f"${saved:,.2f}", f"-{saved_pct:.0f}%")
+    c1.metric("Total cost", f"${total:,.2f}" if all_priced else "N/A")
+    c2.metric("w/o cache", f"${no_cache:,.2f}" if all_priced else "N/A")
+    c3.metric(
+        "saved",
+        f"${saved:,.2f}" if all_priced else "N/A",
+        f"-{saved_pct:.0f}%" if all_priced else None,
+    )
     c4.metric("tokens", f"{total_tokens / 1_000_000:.2f}M")
+    if not all_priced:
+        st.caption(
+            "Dollar estimates are unavailable when token prices are not configured; "
+            "subscription credits are not converted to dollars."
+        )
 
     distinct = {specs[k].model_id for k in specs}
     if len(distinct) > 1:
         st.caption("  ·  ".join(
-            f"{k.title()}={specs[k].label} (${costs[k]:.2f})" for k in SCOPES
+            f"{k.title()}={specs[k].label} "
+            f"({'$' + format(costs[k], '.2f') if costs[k] is not None else 'N/A'})"
+            for k in SCOPES
         ))
 
     with st.expander("Token breakdown", expanded=False):
@@ -56,12 +70,18 @@ def _specs(store: RunStore) -> dict[str, app_settings.ModelSpec]:
     return {"ranker": ranker, "hunter": hunter, "reviewer": reviewer}
 
 
-def _prices(spec: app_settings.ModelSpec) -> dict:
+def _prices(spec: app_settings.ModelSpec) -> dict[str, float] | None:
+    if spec.input_per_m is None or spec.output_per_m is None:
+        return None
+    cache_read = spec.cache_read_per_m
+    cache_write = spec.cache_write_per_m
+    if cache_read is None or cache_write is None:
+        return None
     return {
         "input":       spec.input_per_m       / 1_000_000,
         "output":      spec.output_per_m      / 1_000_000,
-        "cache_read":  spec.cache_read_per_m  / 1_000_000,
-        "cache_write": spec.cache_write_per_m / 1_000_000,
+        "cache_read":  cache_read             / 1_000_000,
+        "cache_write": cache_write            / 1_000_000,
     }
 
 
@@ -122,7 +142,9 @@ def _accumulate(path, into: dict) -> None:
         pass
 
 
-def _cost(u: dict, p: dict) -> float:
+def _cost(u: dict, p: dict[str, float] | None) -> float | None:
+    if p is None:
+        return None
     return (
         u["input"]       * p["input"]
         + u["output"]      * p["output"]
@@ -131,19 +153,26 @@ def _cost(u: dict, p: dict) -> float:
     )
 
 
-def _cost_no_cache(u: dict, p: dict) -> float:
+def _cost_no_cache(u: dict, p: dict[str, float] | None) -> float | None:
+    if p is None:
+        return None
     eff_input = u["input"] + u["cache_read"] + u["cache_write"]
     return eff_input * p["input"] + u["output"] * p["output"]
 
 
-def _breakdown_rows(label: str, u: dict, p: dict, spec: app_settings.ModelSpec) -> list[dict]:
+def _breakdown_rows(
+    label: str,
+    u: dict,
+    p: dict[str, float] | None,
+    spec: app_settings.ModelSpec,
+) -> list[dict]:
     return [
         {
             "scope": label,
             "model": spec.label,
             "kind": k,
             "tokens": f"{u[k]:,}",
-            "cost": f"${u[k] * p[k]:.2f}",
+            "cost": f"${u[k] * p[k]:.2f}" if p is not None else "N/A",
         }
         for k in ("input", "output", "cache_read", "cache_write")
     ]

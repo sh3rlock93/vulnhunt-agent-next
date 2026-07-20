@@ -26,14 +26,18 @@ class LLMClient:
 
     Dispatches by the model's resolved provider.kind:
       - bedrock_converse  -> this class (boto3 Converse, SigV4)
-      - openai_compat     -> OpenAIBedrockClient (OpenAI Responses API, Bearer)
+      - openai_compat     -> OpenAIResponsesClient (Responses API, Bearer)
+      - openai_auto       -> Responses API when a key exists, otherwise Codex login
     """
 
     def __new__(cls, model_id: str, *args, **kwargs):
         _, provider = _settings.resolve(model_id)
         if provider.kind == "openai_compat":
-            from .openai_client import OpenAIBedrockClient
-            return OpenAIBedrockClient(model_id, *args, **kwargs)
+            from .openai_client import OpenAIResponsesClient
+            return OpenAIResponsesClient(model_id, *args, **kwargs)
+        if provider.kind == "openai_auto":
+            from .openai_auto import create_openai_auto_client
+            return create_openai_auto_client(model_id, *args, **kwargs)
         if provider.kind != "bedrock_converse":
             raise RuntimeError(f"unknown provider kind: {provider.kind}")
         return super().__new__(cls)

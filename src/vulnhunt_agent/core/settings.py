@@ -1,16 +1,21 @@
 """Operator-facing config loaded from <repo>/settings.toml.
 
-Single source of truth: settings.toml. No env vars, no dotenv.
-Copy settings.example.toml -> settings.toml and edit.
+Non-secret configuration lives in settings.toml. Provider secrets can be
+resolved from an explicitly named environment variable; dotenv files are not
+loaded implicitly.
 """
 from __future__ import annotations
 
+import os
+import re
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
-_CONFIG_PATH = _REPO_ROOT / "settings.toml"
+_CONFIG_PATH = Path(
+    os.environ.get("VULNHUNT_SETTINGS_PATH", _REPO_ROOT / "settings.toml")
+).resolve()
 
 if not _CONFIG_PATH.exists():
     raise RuntimeError(
@@ -25,10 +30,32 @@ _raw = tomllib.loads(_CONFIG_PATH.read_text())
 @dataclass(frozen=True)
 class ProviderSpec:
     name: str
-    kind: str                         # "bedrock_converse" | "openai_compat"
+    kind: str                         # bedrock_converse | openai_compat | openai_auto
     region: str | None = None         # bedrock_converse: required
-    endpoint: str | None = None       # openai_compat: required; bedrock_converse: optional (VPCE)
-    api_key: str | None = None        # openai_compat: required
+    endpoint: str | None = None       # OpenAI base URL; Bedrock VPCE when applicable
+    api_key: str | None = None        # legacy inline key; prefer api_key_env
+    api_key_env: str | None = None
+    reasoning_effort: str | None = None
+    codex_command: str = "codex"
+    codex_timeout_seconds: int = 900
+    codex_max_parallel: int = 2
+
+    def __post_init__(self) -> None:
+        if self.api_key_env and not re.fullmatch(
+            r"[A-Za-z_][A-Za-z0-9_]*", self.api_key_env
+        ):
+            raise ValueError(
+                f"provider {self.name!r} has invalid api_key_env {self.api_key_env!r}"
+            )
+        if self.reasoning_effort not in (None, "low", "medium", "high", "xhigh", "max"):
+            raise ValueError(
+                f"provider {self.name!r} has unsupported reasoning_effort "
+                f"{self.reasoning_effort!r}"
+            )
+        if self.codex_timeout_seconds <= 0:
+            raise ValueError("codex_timeout_seconds must be positive")
+        if self.codex_max_parallel <= 0:
+            raise ValueError("codex_max_parallel must be positive")
 
 
 PROVIDERS: dict[str, ProviderSpec] = {
@@ -55,17 +82,21 @@ ENV_TO_IMAGE: dict[str, str] = dict(_sb.get("images", {}))
 class ModelSpec:
     label: str
     model_id: str
-    input_per_m: float
-    output_per_m: float
+    input_per_m: float | None = None
+    output_per_m: float | None = None
     provider: str = ""                # "" => use DEFAULT_PROVIDER at lookup time
     supports_caching: bool = True
 
     @property
-    def cache_read_per_m(self) -> float:
+    def cache_read_per_m(self) -> float | None:
+        if self.input_per_m is None:
+            return None
         return round(self.input_per_m * 0.1, 4) if self.supports_caching else self.input_per_m
 
     @property
-    def cache_write_per_m(self) -> float:
+    def cache_write_per_m(self) -> float | None:
+        if self.input_per_m is None:
+            return None
         return round(self.input_per_m * 1.25, 4) if self.supports_caching else self.input_per_m
 
 
