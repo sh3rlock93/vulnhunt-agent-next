@@ -8,6 +8,7 @@ from enum import StrEnum
 from ..domain.schemas import (
     Evidence,
     EvidenceKind,
+    OracleResult,
     ReproductionSpec,
 )
 from ..domain.states import FindingState
@@ -56,6 +57,7 @@ class ReproducerService:
         if (
             finding.poc is None
             or finding.poc.artifact != spec.poc_artifact
+            or finding.poc.setup_argvs != spec.setup_argvs
             or finding.poc.argv != spec.argv
             or finding.poc.cwd != spec.cwd
         ):
@@ -176,6 +178,7 @@ class ReproducerService:
                 source_tar=self.artifacts.path_for(spec.source_snapshot),
                 poc_file=self.artifacts.path_for(spec.poc_artifact),
                 poc_path=spec.poc_path,
+                setup_argvs=spec.setup_argvs,
                 argv=spec.argv,
                 cwd=spec.cwd,
                 env=spec.env,
@@ -193,7 +196,15 @@ class ReproducerService:
         }
         for artifact in captured.values():
             self.repository.register_artifact(artifact)
-        oracle = evaluate_oracle(spec.oracle, execution.result)
+        setup_succeeded = all(
+            item.exit_code == 0 and not item.timed_out
+            for item in execution.setup_results
+        )
+        oracle = (
+            evaluate_oracle(spec.oracle, execution.result)
+            if setup_succeeded
+            else _failed_oracle(spec)
+        )
         return Evidence(
             evidence_id=_evidence_id(spec, attempt),
             run_id=spec.run_id,
@@ -204,6 +215,7 @@ class ReproducerService:
             attempt=attempt,
             source_snapshot=spec.source_snapshot,
             image_digest=execution.image_digest,
+            setup_commands=spec.setup_argvs,
             command=spec.argv,
             exit_code=execution.result.exit_code,
             timed_out=execution.result.timed_out,
@@ -251,10 +263,19 @@ def _is_deterministic(
             and item.candidate_id == spec.candidate_id
             and item.reproduction_group == spec.reproduction_id
             and item.source_snapshot == spec.source_snapshot
+            and item.setup_commands == spec.setup_argvs
             and item.command == spec.argv
             and not item.timed_out
             and item.oracle is not None
             and item.oracle.result == "passed"
             for item in evidence
         )
+    )
+
+
+def _failed_oracle(spec: ReproductionSpec) -> OracleResult:
+    return OracleResult(
+        type=spec.oracle.type.value,
+        expression="setup command failed",
+        result="failed",
     )

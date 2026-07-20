@@ -67,7 +67,7 @@ async def run_filter(store: RunStore, bus: EventBus) -> None:
 
 register(Step(
     name="filtered_files",
-    title="1. File Filter",
+    title="2. File Filter",
     fn=run_filter,
-    depends_on=[],
+    depends_on=["source_snapshot"],
 ))

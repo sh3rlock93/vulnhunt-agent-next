@@ -76,7 +76,7 @@ class SandboxPolicy:
             "--ulimit",
             "nofile=1024:1024",
             "--tmpfs",
-            f"/workspace:rw,nosuid,nodev,size={self.workspace_size},mode=1777",
+            f"/workspace:rw,noexec,nosuid,nodev,size={self.workspace_size},mode=1777",
             "--tmpfs",
             f"/tmp:rw,nosuid,nodev,noexec,size={self.tmp_size},mode=1777",
             "--env",
@@ -84,6 +84,14 @@ class SandboxPolicy:
             "--workdir",
             "/workspace",
         ]
+        if self.role in {SandboxRole.HUNT, SandboxRole.REPRODUCE}:
+            args.extend([
+                "--tmpfs",
+                (
+                    "/workspace/exec:rw,exec,nosuid,nodev,"
+                    f"size={self.tmp_size},mode=1777"
+                ),
+            ])
         if self.read_only_root:
             args.append("--read-only")
         args.extend([image, "sleep", "infinity"])

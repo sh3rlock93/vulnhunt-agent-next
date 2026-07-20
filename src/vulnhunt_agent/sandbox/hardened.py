@@ -41,9 +41,36 @@ class HardenedDockerBackend:
             cleanup.register(name)
 
             await self._setup_source(name, job)
-            result = await self._exec_argv(name, job)
+            completed_setup: list[ExecResult] = []
+            for command in job.setup_argvs:
+                setup_result = await self._exec_argv(name, job, command)
+                completed_setup.append(setup_result)
+                if setup_result.exit_code != 0 or setup_result.timed_out:
+                    break
+            setup_results = tuple(completed_setup)
+            if all(
+                item.exit_code == 0 and not item.timed_out
+                for item in setup_results
+            ):
+                result = await self._exec_argv(name, job, job.argv)
+            else:
+                failed = next(
+                    item for item in setup_results
+                    if item.exit_code != 0 or item.timed_out
+                )
+                result = ExecResult(
+                    exit_code=failed.exit_code,
+                    stdout=failed.stdout,
+                    stderr=("setup command failed\n" + failed.stderr).strip(),
+                    timed_out=failed.timed_out,
+                    duration_ms=failed.duration_ms,
+                )
             result.captured_files = await self._capture_files(name, job.capture_files)
-            return SandboxExecution(image_digest=image_digest, result=result)
+            return SandboxExecution(
+                image_digest=image_digest,
+                result=result,
+                setup_results=setup_results,
+            )
         finally:
             if started:
                 await self._run_cli("rm", "-f", name)
@@ -52,7 +79,13 @@ class HardenedDockerBackend:
     async def _setup_source(self, name: str, job: SandboxJob) -> None:
         _check(
             await self._run_cli(
-                "exec", name, "mkdir", "-p", "/workspace/source", "/workspace/poc"
+                "exec",
+                name,
+                "mkdir",
+                "-p",
+                "/workspace/source",
+                "/workspace/poc",
+                "/workspace/exec",
             ),
             "create workspace directories",
         )
@@ -93,8 +126,13 @@ class HardenedDockerBackend:
             "stream PoC",
         )
 
-    async def _exec_argv(self, name: str, job: SandboxJob) -> ExecResult:
-        args = build_exec_args(name=name, cwd=job.cwd, env=job.env, argv=job.argv)
+    async def _exec_argv(
+        self,
+        name: str,
+        job: SandboxJob,
+        argv: tuple[str, ...],
+    ) -> ExecResult:
+        args = build_exec_args(name=name, cwd=job.cwd, env=job.env, argv=argv)
         started_at = time.monotonic()
         proc = await asyncio.create_subprocess_exec(
             "docker",
@@ -200,6 +238,8 @@ def validate_job(job: SandboxJob) -> None:
     if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/:@-]{0,254}", job.image) is None:
         raise ValueError("invalid Docker image reference")
     validate_argv(job.argv)
+    for command in job.setup_argvs:
+        validate_argv(command)
     _validate_relative_path(job.cwd, label="sandbox cwd")
     _validate_relative_path(job.poc_path, label="PoC path")
     if PurePosixPath(job.poc_path) == PurePosixPath("."):

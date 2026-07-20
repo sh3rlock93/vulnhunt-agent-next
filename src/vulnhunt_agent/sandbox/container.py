@@ -12,7 +12,7 @@ from pathlib import PurePosixPath
 
 from ..core.settings import ENV_TO_IMAGE
 from ..infrastructure.artifacts import ArtifactStore
-from ..intake.snapshot import SnapshotBuilder
+from ..intake.snapshot import SnapshotBuilder, validate_snapshot_archive
 from . import cleanup
 from .base import ExecResult, validate_argv
 
@@ -42,6 +42,7 @@ class ContainerExecutor:
         memory: str = "2g",
         code_writable: bool = False,
         source_baked: bool = False,
+        source_archive: Path | None = None,
     ):
         self.repo = repo.resolve()
         self.image = image
@@ -50,6 +51,7 @@ class ContainerExecutor:
         self.memory = memory
         self.code_writable = code_writable
         self.source_baked = source_baked
+        self.source_archive = source_archive.resolve() if source_archive else None
         self.name = f"{cleanup.NAME_PREFIX}{secrets.token_hex(4)}"
         self._started = False
 
@@ -254,24 +256,31 @@ class ContainerExecutor:
 
     async def _stream_source_snapshot(self) -> None:
         """Copy a normalized source tar into the build container without mounts."""
+        if self.source_archive is not None:
+            validate_snapshot_archive(self.source_archive)
+            await self._extract_source_tar(self.source_archive)
+            return
         with tempfile.TemporaryDirectory(prefix="vulnhunt-build-source-") as temporary:
             artifacts = ArtifactStore(Path(temporary) / "artifacts")
             snapshot = SnapshotBuilder(artifacts).create(self.repo)
             source_tar = artifacts.path_for(snapshot.snapshot_artifact)
-            mkdir = await self._run_cli("exec", self.name, "mkdir", "-p", "/code")
-            _check(mkdir, "create source directory")
-            extracted = await self._stream_cli_file(
-                source_tar,
-                "exec",
-                "-i",
-                self.name,
-                "tar",
-                "-xf",
-                "-",
-                "-C",
-                "/code",
-            )
-            _check(extracted, "extract source snapshot")
+            await self._extract_source_tar(source_tar)
+
+    async def _extract_source_tar(self, source_tar: Path) -> None:
+        mkdir = await self._run_cli("exec", self.name, "mkdir", "-p", "/code")
+        _check(mkdir, "create source directory")
+        extracted = await self._stream_cli_file(
+            source_tar,
+            "exec",
+            "-i",
+            self.name,
+            "tar",
+            "-xf",
+            "-",
+            "-C",
+            "/code",
+        )
+        _check(extracted, "extract source snapshot")
 
 
 def _check(proc, action: str) -> None:

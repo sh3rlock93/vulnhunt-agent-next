@@ -20,7 +20,7 @@ from .views import render_hunt_view, render_selector_view
 
 # Steps that may run for many minutes. Everything else is fast enough to run
 # inline with a spinner.
-BACKGROUND_STEPS = {"hunt", "sandbox_prepare"}
+BACKGROUND_STEPS = {"hunt", "sandbox_prepare", "verify"}
 
 
 def render_running_banner(store: RunStore) -> None:

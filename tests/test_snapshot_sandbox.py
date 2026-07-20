@@ -112,6 +112,8 @@ def test_hardened_policies_forbid_mount_network_root_and_shell_bypass() -> None:
     assert "--volume" not in args
     assert "--mount" not in args
     assert "/var/run/docker.sock" not in joined
+    assert "/workspace:rw,noexec" in joined
+    assert "/workspace/exec:rw,exec" in joined
 
     injected = "value; touch /tmp/escaped"
     exec_args = build_exec_args(

@@ -32,6 +32,8 @@ class HunterTools:
         self.poc_roots: list[Path] = _normalize_roots(poc_root)
         self._seen_reads: set[tuple] = set()
         self._seen_greps: set[tuple] = set()
+        self.execution_records: list[dict] = []
+        self.written_pocs: list[str] = []
         for root in self.poc_roots:
             root.mkdir(parents=True, exist_ok=True)
 
@@ -143,6 +145,8 @@ class HunterTools:
             if mirror == self.poc_root or self.poc_root in mirror.parents:
                 mirror.parent.mkdir(parents=True, exist_ok=True)
                 mirror.write_text(content)
+                if path not in self.written_pocs:
+                    self.written_pocs.append(path)
         return f"OK: wrote {len(content)} bytes to /workspace/{path}"
 
     async def _exec(self, argv: tuple[str, ...], timeout: int, cwd: str) -> str:
@@ -151,6 +155,16 @@ class HunterTools:
         r = await self.sandbox.exec_argv(argv, timeout=timeout, cwd=cwd)
         out = (r.stdout or "")[: self.EXEC_OUTPUT_CAP]
         err = (r.stderr or "")[: self.EXEC_OUTPUT_CAP]
+        self.execution_records.append({
+            "argv": list(argv),
+            "cwd": cwd,
+            "timeout": timeout,
+            "exit_code": r.exit_code,
+            "timed_out": r.timed_out,
+            "duration_ms": r.duration_ms,
+            "stdout": out,
+            "stderr": err,
+        })
         return (
             f"exit_code={r.exit_code} timed_out={r.timed_out}\n"
             f"--- stdout ---\n{out}\n--- stderr ---\n{err}"

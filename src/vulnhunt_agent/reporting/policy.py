@@ -104,10 +104,12 @@ def _valid_reproduction_group(
         return False
     attempts = {item.attempt for item in evidence}
     images = {item.image_digest for item in evidence}
+    setup_commands = {item.setup_commands for item in evidence}
     commands = {item.command for item in evidence}
     return (
         attempts == set(range(1, len(evidence) + 1))
         and len(images) == 1
+        and len(setup_commands) == 1
         and len(commands) == 1
         and all(
             item.run_id == run_id

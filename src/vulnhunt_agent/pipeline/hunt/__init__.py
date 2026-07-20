@@ -1,12 +1,10 @@
-"""Step 6: Hunt — three-phase pipeline per file.
+"""Step 7: Hunt — Hunter and clustering pipeline per file.
 
   Phase A (hunters):  parallel HunterAgent per (file, hunter)
   Phase B (cluster):  ClustererAgent groups similar findings (skipped if
                       <2 findings or only 1 hunter produced findings)
-  Phase C (review):   ReviewerAgent per group — verdict + merge + report
-
-Per-file dirs are independent → progressive results: a file's reports appear
-the moment its review phase finishes, without waiting for other files.
+Evidence-aware reproduction, review, and reporting run in the following
+Verified Findings step.
 """
 from __future__ import annotations
 
@@ -20,18 +18,21 @@ from ...agents.queue import HuntQueueStore, HuntTask
 from ...core.events import EventBus
 from ...core.llm import LLMClient
 from ...core.run_store import RunStore
+from ...core.v2_run import advance_run, assert_source_snapshot_current
+from ...domain.states import RunState
 from ...prompts import hunters_for
 from ...sandbox import base_image_for, language_of
 from .. import finalize
 from ..registry import Step, register
 from .cluster import run_clusterer
 from .hunters import flatten, run_hunters
-from .reviews import run_reviews
 
 
 async def run_hunt(store: RunStore, bus: EventBus) -> None:
     cfg = store.load_config() or {}
     prepare = store.load_step("sandbox_prepare") or {}
+    assert_source_snapshot_current(store)
+    advance_run(store, RunState.HUNTING, reason="Hunter execution started")
 
     repo = Path(cfg["repo_path"])
     env = cfg["environment"]
@@ -80,8 +81,6 @@ async def run_hunt(store: RunStore, bus: EventBus) -> None:
     )
 
     hunter_sem = asyncio.Semaphore(max_parallel)
-    review_sem = asyncio.Semaphore(max_parallel)
-
     async def run_file(task: HuntTask) -> None:
         if task.status in {"done", "failed"}:
             return
@@ -99,14 +98,8 @@ async def run_hunt(store: RunStore, bus: EventBus) -> None:
                 return
 
             qstore.mark_file_phase(task, "clustering")
-            groups = await run_clusterer(
+            await run_clusterer(
                 task, qstore, reviewer_client, all_findings, origins, bus,
-            )
-
-            qstore.mark_file_phase(task, "reviewing")
-            await run_reviews(
-                task, qstore, repo, reviewer_client, arch, groups,
-                all_findings, origins, review_sem, bus,
             )
             qstore.mark_file_done(task)
         except Exception as e:
@@ -115,6 +108,11 @@ async def run_hunt(store: RunStore, bus: EventBus) -> None:
 
     await asyncio.gather(*[run_file(t) for t in queue.tasks])
     _save_summary(store, qstore, bus, hunter_image)
+    advance_run(
+        store,
+        RunState.REPRODUCING,
+        reason="Hunter execution and clustering complete",
+    )
 
 
 def _resolve_hunter_selection(steps_dir: Path, language: str) -> list[str]:
@@ -161,7 +159,7 @@ def _save_summary(store: RunStore, qstore: HuntQueueStore, bus: EventBus, image:
 
 register(Step(
     name="hunt",
-    title="6. Hunter Agents",
+    title="7. Hunter Agents",
     fn=run_hunt,
     depends_on=["file_selector", "sandbox_prepare"],
 ))

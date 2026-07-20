@@ -10,6 +10,7 @@ from vulnhunt_agent.pipeline import STEPS
 from vulnhunt_agent.pipeline.analysis_graph import run_analysis_graph
 from vulnhunt_agent.pipeline.file_selector import run_file_selector
 from vulnhunt_agent.pipeline.filter_files import run_filter
+from vulnhunt_agent.pipeline.source_snapshot import run_source_snapshot
 from vulnhunt_agent.pipeline import rank as rank_module
 
 FIXTURE_REPO = Path(__file__).parent / "fixtures" / "python_insecure_app"
@@ -54,6 +55,7 @@ async def test_filter_rank_selector_matches_golden(tmp_path, monkeypatch) -> Non
     bus = EventBus(store.dir / "events.jsonl")
     monkeypatch.setattr(rank_module, "LLMClient", lambda **kwargs: FakeRankClient())
 
+    await run_source_snapshot(store, bus)
     await run_filter(store, bus)
     await run_analysis_graph(store, bus)
     await rank_module.run_rank(store, bus)
@@ -68,18 +70,20 @@ async def test_filter_rank_selector_matches_golden(tmp_path, monkeypatch) -> Non
     assert actual == expected
 
     event_types = [event["type"] for event in bus.read_all()]
-    assert event_types.count("step_done") == 4
+    assert event_types.count("step_done") == 5
     assert "rank_indexed" in event_types
     assert "rank_batch_done" in event_types
 
 
 def test_registered_pipeline_order_is_stable() -> None:
     assert [step.name for step in STEPS] == [
+        "source_snapshot",
         "filtered_files",
         "analysis_graph",
         "ranked_files",
         "file_selector",
         "sandbox_prepare",
         "hunt",
+        "verify",
     ]
-    assert STEPS[-1].depends_on == ["file_selector", "sandbox_prepare"]
+    assert STEPS[-1].depends_on == ["hunt"]

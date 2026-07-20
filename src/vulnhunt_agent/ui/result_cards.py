@@ -35,6 +35,13 @@ def _filter(store: RunStore, d: dict) -> None:
         st.progress(kept / total, text=f"{kept}/{total} files kept")
 
 
+def _source_snapshot(store: RunStore, d: dict) -> None:
+    c1, c2 = st.columns(2)
+    c1.metric("Files", f"{d.get('file_count', 0):,}")
+    c2.metric("Bytes", f"{d.get('total_bytes', 0):,}")
+    st.caption(f"Snapshot: `{d.get('snapshot_artifact', '—')}`")
+
+
 def _rank(store: RunStore, d: dict) -> None:
     ranked = d.get("all") or []
     if not ranked:
@@ -113,6 +120,19 @@ def _prepare(store: RunStore, d: dict) -> None:
 
 def _hunt(store: RunStore, d: dict) -> None:
     pass
+
+
+def _verify(store: RunStore, d: dict) -> None:
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Candidates", d.get("candidates", 0))
+    c2.metric("Accepted recipes", d.get("recipes_accepted", 0))
+    c3.metric("Strict reports", d.get("reports", 0))
+    states = d.get("states") or {}
+    if states:
+        st.caption(" · ".join(f"{key}: {value}" for key, value in states.items()))
+    errors = d.get("errors") or []
+    if errors:
+        st.warning(f"{len(errors)} candidate operation(s) need attention.")
 
 
 # ---------- prepare settings (always shown) ----------
@@ -317,10 +337,12 @@ def _duration(start: datetime, end: datetime) -> str:
 
 
 _RENDERERS = {
+    "source_snapshot": _source_snapshot,
     "filtered_files":  _filter,
     "analysis_graph":  _analysis_graph,
     "ranked_files":    _rank,
     "file_selector":   _selector,
     "sandbox_prepare": _prepare,
     "hunt":            _hunt,
+    "verify":          _verify,
 }

@@ -160,6 +160,7 @@ docs/milestones/*
 !docs/milestones/m3-c-native-analysis.md
 !docs/milestones/m4-evidence-review-reporting.md
 !docs/milestones/m5-c-analysis-graph.md
+!docs/milestones/m6-verified-pipeline.md
 notes/
 tools/
 docker/local/

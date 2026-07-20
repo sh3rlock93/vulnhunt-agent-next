@@ -31,6 +31,7 @@ def build_canonical_report(
             "reproduction_group": item.reproduction_group,
             "attempt": item.attempt,
             "image_digest": item.image_digest,
+            "setup_commands": [list(command) for command in item.setup_commands],
             "command": list(item.command),
             "exit_code": item.exit_code,
             "timed_out": item.timed_out,
@@ -138,7 +139,11 @@ def render_markdown(report: dict[str, Any]) -> str:
             f"### `{item['evidence_id']}` (attempt {item['attempt']})",
             "",
             f"- Image: `{item['image_digest']}`",
-            f"- Command: `{' '.join(item['command'])}`",
+        ])
+        for command in item.get("setup_commands", []):
+            lines.append(f"- Setup: `{' '.join(command)}`")
+        lines.extend([
+            f"- Trigger: `{' '.join(item['command'])}`",
             f"- Exit: `{item['exit_code']}`; timed out: `{item['timed_out']}`",
             (
                 f"- Oracle: `{oracle.get('expression') or oracle.get('type', '')}` "

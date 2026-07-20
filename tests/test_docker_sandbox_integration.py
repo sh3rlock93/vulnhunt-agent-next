@@ -129,7 +129,7 @@ async def test_real_build_and_hunt_sandboxes_use_baked_source_without_mounts(
 async def test_real_native_hunter_compiles_and_runs_asan_poc_in_exec_tmpfs(
     tmp_path,
 ) -> None:
-    _require_docker()
+    _require_docker(NATIVE_IMAGE)
     source = tmp_path / "native-source"
     source.mkdir()
     (source / "target.c").write_text(
@@ -332,8 +332,61 @@ print("SANDBOX_CONTRACT_OK")
     assert len(noisy.result.stdout.encode()) == 1024 * 1024
 
 
-def _require_docker() -> None:
+async def test_real_reproducer_runs_native_setup_before_trigger(tmp_path) -> None:
+    _require_docker(NATIVE_IMAGE)
+    source = tmp_path / "native-reproducer-source"
+    source.mkdir()
+    (source / "target.c").write_text(
+        "__attribute__((noinline))\n"
+        "void write_index(int *values, int index) { values[index] = 7; }\n"
+    )
+    artifacts = ArtifactStore(tmp_path / "native-reproducer-artifacts")
+    snapshot = SnapshotBuilder(artifacts).create(source)
+    poc = artifacts.put_text(
+        "#include <stdlib.h>\n"
+        "void write_index(int *, int);\n"
+        "int main(void) { int *values = malloc(sizeof(*values)); "
+        "volatile int index = 1; write_index(values, index); "
+        "free(values); return 0; }\n",
+        "text/x-c",
+    )
+    setup = ((
+        "cc",
+        "-O1",
+        "-g",
+        "-fno-omit-frame-pointer",
+        "-fsanitize=address,undefined",
+        "/workspace/poc/poc.c",
+        "/workspace/source/target.c",
+        "-o",
+        "/workspace/exec/poc",
+    ),)
+    job = SandboxJob(
+        image=NATIVE_IMAGE,
+        source_tar=artifacts.path_for(snapshot.snapshot_artifact),
+        poc_file=artifacts.path_for(poc.digest),
+        poc_path="poc.c",
+        setup_argvs=setup,
+        argv=(
+            "env",
+            "ASAN_OPTIONS=detect_leaks=0:abort_on_error=1",
+            "/workspace/exec/poc",
+        ),
+        cwd=".",
+        env={},
+        timeout_seconds=30,
+    )
+
+    execution = await HardenedDockerBackend().execute(job)
+
+    assert len(execution.setup_results) == 1
+    assert execution.setup_results[0].exit_code == 0, execution.setup_results[0].stderr
+    assert execution.result.exit_code != 0
+    assert "AddressSanitizer" in execution.result.stderr
+
+
+def _require_docker(image: str = IMAGE) -> None:
     if os.environ.get("VULNHUNT_RUN_DOCKER_TESTS") != "1":
         pytest.skip("set VULNHUNT_RUN_DOCKER_TESTS=1 for the real Docker contract")
     subprocess.run(["docker", "info"], check=True, capture_output=True)
-    subprocess.run(["docker", "image", "inspect", IMAGE], check=True, capture_output=True)
+    subprocess.run(["docker", "image", "inspect", image], check=True, capture_output=True)
