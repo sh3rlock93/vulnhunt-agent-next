@@ -17,6 +17,13 @@ _SEVERITY_BADGE = {
 
 
 def render_final_report(store: RunStore) -> None:
+    hunt = store.load_step("hunt") or {}
+    deferred = hunt.get("unanalysed_work_ids") or []
+    if deferred:
+        st.warning(
+            f"Analysis is incomplete: {len(deferred)} Hunter work item(s) were "
+            "deferred by the configured hard budget."
+        )
     hunters_dir = store.dir / "hunters"
     verified_dir = store.dir / "verified"
     if not hunters_dir.exists() and not verified_dir.exists():

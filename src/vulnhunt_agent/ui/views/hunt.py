@@ -36,6 +36,21 @@ def render_hunt_view(store: RunStore) -> None:
                 "Critical sinks were not routed: "
                 + ", ".join(plan["uncovered_critical_sink_ids"])
             )
+        allocation = plan.get("budget_allocation") or {}
+        if allocation:
+            st.caption(
+                "Budget allocation: "
+                f"{allocation.get('admitted_sessions', 0)} admitted · "
+                f"{allocation.get('critical_slots', 0)} critical · "
+                f"{allocation.get('high_risk_slots', 0)} high-risk · "
+                f"{allocation.get('retry_slots', 0)} retry slots"
+            )
+        deferred_critical = plan.get("budget_deferred_critical_work_ids") or []
+        if deferred_critical:
+            st.warning(
+                f"{len(deferred_critical)} critical work item(s) were not analysed "
+                "because the hard session budget was too small."
+            )
 
     durable = DurableHuntQueueStore(
         store.dir / "hunters",
@@ -61,12 +76,21 @@ def render_hunt_view(store: RunStore) -> None:
 
     rows = list(_iter_hunter_rows(queue))
 
-    counts = {"done": 0, "running": 0, "pending": 0, "failed": 0}
+    counts = {
+        "done": 0,
+        "running": 0,
+        "pending": 0,
+        "budget_deferred": 0,
+        "failed": 0,
+    }
     for r in rows:
         counts[r["status"]] = counts.get(r["status"], 0) + 1
 
-    cols = st.columns(4)
-    for col, key in zip(cols, ("done", "running", "pending", "failed")):
+    cols = st.columns(5)
+    for col, key in zip(
+        cols,
+        ("done", "running", "pending", "budget_deferred", "failed"),
+    ):
         col.metric(key, counts.get(key, 0))
 
     if counts.get("failed") and st.button("Reset failed → pending"):

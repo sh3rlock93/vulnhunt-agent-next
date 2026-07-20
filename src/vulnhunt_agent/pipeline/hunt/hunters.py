@@ -21,10 +21,11 @@ async def run_hunters(
     sandbox_enabled: bool,
     work_items: dict[str, HunterWorkItem] | None = None,
     before_commit=None,
-) -> tuple[dict[str, list[dict]], list[BudgetUsage]]:
+) -> tuple[dict[str, list[dict]], list[BudgetUsage], dict[str, str]]:
     """Run all hunters for one file in parallel; return {hunter_name: findings}."""
     out: dict[str, list[dict]] = {}
     usage_items: list[BudgetUsage] = []
+    deferred: dict[str, str] = {}
 
     async def one(name: str) -> None:
         sub = next(s for s in task.hunters if s.name == name)
@@ -73,7 +74,16 @@ async def run_hunters(
                 (hunt_dir / "findings.json").write_text(
                     json.dumps(asdict(result), indent=2, ensure_ascii=False)
                 )
-                qstore.mark_hunt_done(task, name, findings_count=len(result.findings))
+                if result.stopped == "budget_exhausted":
+                    reason = result.budget_reason or "budget_exhausted"
+                    deferred[name] = reason
+                    qstore.mark_hunt_deferred(task, name, reason)
+                else:
+                    qstore.mark_hunt_done(
+                        task,
+                        name,
+                        findings_count=len(result.findings),
+                    )
                 work_item = (work_items or {}).get(name)
                 if work_item is not None:
                     usage_items.append(with_estimated_cost(BudgetUsage(
@@ -95,9 +105,17 @@ async def run_hunters(
                         exec_calls=result.exec_calls,
                         wall_time_ms=max(0, int((time.monotonic() - started) * 1000)),
                     )))
-                bus.emit("hunter_done", file=task.file, hunter=name,
-                         findings=len(result.findings), iterations=result.iterations,
-                         stopped=result.stopped)
+                bus.emit(
+                    "hunter_deferred"
+                    if result.stopped == "budget_exhausted"
+                    else "hunter_done",
+                    file=task.file,
+                    hunter=name,
+                    findings=len(result.findings),
+                    iterations=result.iterations,
+                    stopped=result.stopped,
+                    reason=result.budget_reason,
+                )
                 out[name] = result.findings
             except Exception as e:
                 qstore.mark_hunt_failed(task, name, error=str(e))
@@ -112,7 +130,7 @@ async def run_hunters(
 
     import asyncio
     await asyncio.gather(*[one(s.name) for s in task.hunters])
-    return out, usage_items
+    return out, usage_items, deferred
 
 
 def flatten(by_name: dict[str, list[dict]]) -> tuple[list[dict], list[str]]:

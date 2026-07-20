@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 
 from ..core.jsonx import try_extract_object
 from ..core.llm import LLMClient
+from ..scheduling.budget import BudgetExceededError
 from .tools import HunterTools, tool_specs
 
 
@@ -113,6 +114,7 @@ class HuntResult:
     poc_writes: int = 0
     exec_calls: int = 0
     stopped: str = ""   # "final_json" | "max_iter" | "error"
+    budget_reason: str = ""
 
 
 class HunterAgent:
@@ -160,18 +162,23 @@ class HunterAgent:
         }]
 
         for i in range(self.max_iterations):
+            self.on_event("iter", n=i + 1)
+            try:
+                resp = await self.client.chat(
+                    messages=messages,
+                    system=system_prompt,
+                    tools=specs,
+                    max_tokens=self.max_tokens_per_call,
+                    cache_system=True,
+                    cache_tools=True,
+                    cache_last_user=True,
+                )
+            except BudgetExceededError as exc:
+                result.stopped = "budget_exhausted"
+                result.budget_reason = exc.reason
+                self._attach_tool_ledger(result)
+                return result
             result.iterations = i + 1
-            self.on_event("iter", n=result.iterations)
-
-            resp = await self.client.chat(
-                messages=messages,
-                system=system_prompt,
-                tools=specs,
-                max_tokens=self.max_tokens_per_call,
-                cache_system=True,
-                cache_tools=True,
-                cache_last_user=True,
-            )
             result.input_tokens += resp.input_tokens
             result.output_tokens += resp.output_tokens
             result.cache_read_tokens += resp.cache_read_tokens

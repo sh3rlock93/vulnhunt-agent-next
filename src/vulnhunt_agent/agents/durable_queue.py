@@ -130,6 +130,17 @@ class DurableHuntQueueStore(HuntQueueStore):
                 error=error,
             )
 
+    def defer(self, task: HuntTask, *, reason: str) -> None:
+        with SqliteRepository(self.database) as repository:
+            repository.defer_task_for_budget(
+                self.run_id,
+                "hunter",
+                task.work_id,
+                reason=reason,
+            )
+        self.mark_hunt_deferred(task, task.hunters[0].name, reason)
+        self.mark_file_deferred(task, reason)
+
     def reset_failed(self) -> int:
         count = 0
         with SqliteRepository(self.database) as repository:
@@ -168,13 +179,19 @@ class DurableHuntQueueStore(HuntQueueStore):
                 hunters=[HuntSubTask(name=item.hunter)],
             )
         task.status = _task_phase(str(row["status"]), task.status)
-        if row["status"] in {"done", "failed"}:
+        if row["status"] in {"done", "failed", "budget_deferred"}:
             task.finished_at = str(row.get("completed_at") or task.finished_at)
         if row["status"] == "failed":
             task.error = str(row.get("last_error") or task.error)
             for subtask in task.hunters:
                 if subtask.status != "done":
                     subtask.status = "failed"
+                    subtask.error = task.error
+        if row["status"] == "budget_deferred":
+            task.error = str(row.get("last_error") or task.error)
+            for subtask in task.hunters:
+                if subtask.status != "done":
+                    subtask.status = "budget_deferred"
                     subtask.error = task.error
         return task
 
@@ -188,4 +205,6 @@ def _task_phase(status: str, local: str) -> str:
         return "done"
     if status == "failed":
         return "failed"
+    if status == "budget_deferred":
+        return "budget_deferred"
     return status

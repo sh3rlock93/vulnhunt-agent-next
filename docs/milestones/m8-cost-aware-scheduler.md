@@ -1,6 +1,6 @@
 # M8 — Cost-aware slice scheduling
 
-Status: In progress (PR 3 of 6 complete)
+Status: In progress (PR 4 of 6 complete)
 
 ## Goal
 
@@ -42,9 +42,8 @@ cannot perturb identity.
 
 ## Remaining increments
 
-1. Hard budgets and adaptive iteration limits.
-2. Shared immutable context cache.
-3. Git-diff incremental scanning and final benchmark gates.
+1. Shared immutable context cache.
+2. Git-diff incremental scanning and final benchmark gates.
 
 ## PR 1 acceptance gates
 
@@ -128,3 +127,57 @@ same bounded three-file path.
 - [x] Lease tokens are absent from read APIs and UI data.
 - [x] End-to-end hunt execution completes through the SQLite slice queue.
 - [x] Legacy JSON queue tests and importer behavior remain supported.
+
+## PR 4 — Hard budgets and adaptive Hunter depth
+
+Hunter execution now has provider-neutral hard limits for sessions, input
+tokens (including cache reads/writes), output tokens, wall-clock time, and
+retries. The same limits apply to API and Codex subscription transports;
+subscription usage remains unpriced but is not unmetered.
+
+Session admission is deterministic. The scheduler aims to reserve 60% for
+required critical work, 30% for non-critical high-risk work, and 10% for
+retries. Empty reservations may be borrowed in risk order so small scans are
+not artificially deferred. If the configured limit cannot cover every item,
+the omitted work is stored as the terminal `budget_deferred` state rather than
+being mislabeled as a Hunter failure.
+
+A shared call controller reserves a conservative input upper bound and the
+remaining output allowance before a provider request starts. Concurrent
+Hunters therefore cannot independently spend the same remaining tokens.
+Provider calls are capped to the remaining output tokens and cancelled at the
+wall-clock deadline. Usage already persisted for a resumed run reduces the
+remaining budget.
+
+Hunter depth is selected per item and then bounded by the operator's existing
+`hunter_max_iterations` cap:
+
+- ordinary work: 8 iterations;
+- required or risk-4/5 work: 30 iterations;
+- a retry or work with existing PoC evidence: 100 iterations.
+
+The Hunt plan records admitted/deferred counts and allocation classes. The Hunt
+summary records every unanalysed work ID, and both the Hunt and Final Report
+views display an explicit incomplete-analysis warning when budget deferral
+occurred.
+
+The default configuration keys are:
+
+```text
+budget_max_hunter_sessions = 100
+budget_max_input_tokens = 2000000
+budget_max_output_tokens = 200000
+budget_max_wall_clock_minutes = 60
+budget_max_retries_per_work_item = 1
+```
+
+## PR 4 acceptance gates
+
+- [x] Critical work is admitted before high-risk and ordinary work.
+- [x] Concurrent model calls reserve shared input and output allowances.
+- [x] A call cannot start after the wall-clock deadline.
+- [x] Output tokens passed to the provider never exceed the remaining budget.
+- [x] Iteration depth follows deterministic 8/30/100 tiers.
+- [x] Retry attempts are capped by the budget policy.
+- [x] Budget deferral is durable and distinct from failure.
+- [x] Unanalysed and critical-unanalysed work is visible in artifacts and UI.

@@ -21,6 +21,7 @@ from ...core.events import EventBus
 from ...core.llm import LLMClient
 from ...core.run_store import RunStore
 from ...core.v2_run import advance_run, assert_source_snapshot_current
+from ...domain.schemas import BudgetPolicy
 from ...domain.states import RunState
 from ...infrastructure.sqlite_repository import (
     SqliteRepository,
@@ -29,6 +30,10 @@ from ...infrastructure.sqlite_repository import (
 from ...prompts import hunters_for
 from ...sandbox import base_image_for, language_of
 from ...scheduling import (
+    BudgetController,
+    BudgetedLLMClient,
+    adaptive_iteration_limit,
+    allocate_work_items,
     build_routing_plan,
     build_slice_work_items,
     total_usage,
@@ -50,6 +55,7 @@ async def run_hunt(store: RunStore, bus: EventBus) -> None:
     arch = {"language": language_of(env), "environment": env}
     max_parallel = int(cfg.get("max_hunters_parallel", 3))
     max_iter = int(cfg.get("hunter_max_iterations", 100))
+    budget_policy = _budget_policy(cfg)
 
     prepared_image = prepare.get("image")
     sandbox_enabled = prepare.get("status") == "ready" and bool(prepared_image)
@@ -81,7 +87,7 @@ async def run_hunt(store: RunStore, bus: EventBus) -> None:
         )
     work_items = build_slice_work_items(routing_plan, analysis)
     by_work_id = {item.work_id: item for item in work_items}
-    store.save_step("hunt_plan", {
+    hunt_plan = {
         "mode": "slice",
         "policy_version": (
             work_items[0].planning_policy
@@ -113,7 +119,7 @@ async def run_hunt(store: RunStore, bus: EventBus) -> None:
             item.model_dump(mode="json")
             for item in work_items
         ],
-    })
+    }
 
     qstore = DurableHuntQueueStore(
         store.dir / "hunters",
@@ -121,12 +127,50 @@ async def run_hunt(store: RunStore, bus: EventBus) -> None:
         store.dir.name,
     )
     queue = qstore.init_from_work_items(work_items)
+    with SqliteRepository(store.dir / "state.db", read_only=True) as repository:
+        persisted_usage = repository.list_budget_usage(
+            store.dir.name, scope="hunter"
+        )
+    pending_ids = {
+        task.work_id for task in queue.tasks if task.status == "pending"
+    }
+    allocation = allocate_work_items(
+        tuple(item for item in work_items if item.work_id in pending_ids),
+        budget_policy,
+        consumed_sessions=sum(item.sessions for item in persisted_usage),
+    )
+    admitted_ids = set(allocation.admitted_work_ids)
+    task_by_id = {task.work_id: task for task in queue.tasks}
+    for work_id, reason in allocation.deferred.items():
+        qstore.defer(task_by_id[work_id], reason=reason)
+        bus.emit("hunter_budget_deferred", work_id=work_id, reason=reason)
+    hunt_plan["budget"] = budget_policy.model_dump(mode="json")
+    hunt_plan["budget_allocation"] = {
+        "admitted_sessions": len(allocation.admitted_work_ids),
+        "critical_slots": allocation.critical_slots,
+        "high_risk_slots": allocation.high_risk_slots,
+        "general_slots": allocation.general_slots,
+        "retry_slots": allocation.retry_slots,
+        "deferred_sessions": len(allocation.deferred),
+    }
+    hunt_plan["budget_deferred_work_ids"] = sorted(allocation.deferred)
+    hunt_plan["budget_deferred_critical_work_ids"] = sorted(
+        work_id
+        for work_id in allocation.deferred
+        if by_work_id[work_id].required
+    )
+    store.save_step("hunt_plan", hunt_plan)
 
     bus.emit("step_start", step="hunt",
-             total=len(work_items), parallel=max_parallel, max_iter=max_iter,
+             total=len(admitted_ids), parallel=max_parallel, max_iter=max_iter,
              image=hunter_image, hunters=hunters)
 
     hunter_client = LLMClient(model_id=cfg["model_id"])
+    budget_controller = BudgetController(budget_policy, persisted_usage)
+    budgeted_hunter_client = BudgetedLLMClient(
+        hunter_client,
+        budget_controller,
+    )
     reviewer_client = _maybe_other_client(cfg, "model_id_reviewer", hunter_client, bus)
     bus.emit(
         "model_transport",
@@ -144,10 +188,16 @@ async def run_hunt(store: RunStore, bus: EventBus) -> None:
     hunter_sem = asyncio.Semaphore(max_parallel)
     worker_id = f"hunter-{uuid.uuid4().hex[:16]}"
     lease_seconds = int(cfg.get("hunter_lease_seconds", 900))
-    max_attempts = int(cfg.get("hunter_max_attempts", 3))
+    max_attempts = min(
+        int(cfg.get(
+            "hunter_max_attempts",
+            budget_policy.max_retries_per_work_item + 1,
+        )),
+        budget_policy.max_retries_per_work_item + 1,
+    )
 
     async def run_work(task: HuntTask) -> None:
-        if task.status in {"done", "failed"}:
+        if task.status in {"done", "failed", "budget_deferred"}:
             return
         item = by_work_id.get(task.work_id)
         if item is None:
@@ -173,9 +223,15 @@ async def run_hunt(store: RunStore, bus: EventBus) -> None:
         try:
             qstore.mark_file_running(task)
             analysis_context = context_for_work_item(analysis, item)
-            findings_by_cat, usage_items = await run_hunters(
-                task, qstore, repo, hunter_client, hunter_image,
-                arch, analysis_context, sandbox_info, max_iter, hunter_sem, bus,
+            iteration_limit = adaptive_iteration_limit(
+                item,
+                configured_cap=max_iter,
+                attempt=lease.attempt,
+                has_evidence=_has_evidence(qstore, task),
+            )
+            findings_by_cat, usage_items, deferred = await run_hunters(
+                task, qstore, repo, budgeted_hunter_client, hunter_image,
+                arch, analysis_context, sandbox_info, iteration_limit, hunter_sem, bus,
                 sandbox_enabled,
                 {item.hunter: item},
                 lambda: qstore.heartbeat(
@@ -183,13 +239,30 @@ async def run_hunt(store: RunStore, bus: EventBus) -> None:
                     lease_seconds=lease_seconds,
                 ),
             )
-            failed = [sub.error for sub in task.hunters if sub.status == "failed"]
-            if failed:
-                raise RuntimeError(failed[0] or "Hunter work failed")
             if usage_items:
                 with SqliteRepository(store.dir / "state.db") as repository:
                     for usage in usage_items:
                         repository.save_budget_usage(usage)
+            if deferred:
+                reason = ",".join(sorted(set(deferred.values())))
+                await _stop_heartbeat(heartbeat_stop, heartbeat)
+                if heartbeat_errors:
+                    raise heartbeat_errors[0]
+                qstore.finish(
+                    lease,
+                    status="budget_deferred",
+                    error=reason,
+                )
+                qstore.mark_file_deferred(task, reason)
+                bus.emit(
+                    "hunter_budget_deferred",
+                    work_id=task.work_id,
+                    reason=reason,
+                )
+                return
+            failed = [sub.error for sub in task.hunters if sub.status == "failed"]
+            if failed:
+                raise RuntimeError(failed[0] or "Hunter work failed")
             all_findings, origins = flatten(findings_by_cat)
             if not all_findings:
                 await _stop_heartbeat(heartbeat_stop, heartbeat)
@@ -227,7 +300,11 @@ async def run_hunt(store: RunStore, bus: EventBus) -> None:
                 error=str(e),
             )
 
-    await asyncio.gather(*[run_work(t) for t in queue.tasks])
+    await asyncio.gather(*[
+        run_work(task)
+        for task in queue.tasks
+        if task.work_id in admitted_ids
+    ])
     with SqliteRepository(store.dir / "state.db", read_only=True) as repository:
         persisted_usage = repository.list_budget_usage(
             store.dir.name, scope="hunter"
@@ -238,6 +315,8 @@ async def run_hunt(store: RunStore, bus: EventBus) -> None:
         bus,
         hunter_image,
         total_usage(persisted_usage),
+        budget_policy,
+        budget_controller.snapshot(),
     )
     advance_run(
         store,
@@ -261,6 +340,32 @@ def _resolve_hunter_selection(steps_dir: Path, language: str) -> list[str]:
         for hunter in hunters_for(language)
         if hunter.default
     ]
+
+
+def _budget_policy(cfg: dict) -> BudgetPolicy:
+    return BudgetPolicy(
+        max_hunter_sessions=int(cfg.get("budget_max_hunter_sessions", 100)),
+        max_input_tokens=int(cfg.get("budget_max_input_tokens", 2_000_000)),
+        max_output_tokens=int(cfg.get("budget_max_output_tokens", 200_000)),
+        max_wall_clock_minutes=int(
+            cfg.get("budget_max_wall_clock_minutes", 60)
+        ),
+        max_retries_per_work_item=int(
+            cfg.get("budget_max_retries_per_work_item", 1)
+        ),
+    )
+
+
+def _has_evidence(
+    qstore: DurableHuntQueueStore,
+    task: HuntTask,
+) -> bool:
+    work_dir = qstore.task_dir(task)
+    hunter_dir = work_dir / "hunts" / task.hunters[0].name
+    if (hunter_dir / "findings.json").exists():
+        return True
+    pocs = hunter_dir / "pocs"
+    return pocs.exists() and any(path.is_file() for path in pocs.rglob("*"))
 
 
 def _maybe_other_client(cfg: dict, key: str, fallback: LLMClient, bus: EventBus) -> LLMClient:
@@ -305,18 +410,30 @@ def _save_summary(
     bus: EventBus,
     image: str,
     usage: dict[str, int | float | None],
+    policy: BudgetPolicy,
+    budget_state: dict[str, int | float | bool],
 ) -> None:
     final = qstore.load()
     summary = {
         "total": len(final.tasks),
         "done": sum(1 for t in final.tasks if t.status == "done"),
         "failed": sum(1 for t in final.tasks if t.status == "failed"),
+        "budget_deferred": sum(
+            1 for t in final.tasks if t.status == "budget_deferred"
+        ),
         "pending": sum(1 for t in final.tasks if t.status == "pending"),
         "total_findings": sum(
             sum(s.findings_count for s in t.hunters) for t in final.tasks
         ),
         "image": image,
         "usage": usage,
+        "budget": policy.model_dump(mode="json"),
+        "budget_state": budget_state,
+        "unanalysed_work_ids": sorted(
+            task.work_id
+            for task in final.tasks
+            if task.status == "budget_deferred"
+        ),
         "tasks": [asdict(t) for t in final.tasks],
     }
     store.save_step("hunt", summary)

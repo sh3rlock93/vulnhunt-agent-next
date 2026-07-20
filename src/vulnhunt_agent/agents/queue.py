@@ -21,7 +21,7 @@ from pathlib import Path
 @dataclass
 class HuntSubTask:
     name: str
-    status: str = "pending"           # pending | running | done | failed
+    status: str = "pending"           # includes done | failed | budget_deferred
     findings_count: int = 0
     started_at: str = ""
     finished_at: str = ""
@@ -47,7 +47,7 @@ class HuntTask:
     slice_ids: list[str] = field(default_factory=list)
     risk: int = 1
     required: bool = False
-    status: str = "pending"           # pending | hunting | clustering | reviewing | done | failed
+    status: str = "pending"           # includes done | failed | budget_deferred
     started_at: str = ""
     finished_at: str = ""
     error: str = ""
@@ -149,6 +149,13 @@ class HuntQueueStore:
         self._rewrite(task)
         self._write_task_json(task)
 
+    def mark_file_deferred(self, task: HuntTask, reason: str) -> None:
+        task.status = "budget_deferred"
+        task.finished_at = _now()
+        task.error = reason
+        self._rewrite(task)
+        self._write_task_json(task)
+
     def mark_hunt_running(self, task: HuntTask, name: str) -> None:
         sub = self._hunter(task, name)
         sub.status = "running"
@@ -168,6 +175,13 @@ class HuntQueueStore:
         sub.status = "failed"
         sub.finished_at = _now()
         sub.error = error
+        self._rewrite(task)
+
+    def mark_hunt_deferred(self, task: HuntTask, name: str, reason: str) -> None:
+        sub = self._hunter(task, name)
+        sub.status = "budget_deferred"
+        sub.finished_at = _now()
+        sub.error = reason
         self._rewrite(task)
 
     def reset_failed(self) -> int:

@@ -41,6 +41,11 @@ from vulnhunt_agent.pipeline.filter_files import run_filter
 from vulnhunt_agent.pipeline.source_snapshot import run_source_snapshot
 from vulnhunt_agent.pipeline import hunt as hunt_pipeline
 from vulnhunt_agent.scheduling import (
+    BudgetController,
+    BudgetedLLMClient,
+    BudgetExceededError,
+    adaptive_iteration_limit,
+    allocate_work_items,
     build_routing_plan,
     build_slice_work_items,
     build_shadow_plan,
@@ -118,6 +123,61 @@ def test_work_contract_and_budget_policy_are_strict() -> None:
         )
     with pytest.raises(ValidationError):
         BudgetPolicy(max_hunter_sessions=0)
+
+
+def test_budget_allocation_prioritizes_critical_high_and_retry_capacity() -> None:
+    base = list(build_shadow_plan(
+        run_id="run-1",
+        source_snapshot=HASH_A,
+        selected_files=[f"file-{index}.c" for index in range(6)],
+        hunters=["c-bounds-integers"],
+        analysis={},
+    ))
+    work = tuple(
+        item.model_copy(update={
+            "required": index < 3,
+            "risk": 5 if index < 3 else (4 if index == 3 else 1),
+        })
+        for index, item in enumerate(base)
+    )
+
+    allocation = allocate_work_items(
+        tuple(reversed(work)),
+        BudgetPolicy(max_hunter_sessions=5),
+    )
+
+    assert allocation.critical_slots == 3
+    assert allocation.high_risk_slots == 1
+    assert allocation.general_slots == 0
+    assert allocation.retry_slots == 1
+    assert len(allocation.admitted_work_ids) == 4
+    assert len(allocation.deferred) == 2
+    assert all(reason == "max_hunter_sessions" for reason in allocation.deferred.values())
+
+
+def test_adaptive_iteration_limits_use_8_30_100_tiers() -> None:
+    item = build_shadow_plan(
+        run_id="run-1",
+        source_snapshot=HASH_A,
+        selected_files=["state.c"],
+        hunters=["c-bounds-integers"],
+        analysis={},
+    )[0]
+    assert adaptive_iteration_limit(item, configured_cap=100) == 8
+    assert adaptive_iteration_limit(
+        item.model_copy(update={"risk": 4}),
+        configured_cap=100,
+    ) == 30
+    assert adaptive_iteration_limit(
+        item,
+        configured_cap=100,
+        attempt=2,
+    ) == 100
+    assert adaptive_iteration_limit(
+        item,
+        configured_cap=20,
+        has_evidence=True,
+    ) == 20
 
 
 def test_v2_database_migrates_usage_metrics_without_losing_tasks(
@@ -199,6 +259,51 @@ class _FinalJsonClient:
         )
 
 
+class _MeteredClient(_FinalJsonClient):
+    def __init__(self) -> None:
+        self.max_tokens: list[int] = []
+
+    async def chat(self, **kwargs) -> LLMResponse:
+        self.max_tokens.append(kwargs["max_tokens"])
+        return await super().chat(**kwargs)
+
+
+async def test_budgeted_client_caps_output_and_stops_the_next_call() -> None:
+    delegate = _MeteredClient()
+    controller = BudgetController(BudgetPolicy(
+        max_input_tokens=10_000,
+        max_output_tokens=5,
+        max_wall_clock_minutes=1,
+    ))
+    client = BudgetedLLMClient(delegate, controller)
+
+    response = await client.chat(
+        messages=[],
+        system="",
+        tools=[],
+        max_tokens=4_000,
+    )
+
+    assert response.output_tokens == 5
+    assert delegate.max_tokens == [5]
+    with pytest.raises(BudgetExceededError, match="max_output_tokens"):
+        await client.chat(messages=[], system="", tools=[], max_tokens=4_000)
+
+
+def test_budget_controller_refuses_calls_after_deadline() -> None:
+    current = [0.0]
+    controller = BudgetController(
+        BudgetPolicy(max_wall_clock_minutes=1),
+        clock=lambda: current[0],
+    )
+    current[0] = 61.0
+    with pytest.raises(BudgetExceededError, match="max_wall_clock_minutes"):
+        controller.reserve_call(
+            input_upper_bound=1,
+            requested_output_tokens=1,
+        )
+
+
 async def test_completed_hunter_session_produces_durable_usage_shape(
     tmp_path: Path,
 ) -> None:
@@ -215,7 +320,7 @@ async def test_completed_hunter_session_produces_durable_usage_shape(
         analysis={},
     )[0]
 
-    findings, usage = await run_hunters(
+    findings, usage, deferred = await run_hunters(
         task,
         qstore,
         tmp_path,
@@ -232,12 +337,59 @@ async def test_completed_hunter_session_produces_durable_usage_shape(
     )
 
     assert findings == {"c-bounds-integers": []}
+    assert deferred == {}
     assert len(usage) == 1
     assert usage[0].sessions == 1
     assert usage[0].calls == usage[0].iterations == 1
     assert usage[0].input_tokens == 30
     assert usage[0].cache_read_tokens == 10
     assert usage[0].estimated_cost_usd is None
+
+
+async def test_hunter_budget_stop_is_deferred_instead_of_failed(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "state.c").write_text("int main(void) { return 0; }\n")
+    qstore = HuntQueueStore(tmp_path / "hunters")
+    task = qstore.init_from_pairs([
+        ("state.c", "c-bounds-integers"),
+    ]).tasks[0]
+    item = build_shadow_plan(
+        run_id="run-1",
+        source_snapshot=HASH_A,
+        selected_files=["state.c"],
+        hunters=["c-bounds-integers"],
+        analysis={},
+    )[0]
+    client = BudgetedLLMClient(
+        _FinalJsonClient(),
+        BudgetController(BudgetPolicy(
+            max_input_tokens=1,
+            max_output_tokens=100,
+            max_wall_clock_minutes=1,
+        )),
+    )
+
+    findings, usage, deferred = await run_hunters(
+        task,
+        qstore,
+        tmp_path,
+        client,
+        "unused:latest",
+        {"language": "c"},
+        {},
+        "No sandbox.",
+        8,
+        asyncio.Semaphore(1),
+        EventBus(tmp_path / "events.jsonl"),
+        False,
+        {item.hunter: item},
+    )
+
+    assert findings == {"c-bounds-integers": []}
+    assert deferred == {"c-bounds-integers": "max_input_tokens"}
+    assert task.hunters[0].status == "budget_deferred"
+    assert usage[0].calls == usage[0].iterations == 0
 
 
 def _native_router_fixture(tmp_path: Path) -> tuple[Path, list[str]]:
@@ -587,3 +739,67 @@ async def test_hunt_pipeline_executes_slice_queue_without_legacy_json(
     assert len(tasks) == 2
     assert {task["status"] for task in tasks} == {"done"}
     assert all(task["attempt"] == 1 for task in tasks)
+
+
+async def test_hunt_pipeline_reports_work_deferred_by_session_budget(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    repo, _ = _native_router_fixture(tmp_path)
+    store = RunStore(tmp_path / "run-budget")
+    store.save_config({
+        "repo_path": str(repo),
+        "environment": "c:gcc-13",
+        "model_id": "gpt-5.6-sol",
+        "max_hunters_parallel": 2,
+        "hunter_max_iterations": 100,
+        "hunter_lease_seconds": 30,
+        "budget_max_hunter_sessions": 1,
+        "budget_max_input_tokens": 100_000,
+        "budget_max_output_tokens": 10_000,
+        "budget_max_wall_clock_minutes": 1,
+        "budget_max_retries_per_work_item": 0,
+    })
+    bus = EventBus(store.dir / "events.jsonl")
+    await run_source_snapshot(store, bus)
+    await run_filter(store, bus)
+    await run_analysis_graph(store, bus)
+    await run_file_selector(store, bus)
+    store.save_step("sandbox_prepare", {"status": "failed"})
+    monkeypatch.setattr(
+        hunt_pipeline,
+        "LLMClient",
+        lambda **kwargs: _FinalJsonClient(),
+    )
+    monkeypatch.setattr(
+        hunt_pipeline,
+        "base_image_for",
+        lambda environment: "unused:latest",
+    )
+
+    await hunt_pipeline.run_hunt(store, bus)
+
+    plan = store.load_step("hunt_plan")
+    summary = store.load_step("hunt")
+    assert plan is not None
+    assert summary is not None
+    assert plan["budget_allocation"]["admitted_sessions"] == 1
+    assert plan["budget_allocation"]["deferred_sessions"] == 1
+    assert summary["done"] == 1
+    assert summary["failed"] == 0
+    assert summary["budget_deferred"] == 1
+    assert len(summary["unanalysed_work_ids"]) == 1
+    with SqliteRepository(store.dir / "state.db", read_only=True) as repository:
+        deferred_rows = [
+            task
+            for task in repository.list_tasks(store.dir.name)
+            if task["task_type"] == "hunter"
+        ]
+    assert {task["status"] for task in deferred_rows} == {
+        "done",
+        "budget_deferred",
+    }
+    deferred = next(
+        task for task in deferred_rows if task["status"] == "budget_deferred"
+    )
+    assert deferred["last_error"] == "max_hunter_sessions"
