@@ -14,7 +14,6 @@ import streamlit as st
 from ..core import proc_lock
 from ..core.events import EventBus
 from ..core.run_store import RunStore
-from ..pipeline import STEPS
 from .result_cards import render_prepare_progress, render_prepare_settings, render_result_card
 from .views import render_hunt_view, render_selector_view
 

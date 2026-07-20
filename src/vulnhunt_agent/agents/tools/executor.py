@@ -43,16 +43,16 @@ class HunterTools:
     async def dispatch(self, name: str, inp: dict) -> str:
         try:
             if name == "read_file":
-                key = ("read", inp["path"], inp.get("start", 1), inp.get("end"))
-                if key in self._seen_reads:
+                read_key = ("read", inp["path"], inp.get("start", 1), inp.get("end"))
+                if read_key in self._seen_reads:
                     return f"(already read {inp['path']} with the same range earlier in this session)"
-                self._seen_reads.add(key)
+                self._seen_reads.add(read_key)
                 return self._read_file(inp["path"], inp.get("start", 1), inp.get("end"))
             if name == "grep":
-                key = ("grep", inp["pattern"], inp.get("path"))
-                if key in self._seen_greps:
+                grep_key = ("grep", inp["pattern"], inp.get("path"))
+                if grep_key in self._seen_greps:
                     return f"(already ran grep for {inp['pattern']!r} earlier in this session)"
-                self._seen_greps.add(key)
+                self._seen_greps.add(grep_key)
                 return self._grep(inp["pattern"], inp.get("path"), inp.get("max_results", 100))
             if name == "list_dir":
                 return self._list_dir(inp["path"])

@@ -43,10 +43,14 @@ def base_score(vector: str) -> float:
 
 
 def severity(score: float) -> str:
-    if score == 0:    return "none"
-    if score < 4.0:   return "low"
-    if score < 7.0:   return "medium"
-    if score < 9.0:   return "high"
+    if score == 0:
+        return "none"
+    if score < 4.0:
+        return "low"
+    if score < 7.0:
+        return "medium"
+    if score < 9.0:
+        return "high"
     return "critical"
 
 

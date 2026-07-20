@@ -35,7 +35,12 @@ async def run_hunters(
             bus.emit("hunter_start", file=task.file, hunter=name)
             hunt_dir = qstore.hunt_dir(task, name)
             trace = (hunt_dir / "trace.jsonl").open("a")
-            on_event = lambda t, **d: trace.write(json.dumps({"type": t, **d}, ensure_ascii=False) + "\n")
+
+            def on_event(event_type, **data):
+                return trace.write(
+                    json.dumps({"type": event_type, **data}, ensure_ascii=False) + "\n"
+                )
+
             sandbox = ContainerExecutor(repo=repo, image=image)
             try:
                 await sandbox.start()

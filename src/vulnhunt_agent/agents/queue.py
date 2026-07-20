@@ -174,14 +174,14 @@ class HuntQueueStore:
                 t.status = "pending"
                 t.error = ""
                 count += 1
-            for sub in t.hunters:
-                if sub.status == "failed":
-                    sub.status = "pending"
-                    sub.error = ""
-            for sub in t.reviews:
-                if sub.status == "failed":
-                    sub.status = "pending"
-                    sub.error = ""
+            for hunt_sub in t.hunters:
+                if hunt_sub.status == "failed":
+                    hunt_sub.status = "pending"
+                    hunt_sub.error = ""
+            for review_sub in t.reviews:
+                if review_sub.status == "failed":
+                    review_sub.status = "pending"
+                    review_sub.error = ""
         self.save(q)
         return count
 

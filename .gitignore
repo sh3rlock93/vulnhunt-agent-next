@@ -48,6 +48,7 @@ ipython_config.py
 
 # ----- Local config / secrets -----
 settings.toml
+!tests/fixtures/settings.toml
 *.pem
 *.key
 *.crt
@@ -148,7 +149,11 @@ poc/*
 !poc/.gitkeep
 
 # ----- Project dirs: drop entirely -----
-docs/
+docs/*
+!docs/architecture-v2.md
+!docs/milestones/
+docs/milestones/*
+!docs/milestones/m0-baseline.md
 notes/
 tools/
 docker/local/

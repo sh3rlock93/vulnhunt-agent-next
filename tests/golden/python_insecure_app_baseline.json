@@ -1,0 +1,55 @@
+{
+  "filtered_files": {
+    "extensions": [
+      ".py"
+    ],
+    "total_matched": 4,
+    "test_files_excluded": 1,
+    "source_files": [
+      "insecure_app/__init__.py",
+      "insecure_app/app.py",
+      "insecure_app/auth.py"
+    ]
+  },
+  "ranked_files": {
+    "total_ranked": 3,
+    "all": [
+      {
+        "path": "insecure_app/app.py",
+        "score": 5
+      },
+      {
+        "path": "insecure_app/auth.py",
+        "score": 4
+      },
+      {
+        "path": "insecure_app/__init__.py",
+        "score": 1
+      }
+    ],
+    "_usage": {
+      "input_tokens": 17,
+      "output_tokens": 11
+    },
+    "_batches": 1
+  },
+  "file_selector": {
+    "files": [
+      {
+        "path": "insecure_app/app.py",
+        "score": 5
+      },
+      {
+        "path": "insecure_app/auth.py",
+        "score": 4
+      },
+      {
+        "path": "insecure_app/__init__.py",
+        "score": 1
+      }
+    ],
+    "selected": [
+      "insecure_app/app.py"
+    ]
+  }
+}
