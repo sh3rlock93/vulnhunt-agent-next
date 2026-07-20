@@ -6,6 +6,7 @@ requires-python = ">=3.11"
 dependencies = [
     "boto3>=1.34",
     "openai>=1.50",
+    "pydantic>=2.10",
     "streamlit>=1.38",
     "streamlit-autorefresh>=1.0",
     "tree-sitter>=0.23",
@@ -15,6 +16,9 @@ dependencies = [
     "tree-sitter-typescript>=0.23",
     "tree-sitter-java>=0.23",
 ]
+
+[project.scripts]
+vulnhunt = "vulnhunt_agent.interfaces.cli:main"
 
 [project.optional-dependencies]
 dev = [
@@ -69,10 +73,14 @@ python_version = "3.11"
 files = [
     "src/vulnhunt_agent/agents",
     "src/vulnhunt_agent/core",
+    "src/vulnhunt_agent/domain",
     "src/vulnhunt_agent/indexer",
+    "src/vulnhunt_agent/infrastructure",
+    "src/vulnhunt_agent/interfaces",
     "src/vulnhunt_agent/pipeline",
     "src/vulnhunt_agent/prompts",
     "src/vulnhunt_agent/repo",
+    "src/vulnhunt_agent/reporting",
     "src/vulnhunt_agent/sandbox",
     "tests",
 ]
