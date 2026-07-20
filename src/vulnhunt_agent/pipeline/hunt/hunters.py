@@ -15,6 +15,7 @@ from .. import finalize
 async def run_hunters(
     task, qstore, repo: Path, client, image: str,
     arch: dict, sandbox_info: str, max_iter: int, sem, bus,
+    sandbox_enabled: bool,
 ) -> dict[str, list[dict]]:
     """Run all hunters for one file in parallel; return {hunter_name: findings}."""
     out: dict[str, list[dict]] = {}
@@ -41,10 +42,15 @@ async def run_hunters(
                     json.dumps({"type": event_type, **data}, ensure_ascii=False) + "\n"
                 )
 
-            sandbox = ContainerExecutor(repo=repo, image=image)
+            sandbox = (
+                ContainerExecutor(repo=repo, image=image, source_baked=True)
+                if sandbox_enabled
+                else None
+            )
             try:
-                await sandbox.start()
-                on_event("sandbox_start", name=sandbox.name, image=image)
+                if sandbox is not None:
+                    await sandbox.start()
+                    on_event("sandbox_start", name=sandbox.name, image=image)
                 tools = HunterTools(repo, sandbox=sandbox, poc_root=hunt_dir / "pocs")
                 agent = HunterAgent(
                     client=client, tools=tools, arch=arch,
@@ -69,7 +75,8 @@ async def run_hunters(
             finally:
                 trace.close()
                 try:
-                    await sandbox.stop()
+                    if sandbox is not None:
+                        await sandbox.stop()
                 except Exception:
                     pass
 

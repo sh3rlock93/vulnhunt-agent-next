@@ -49,6 +49,8 @@ def test_reproduction_evidence_requires_complete_machine_readable_contract() -> 
     evidence = _reproduction()
     assert evidence.oracle is not None
     assert evidence.oracle.result == "passed"
+    with pytest.raises(ValidationError, match="must be produced by reproducer"):
+        _reproduction(producer="hunter")
 
 
 def test_review_verdict_enforces_cvss_by_verdict() -> None:
@@ -116,7 +118,7 @@ def test_legacy_confirmed_string_never_becomes_reproduced_or_reportable() -> Non
 def test_strict_policy_promotes_only_snapshot_matched_reproduction() -> None:
     finding = candidate(
         state=FindingState.REVIEWER_VERIFIED,
-        evidence_ids=("ev-repro",),
+        evidence_ids=("ev-repro-1", "ev-repro-2"),
     )
     verdict = ReviewVerdict(
         candidate_id=finding.candidate_id,
@@ -129,36 +131,65 @@ def test_strict_policy_promotes_only_snapshot_matched_reproduction() -> None:
     mismatch = policy.evaluate(
         finding,
         run_snapshot=HASH_B,
-        evidence=[_reproduction()],
+        evidence=[_reproduction(attempt=1), _reproduction(attempt=2)],
         verdict=verdict,
     )
     assert not mismatch.allowed
-    assert "no passed reproduction matches the run snapshot" in mismatch.reasons
+    assert (
+        "no deterministic two-attempt reproduction matches the run snapshot"
+        in mismatch.reasons
+    )
 
-    wrong_producer = policy.evaluate(
+    one_attempt = policy.evaluate(
         finding,
         run_snapshot=HASH_A,
-        evidence=[_reproduction(producer="hunter")],
+        evidence=[_reproduction(attempt=1)],
         verdict=verdict,
     )
-    assert not wrong_producer.allowed
-    assert "no passed reproduction matches the run snapshot" in wrong_producer.reasons
+    assert not one_attempt.allowed
+
+    failed_third = _reproduction(attempt=3).model_copy(
+        update={
+            "oracle": OracleResult(
+                type="regex",
+                expression="LEAKED_SECRET=",
+                result="failed",
+            )
+        }
+    )
+    mixed_finding = finding.model_copy(
+        update={"evidence_ids": ("ev-repro-1", "ev-repro-2", "ev-repro-3")}
+    )
+    mixed = policy.evaluate(
+        mixed_finding,
+        run_snapshot=HASH_A,
+        evidence=[
+            _reproduction(attempt=1),
+            _reproduction(attempt=2),
+            failed_third,
+        ],
+        verdict=verdict,
+    )
+    assert not mixed.allowed
 
     promoted = policy.promote(
         finding,
         run_snapshot=HASH_A,
-        evidence=[_reproduction()],
+        evidence=[_reproduction(attempt=1), _reproduction(attempt=2)],
         verdict=verdict,
     )
     assert promoted.state is FindingState.REPORTABLE
 
 
-def _reproduction(*, producer: str = "reproducer") -> Evidence:
+def _reproduction(*, attempt: int = 1, producer: str = "reproducer") -> Evidence:
     return Evidence(
-        evidence_id="ev-repro",
+        evidence_id=f"ev-repro-{attempt}",
         run_id="run-1",
+        candidate_id="cand-1",
         kind=EvidenceKind.REPRODUCTION,
         producer=producer,
+        reproduction_group="repro-1",
+        attempt=attempt,
         source_snapshot=HASH_A,
         image_digest=HASH_B,
         command=("python", "/workspace/poc.py"),

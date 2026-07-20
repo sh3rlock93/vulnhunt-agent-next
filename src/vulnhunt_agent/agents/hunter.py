@@ -16,7 +16,9 @@ from .tools import HunterTools, tool_specs
 FINAL_REPORT_INSTRUCTIONS = """VERIFY WITH A PoC.
 For every concrete hypothesis, try to produce a Proof-of-Concept that exercises it.
 - If `write_poc` and `exec` tools are available, write the PoC into /workspace
-  and run it. The repo source is mounted read-only at /code.
+  and run it. The immutable repo snapshot is baked read-only into /code.
+- `exec` accepts an argv array, not a shell command. Pass each argument as a
+  separate item and do not use pipes, redirects, command substitution, or `sh -c`.
 - The container is already prepared: the target is installed/importable when
   the user message says so. **Do not run `pip install`** — network is disabled
   and the install will fail. Import the target directly. If a sandbox-specific

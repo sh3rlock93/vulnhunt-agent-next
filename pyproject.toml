@@ -76,11 +76,13 @@ files = [
     "src/vulnhunt_agent/domain",
     "src/vulnhunt_agent/indexer",
     "src/vulnhunt_agent/infrastructure",
+    "src/vulnhunt_agent/intake",
     "src/vulnhunt_agent/interfaces",
     "src/vulnhunt_agent/pipeline",
     "src/vulnhunt_agent/prompts",
     "src/vulnhunt_agent/repo",
     "src/vulnhunt_agent/reporting",
+    "src/vulnhunt_agent/reproduction",
     "src/vulnhunt_agent/sandbox",
     "tests",
 ]

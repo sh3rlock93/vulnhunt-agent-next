@@ -2,16 +2,23 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import secrets
 import subprocess
+import tempfile
+import time
 from pathlib import Path
+from pathlib import PurePosixPath
 
 from ..core.settings import ENV_TO_IMAGE
+from ..infrastructure.artifacts import ArtifactStore
+from ..intake.snapshot import SnapshotBuilder
 from . import cleanup
-from .base import ExecResult
+from .base import ExecResult, validate_argv
 
 
 _WORKSPACE_SIZE = "256m"
+_OUTPUT_LIMIT = 1024 * 1024
 
 
 def base_image_for(env: str) -> str:
@@ -32,7 +39,8 @@ class ContainerExecutor:
         network: str = "none",            # set to "bridge" during prepare step
         cpus: str = "2",
         memory: str = "2g",
-        code_writable: bool = False,      # set True during prepare so npm/mvn can write into /code
+        code_writable: bool = False,
+        source_baked: bool = False,
     ):
         self.repo = repo.resolve()
         self.image = image
@@ -40,6 +48,7 @@ class ContainerExecutor:
         self.cpus = cpus
         self.memory = memory
         self.code_writable = code_writable
+        self.source_baked = source_baked
         self.name = f"{cleanup.NAME_PREFIX}{secrets.token_hex(4)}"
         self._started = False
 
@@ -55,16 +64,41 @@ class ContainerExecutor:
     async def start(self) -> None:
         if self._started:
             return
+        if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/:@-]{0,254}", self.image) is None:
+            raise ValueError("invalid Docker image reference")
+        if self.network not in {"none", "bridge"}:
+            raise ValueError("sandbox network must be none or bridge")
+        if not self.code_writable and not self.source_baked:
+            raise RuntimeError(
+                "Hunter sandboxes require a prepared image with a baked source snapshot"
+            )
+        if not self.code_writable and self.network != "none":
+            raise ValueError("Hunter sandboxes require network=none")
         await self._ensure_image()
-        code_mount = f"{self.repo}:/code" + ("" if self.code_writable else ":ro")
+        security_args = [
+            "--pids-limit", "128",
+            "--cap-drop=ALL",
+            "--security-opt=no-new-privileges",
+        ]
+        filesystem_args = (
+            []
+            if self.code_writable
+            else [
+                "--read-only",
+                "--user", "65532:65532",
+                "--tmpfs",
+                f"/workspace:rw,noexec,nosuid,nodev,size={_WORKSPACE_SIZE},mode=1777",
+                "--tmpfs", "/tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777",
+            ]
+        )
         proc = await self._run_cli(
             "run", "-d",
             "--name", self.name,
             f"--network={self.network}",
             "--cpus", self.cpus,
             "--memory", self.memory,
-            "--tmpfs", f"/workspace:size={_WORKSPACE_SIZE}",
-            "-v", code_mount,
+            *security_args,
+            *filesystem_args,
             "-w", "/workspace",
             self.image,
             "sleep", "infinity",
@@ -72,6 +106,12 @@ class ContainerExecutor:
         _check(proc, "start sandbox")
         self._started = True
         cleanup.register(self.name)
+        if self.code_writable:
+            try:
+                await self._stream_source_snapshot()
+            except Exception:
+                await self.stop()
+                raise
 
     async def stop(self) -> None:
         if not self._started:
@@ -91,36 +131,68 @@ class ContainerExecutor:
 
     async def write_file(self, path: str, content: str) -> None:
         """Write a text file inside the container's /workspace (path is relative)."""
-        if path.startswith("/"):
-            raise ValueError("path must be relative to /workspace")
-        full = f"/workspace/{path}"
-        proc = await asyncio.create_subprocess_exec(
-            "docker", "exec", "-i", self.name,
-            "sh", "-c", f"mkdir -p $(dirname {full}) && cat > {full}",
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+        relative = _safe_relative_path(path)
+        full = f"/workspace/{relative.as_posix()}"
+        parent = PurePosixPath(full).parent.as_posix()
+        mkdir = await self._run_cli("exec", self.name, "mkdir", "-p", parent)
+        _check(mkdir, "create PoC directory")
+        written = await self._run_cli_input(
+            content.encode(), "exec", "-i", self.name, "tee", full
         )
-        _, stderr = await proc.communicate(content.encode())
-        if proc.returncode != 0:
-            raise RuntimeError(f"write_file failed: {stderr.decode()}")
+        _check(written, "write PoC file")
 
     async def exec(self, cmd: str, timeout: int = 60) -> ExecResult:
-        """Run a shell command inside the container."""
+        """Run a trusted build command. Hunter and Reproducer calls use argv."""
+        if not self.code_writable:
+            raise RuntimeError("shell execution is restricted to the build sandbox")
+        return await self._exec_process(("sh", "-lc", cmd), timeout=timeout, cwd="/workspace")
+
+    async def exec_argv(
+        self,
+        argv: tuple[str, ...] | list[str],
+        *,
+        timeout: int = 60,
+        cwd: str = "/workspace",
+    ) -> ExecResult:
+        """Run untrusted arguments directly without shell interpretation."""
+        normalized = validate_argv(argv)
+        normalized_cwd = _safe_container_cwd(cwd)
+        return await self._exec_process(normalized, timeout=timeout, cwd=normalized_cwd)
+
+    async def _exec_process(
+        self, argv: tuple[str, ...], *, timeout: int, cwd: str
+    ) -> ExecResult:
+        started_at = time.monotonic()
         proc = await asyncio.create_subprocess_exec(
-            "docker", "exec", self.name, "sh", "-lc", cmd,
+            "docker", "exec", "-w", cwd, self.name, *argv,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
+        stdout_task = asyncio.create_task(_read_capped(proc.stdout))
+        stderr_task = asyncio.create_task(_read_capped(proc.stderr))
         try:
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+            await asyncio.wait_for(proc.wait(), timeout=timeout)
         except asyncio.TimeoutError:
-            proc.kill()
-            return ExecResult(exit_code=-1, stdout="", stderr="timeout", timed_out=True)
+            if proc.returncode is None:
+                proc.kill()
+                await proc.wait()
+            await self._run_cli("kill", self.name)
+            stdout = await stdout_task
+            stderr = await stderr_task
+            return ExecResult(
+                exit_code=-1,
+                stdout=stdout.decode(errors="replace"),
+                stderr=(stderr.decode(errors="replace") + "\nexecution timed out").strip(),
+                timed_out=True,
+                duration_ms=int((time.monotonic() - started_at) * 1000),
+            )
+        stdout = await stdout_task
+        stderr = await stderr_task
         return ExecResult(
             exit_code=proc.returncode if proc.returncode is not None else -1,
             stdout=stdout.decode(errors="replace"),
             stderr=stderr.decode(errors="replace"),
+            duration_ms=int((time.monotonic() - started_at) * 1000),
         )
 
     # ----- internals -----
@@ -137,12 +209,18 @@ class ContainerExecutor:
         _check(proc, f"pull '{self.image}'")
 
     async def _run_cli(self, *args: str) -> subprocess.CompletedProcess[bytes]:
+        return await self._run_cli_input(None, *args)
+
+    async def _run_cli_input(
+        self, data: bytes | None, *args: str
+    ) -> subprocess.CompletedProcess[bytes]:
         proc = await asyncio.create_subprocess_exec(
             "docker", *args,
+            stdin=asyncio.subprocess.PIPE if data is not None else None,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        stdout, stderr = await proc.communicate()
+        stdout, stderr = await proc.communicate(data)
         return subprocess.CompletedProcess(
             args=("docker", *args),
             returncode=proc.returncode if proc.returncode is not None else -1,
@@ -150,7 +228,81 @@ class ContainerExecutor:
             stderr=stderr,
         )
 
+    async def _stream_cli_file(
+        self, path: Path, *args: str
+    ) -> subprocess.CompletedProcess[bytes]:
+        def run() -> subprocess.CompletedProcess[bytes]:
+            with path.open("rb") as stream:
+                return subprocess.run(
+                    ["docker", *args],
+                    stdin=stream,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    check=False,
+                )
+
+        return await asyncio.to_thread(run)
+
+    async def _stream_source_snapshot(self) -> None:
+        """Copy a normalized source tar into the build container without mounts."""
+        with tempfile.TemporaryDirectory(prefix="vulnhunt-build-source-") as temporary:
+            artifacts = ArtifactStore(Path(temporary) / "artifacts")
+            snapshot = SnapshotBuilder(artifacts).create(self.repo)
+            source_tar = artifacts.path_for(snapshot.snapshot_artifact)
+            mkdir = await self._run_cli("exec", self.name, "mkdir", "-p", "/code")
+            _check(mkdir, "create source directory")
+            extracted = await self._stream_cli_file(
+                source_tar,
+                "exec",
+                "-i",
+                self.name,
+                "tar",
+                "-xf",
+                "-",
+                "-C",
+                "/code",
+            )
+            _check(extracted, "extract source snapshot")
+
 
 def _check(proc, action: str) -> None:
     if proc.returncode != 0:
         raise RuntimeError(f"{action} failed: {proc.stderr.decode()}")
+
+
+async def _read_capped(
+    stream: asyncio.StreamReader | None, limit: int = _OUTPUT_LIMIT
+) -> bytes:
+    if stream is None:
+        return b""
+    retained = bytearray()
+    while chunk := await stream.read(64 * 1024):
+        if len(retained) < limit:
+            retained.extend(chunk[: limit - len(retained)])
+    return bytes(retained)
+
+
+def _safe_relative_path(path: str) -> PurePosixPath:
+    if "\\" in path:
+        raise ValueError("path must use POSIX separators")
+    relative = PurePosixPath(path)
+    if (
+        not path
+        or relative.is_absolute()
+        or ".." in relative.parts
+        or relative == PurePosixPath(".")
+    ):
+        raise ValueError("path must stay below /workspace")
+    return relative
+
+
+def _safe_container_cwd(cwd: str) -> str:
+    normalized = PurePosixPath(cwd)
+    if not normalized.is_absolute() or ".." in normalized.parts:
+        raise ValueError("cwd must be an absolute path below /workspace or /code")
+    if not any(
+        normalized == root or root in normalized.parents
+        for root in (PurePosixPath("/workspace"), PurePosixPath("/code"))
+    ):
+        raise ValueError("cwd must stay below /workspace or /code")
+    return normalized.as_posix()

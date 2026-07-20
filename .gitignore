@@ -155,6 +155,7 @@ docs/*
 docs/milestones/*
 !docs/milestones/m0-baseline.md
 !docs/milestones/m1-domain-storage.md
+!docs/milestones/m2-sandbox-reproducer.md
 notes/
 tools/
 docker/local/

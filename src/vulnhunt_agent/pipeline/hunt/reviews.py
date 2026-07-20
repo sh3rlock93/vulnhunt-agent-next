@@ -48,16 +48,18 @@ async def run_reviews(
                 )
                 result = await agent.review(task.file, group_findings, group.get("reason", ""))
                 finalize.enrich_with_cvss(result)
+                manual_review_count = finalize.quarantine_unverified_reports(result)
                 (review_dir / "review.json").write_text(
                     json.dumps(asdict(result), indent=2, ensure_ascii=False)
                 )
-                finalize.materialize_reports(review_dir, result)
+                finalize.materialize_manual_review(review_dir, result)
                 sub.status = "done"
-                sub.reportable = len(result.reports)
+                sub.reportable = 0
                 qstore.persist(task)
                 bus.emit("review_done", file=task.file, group=gid,
                          reviewed=len(result.reviewed),
-                         reportable=len(result.reports),
+                         reportable=0,
+                         manual_review=manual_review_count,
                          stopped=result.stopped)
             except Exception as e:
                 sub.status = "failed"

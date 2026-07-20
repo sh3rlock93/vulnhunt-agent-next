@@ -3,9 +3,9 @@
 Deterministic: install/verify commands picked by environment + meta files.
 No LLM. Raises if no recognised meta file found for the language.
 
-Note: /code is mounted RW during prepare so npm/mvn can write into the repo
-(node_modules/, target/). Hunter step re-mounts /code as RO. The host repo
-gets those build artefacts left behind — gitignore them.
+The host repository is normalized into an immutable tar snapshot and streamed
+into /code. Build scripts can mutate only the disposable build container.
+Hunter containers start from the committed image with a read-only root.
 """
 from __future__ import annotations
 
