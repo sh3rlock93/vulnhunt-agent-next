@@ -23,7 +23,14 @@ async def run_file_selector(store: RunStore, bus: EventBus) -> None:
 
     scores = {r["path"]: int(r.get("score", 0)) for r in ranked.get("all", [])}
     plan = analysis.get("coverage_plan") or {}
-    planned = set(plan.get("selected_files", []))
+    incremental = analysis.get("incremental_scope") or {}
+    incremental_mode = incremental.get("mode") == "incremental"
+    full_planned = set(plan.get("selected_files", []))
+    planned = (
+        set(incremental.get("selected_files", []))
+        if incremental_mode
+        else full_planned
+    )
     reasons = plan.get("file_reasons", {})
     priorities: dict[str, int] = {}
     slice_ids: dict[str, list[str]] = {}
@@ -31,16 +38,18 @@ async def run_file_selector(store: RunStore, bus: EventBus) -> None:
         for path in item.get("files", []):
             priorities[path] = max(priorities.get(path, 0), int(item.get("risk", 0)))
             slice_ids.setdefault(path, []).append(item["slice_id"])
-    files = [
-        {
+    files = []
+    for p in filtered.get("source_files", []):
+        item = {
             "path": p,
             "score": scores.get(p, 0),
             "analysis_priority": priorities.get(p, 0),
             "coverage_reasons": list(reasons.get(p, [])),
             "slice_ids": sorted(slice_ids.get(p, [])),
         }
-        for p in filtered.get("source_files", [])
-    ]
+        if incremental_mode:
+            item["in_incremental_scope"] = p in planned
+        files.append(item)
     files.sort(key=lambda f: (
         -f["analysis_priority"], -f["score"], f["path"]
     ))
@@ -48,9 +57,21 @@ async def run_file_selector(store: RunStore, bus: EventBus) -> None:
     # Preserve user's selection across re-runs (e.g. when rank fires this again).
     # Fall back to score>=5 default only on first build.
     prev_selected = prev.get("selected")
-    if prev_selected is not None:
+    previous_incremental = prev.get("incremental_scope") or {}
+    same_incremental_scope = (
+        not incremental_mode
+        or (
+            previous_incremental.get("base_commit")
+            == incremental.get("base_commit")
+            and previous_incremental.get("head_commit")
+            == incremental.get("head_commit")
+        )
+    )
+    if prev_selected is not None and same_incremental_scope:
         valid = {f["path"] for f in files}
         selected = [p for p in prev_selected if p in valid]
+    elif incremental_mode:
+        selected = [p for p in planned if p in {f["path"] for f in files}]
     elif scores:
         selected = [
             f["path"] for f in files
@@ -59,13 +80,19 @@ async def run_file_selector(store: RunStore, bus: EventBus) -> None:
     else:
         selected = [f["path"] for f in files if f["path"] in planned]
 
-    store.save_step("file_selector", {
+    result = {
         "files": files,
         "selected": selected,
         "coverage_complete": not plan.get("uncovered_entrypoint_ids")
         and not plan.get("uncovered_sink_ids"),
         "coverage_selected": sorted(planned),
-    })
+    }
+    if incremental_mode:
+        result.update({
+            "full_coverage_selected": sorted(full_planned),
+            "incremental_scope": incremental,
+        })
+    store.save_step("file_selector", result)
     bus.emit("step_done", step="file_selector",
              total=len(files), selected=len(selected),
              ranked=bool(scores), coverage_selected=len(planned))

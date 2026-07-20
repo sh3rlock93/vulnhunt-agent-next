@@ -1,6 +1,6 @@
 # M8 — Cost-aware slice scheduling
 
-Status: In progress (PR 5 of 6 complete)
+Status: Complete (6 of 6 increments)
 
 ## Goal
 
@@ -39,10 +39,6 @@ and falls back to legacy artifact totals for old runs.
 The stable work ID hashes the immutable source snapshot, planning policy,
 analysis slices, files, Hunter, and pass number. File and slice order therefore
 cannot perturb identity.
-
-## Remaining increments
-
-1. Git-diff incremental scanning and final benchmark gates.
 
 ## PR 1 acceptance gates
 
@@ -222,3 +218,55 @@ are unchanged, so the cache cannot hide context that was not preloaded.
 - [x] Cache writes complete before parallel Hunter execution.
 - [x] Arbitrary follow-up `read_file` and `grep` exploration remains available.
 - [x] Cache hit/miss evidence is visible in durable artifacts and the UI.
+
+## PR 6 — Git-diff incremental scanning and final benchmark gates
+
+Incremental C scans compare the merge base of `base-ref` and `head-ref` with
+the checked-out head. Changed line ranges seed overlapping functions, then the
+scope expands through callers, callees, parser-flow edges, local header
+consumers, and overlapping analysis slices. Only critical sinks inside that
+expanded scope are required and scheduled.
+
+Safety takes priority over reduction. The scanner records a reason and falls
+back to full coverage when refs cannot be resolved, the checkout is dirty or
+does not match `head-ref`, the merge base or diff is unavailable, build
+configuration changed, a C source was deleted, or a changed header has unknown
+consumers. Python and C scans without refs preserve the existing full-scan
+artifact shape.
+
+The same pipeline is exposed through the CLI:
+
+```bash
+vulnhunt scan /path/to/repo \
+  --base-ref main --head-ref HEAD --plan-only
+
+vulnhunt scan /path/to/repo \
+  --base-ref main --head-ref HEAD
+```
+
+The UI and durable Hunt plan show changed and impacted files, planned
+incremental sessions, the equivalent full-scan session count, actual
+consumption, and reduction. A zero-work diff completes Hunt planning without
+initializing a model provider.
+
+GitHub CI now checks the pinned libcue regression at both the vulnerable
+revision (`1b0f3917b8f908c81bb646ce42f29cf7c86443a1`) and fixed revision
+(`cfb98a060fd79dbc3463d85f0f29c3c335dfa0ea`). The vulnerable fixture must
+retain Bounds and Parser specialists, cover every scoped critical sink, and
+reduce the 36-session legacy plan to at most 14 sessions. The fixed fixture
+must retain both lower- and upper-bound guard recognition.
+
+## PR 6 acceptance gates
+
+- [x] Changed lines seed their containing C functions.
+- [x] Callers, callees, parser-flow paths, and overlapping slices expand scope.
+- [x] Changed local headers expand to known consumers.
+- [x] Every changed header must have a known consumer or the scan falls back.
+- [x] Unchanged unrelated critical sinks are not scheduled.
+- [x] Every scoped critical sink remains covered by a scheduled specialist.
+- [x] Unsafe or ambiguous Git states visibly fall back to full scanning.
+- [x] Python and ref-free full scans remain backward compatible.
+- [x] CLI plan and execution use the same persisted pipeline as the UI.
+- [x] UI reports incremental planned, full equivalent, and actual sessions.
+- [x] The vulnerable libcue gate reduces 36 sessions to 9 (75%).
+- [x] Vulnerable and fixed libcue revisions are both enforced in CI.

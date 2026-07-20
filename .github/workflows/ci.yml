@@ -62,3 +62,39 @@ jobs:
         env:
           VULNHUNT_RUN_DOCKER_TESTS: "1"
         run: python -m pytest tests/test_docker_sandbox_integration.py
+
+  m8-libcue-regression:
+    name: M8 libcue regression gates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install project
+        run: python -m pip install -e .
+      - name: Configure default model catalog
+        run: cp settings.example.toml settings.toml
+      - name: Checkout vulnerable libcue revision
+        uses: actions/checkout@v6
+        with:
+          repository: lipnitsk/libcue
+          ref: 1b0f3917b8f908c81bb646ce42f29cf7c86443a1
+          path: .benchmark/libcue-vulnerable
+      - name: Require vulnerable sink coverage and at least 60 percent fewer sessions
+        run: >-
+          python benchmarks/run_c_graph_benchmark.py
+          --repo .benchmark/libcue-vulnerable
+          --expect vulnerable
+      - name: Checkout fixed libcue revision
+        uses: actions/checkout@v6
+        with:
+          repository: lipnitsk/libcue
+          ref: cfb98a060fd79dbc3463d85f0f29c3c335dfa0ea
+          path: .benchmark/libcue-fixed
+      - name: Reject the fixed revision as vulnerable
+        run: >-
+          python benchmarks/run_c_graph_benchmark.py
+          --repo .benchmark/libcue-fixed
+          --expect fixed

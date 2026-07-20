@@ -68,9 +68,10 @@ def build_routing_plan(
         (analysis or {}).get("coverage_plan") or {}
     )
     signals = {item.signal_id: item for item in graph.signals}
+    active_critical_ids = _active_critical_ids(analysis, graph)
     critical = [
         signals[signal_id]
-        for signal_id in graph.critical_sink_ids
+        for signal_id in active_critical_ids
         if signal_id in signals
     ]
     selected = set(selected_files)
@@ -138,7 +139,7 @@ def build_routing_plan(
         for signal in critical
         if any(item.seed_file == signal.path for item in items)
     }
-    detected = set(graph.critical_sink_ids)
+    detected = set(active_critical_ids)
     return HunterRoutingPlan(
         policy_version=ROUTER_POLICY,
         legacy_sessions=len(set(selected_files)) * len(set(enabled_hunters)),
@@ -150,6 +151,17 @@ def build_routing_plan(
         uncovered_critical_sink_ids=tuple(sorted(detected - covered)),
         forced_files=forced_files,
     )
+
+
+def _active_critical_ids(
+    analysis: dict | None,
+    graph: CAnalysisGraph,
+) -> tuple[str, ...]:
+    incremental = (analysis or {}).get("incremental_scope") or {}
+    if incremental.get("mode") == "incremental":
+        active = set(incremental.get("critical_sink_ids", []))
+        return tuple(sorted(active & set(graph.critical_sink_ids)))
+    return graph.critical_sink_ids
 
 
 def _route_file(

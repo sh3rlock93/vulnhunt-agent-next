@@ -7,6 +7,7 @@ from .context_cache import (
     SharedContextCache,
     context_cache_key,
 )
+from .incremental import INCREMENTAL_POLICY, build_incremental_scope
 from .models import (
     AnalysisSlice,
     CAnalysisGraph,
@@ -14,6 +15,7 @@ from .models import (
     EdgeKind,
     GraphEdge,
     GraphNode,
+    IncrementalScope,
     NodeKind,
     SecuritySignal,
     SignalRole,
@@ -27,6 +29,7 @@ __all__ = [
     "EdgeKind",
     "GraphEdge",
     "GraphNode",
+    "IncrementalScope",
     "NodeKind",
     "SecuritySignal",
     "SignalRole",
@@ -36,5 +39,7 @@ __all__ = [
     "context_for_work_item",
     "CONTEXT_CACHE_POLICY",
     "SharedContextCache",
+    "INCREMENTAL_POLICY",
+    "build_incremental_scope",
     "context_cache_key",
 ]

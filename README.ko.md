@@ -12,18 +12,19 @@
 
 ---
 
-## File-level 독립 hunt
+## 독립 slice hunt
 
 <p align="center">
   <img src="assets/img/per_file_loop.svg" alt="Per-file loop: Hunters → Clusterer → Reviewer" width="100%">
 </p>
 
-상위 랭크 파일마다 독립 hunter 세션을 실행합니다 — fresh context,
-히스토리 공유 X.
+선택된 모든 파일에 모든 Hunter를 실행하지 않고, 관련 전문 Hunter에게
+범위가 제한된 graph slice를 라우팅합니다. 세션끼리 대화 히스토리는 공유하지
+않지만 content-addressed 불변 소스 context는 재사용합니다.
 
 별도 **Reproducer**가 각 PoC를 깨끗한 컨테이너에서 두 번 실행합니다.
 증거만 읽는 **Reviewer**는 확정·기각하거나 선언형 재현 변형을 요청할 수 있지만
-직접 명령을 실행할 수 없습니다. 파일 단위 bound가 결정론적 coverage와
+직접 명령을 실행할 수 없습니다. slice 단위 bound가 결정론적 coverage와
 깔끔한 병렬화를 만듭니다.
 
 이 세 조각(Hunter · Clusterer · Reviewer) 은 **Mythos 의 빌딩 블록(Ranker ·
@@ -50,8 +51,9 @@ Filter → C Analysis Graph → Rank → Selector → Sandbox Prepare
 5. **Sandbox Prepare** — repo 별 Docker 이미지 빌드 (environment 단위 결정론
    install/build: pip / mvn / npm / CMake / Make / Meson / Autotools).
    또는 직접 빌드한 custom image 사용 가능.
-6. **Hunt** — 파일별 fresh 전문 Hunter 세션을 실행. 각 Hunter는 제한된
-   graph slice를 받아 코드를 읽고, grep 하고,
+6. **Hunt** — bounded graph slice별로 lease를 획득한 전문 Hunter 세션을
+   실행. 각 Hunter는 공유된 불변 excerpt를 시작 context로 받고 코드를 읽고,
+   grep 하고,
    `/workspace` 에 PoC 를 작성한 뒤 network-isolated Docker 컨테이너에서 실행.
    `network: none`, `/code` read-only, `/workspace` tmpfs. C 네이티브 PoC
    바이너리는 분리된 실행 가능 tmpfs인 `/workspace/exec`에 컴파일됩니다.
@@ -61,8 +63,8 @@ Filter → C Analysis Graph → Rank → Selector → Sandbox Prepare
    model/prompt 구성 두 개가 필요.
 9. **Report** — consensus를 통과한 canonical JSON + Markdown + SARIF 2.1.0.
 
-각 Hunter는 fresh 세션입니다. 히스토리를 공유하지 않고, 독립 실행의 다양성이
-그 자체로 이 도구의 핵심입니다.
+각 Hunter는 fresh 세션입니다. 대화 히스토리는 공유하지 않고, snapshot에
+묶인 소스 context만 재사용합니다.
 
 ---
 
@@ -94,6 +96,22 @@ streamlit run src/vulnhunt_agent/app.py
 사이드바에서: repo (git URL 또는 로컬 경로) 선택 → **Environment** 선택
 (예: `python:3.12`, `java:21`) → **Save** → 위에서부터 단계별 실행.
 
+CLI에서 Git diff 기반 계획만 확인하거나 실제 스캔을 실행할 수 있습니다.
+
+```bash
+# 영향받은 C 함수, caller/callee, slice, sink 계획만 확인
+vulnhunt scan /path/to/repo \
+  --base-ref main --head-ref HEAD --plan-only
+
+# --plan-only를 빼면 샌드박스를 준비하고 Hunter까지 실행
+vulnhunt scan /path/to/repo \
+  --base-ref main --head-ref HEAD
+```
+
+증분 모드는 clean working tree이고 checkout된 revision이 `head-ref`와 정확히
+일치할 때만 사용합니다. ref 누락, build 변경, C 소스 삭제, header 영향 범위를
+안전하게 해석할 수 없는 경우에는 이유를 기록하고 full scan으로 전환합니다.
+
 C 저장소는 `c:gcc-13`을 선택하면 됩니다. Auto prepare가 CMake, Make,
 Meson, Autotools 프로젝트를 ASan/UBSan으로 빌드합니다. C/H 파일은
 tree-sitter-c로 인덱싱하고 Flex/Bison의 `.l`/`.y`도 랭킹과 파일 간 추적
@@ -103,6 +121,13 @@ tree-sitter-c로 인덱싱하고 Flex/Bison의 `.l`/`.y`도 랭킹과 파일 간
 결정론적 C graph, coverage 정책, 6개 전문 Hunter, 취약/수정 버전 graph
 대조 검증은
 [`docs/milestones/m5-c-analysis-graph.md`](docs/milestones/m5-c-analysis-graph.md)에
+정리되어 있습니다.
+
+durable worker lease, heartbeat, 만료 task 복구, 부분 reproduction 재개는
+[`docs/milestones/m7-resumable-operations.md`](docs/milestones/m7-resumable-operations.md)에
+정리되어 있습니다. Signal routing, bounded slice work, hard budget, 공유
+context packet, Git diff 증분 스캔은
+[`docs/milestones/m8-cost-aware-scheduler.md`](docs/milestones/m8-cost-aware-scheduler.md)에
 정리되어 있습니다.
 
 증거 기반 review와 strict export 계약은

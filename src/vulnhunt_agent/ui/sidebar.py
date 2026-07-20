@@ -45,6 +45,8 @@ def default_config() -> dict:
         "environment": ENVIRONMENTS[0],
         "repo_source": "",
         "repo_path": "",
+        "scan_base_ref": "",
+        "scan_head_ref": "",
         "note": "",
         "max_tokens": app_settings.MAX_TOKENS,
         "max_hunters_parallel": 3,
@@ -93,6 +95,18 @@ def _settings_form(store: RunStore) -> None:
         "Repo (git URL or local path)", cfg["repo_source"],
         help="https://github.com/foo/bar  or  /abs/path. Resolved on Save.",
     )
+    with st.sidebar.expander("Git diff scope", expanded=False):
+        scan_base_ref = st.text_input(
+            "Base ref",
+            cfg.get("scan_base_ref", ""),
+            placeholder="main",
+            help="Leave both refs empty for a full scan.",
+        )
+        scan_head_ref = st.text_input(
+            "Head ref",
+            cfg.get("scan_head_ref", ""),
+            placeholder="HEAD",
+        )
 
     env_default = cfg.get("environment") or ENVIRONMENTS[0]
     env_idx = ENVIRONMENTS.index(env_default) if env_default in ENVIRONMENTS else 0
@@ -163,6 +177,8 @@ def _settings_form(store: RunStore) -> None:
         "model_id_reviewer": model_id_reviewer,
         "model_id_ranker": model_id_ranker,
         "repo_source": repo_source,
+        "scan_base_ref": scan_base_ref.strip(),
+        "scan_head_ref": scan_head_ref.strip(),
         "max_hunters_parallel": int(max_par),
         "hunter_max_iterations": int(max_iter),
         "budget_max_hunter_sessions": int(budget_sessions),

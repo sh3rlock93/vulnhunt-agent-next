@@ -12,19 +12,20 @@ model — no preview model required.
 
 ---
 
-## Per-file independent hunts
+## Independent slice hunts
 
 <p align="center">
   <img src="assets/img/per_file_loop.svg" alt="Per-file loop: Hunters → Clusterer → Reviewer" width="100%">
 </p>
 
-For every top-ranked file the scanner runs an independent hunter
-session — fresh context, no shared history.
+The scanner routes bounded graph slices to relevant specialist Hunters instead
+of running every Hunter on every selected file. Sessions keep independent
+conversation history but reuse immutable, content-addressed source context.
 
 A separate **Reproducer** runs each PoC twice in clean containers. The
 evidence-only **Reviewer** can confirm, reject, or request a declarative
-reproduction variant, but cannot execute commands itself. Per-file bounding
-gives deterministic coverage and clean parallelism.
+reproduction variant, but cannot execute commands itself. Slice bounding gives
+deterministic coverage and clean parallelism.
 
 These three pieces (Hunter · Clusterer · Reviewer) **adapt the Mythos
 building blocks (Ranker · Hunters · Reviewer)** for public-model access.
@@ -51,8 +52,8 @@ Filter → C Analysis Graph → Rank → Selector → Sandbox Prepare
 5. **Sandbox Prepare** — build a per-repo Docker image (deterministic
    install/build per environment: pip / mvn / npm / CMake / Make / Meson /
    Autotools). Or use a custom image you've built.
-6. **Hunt** — run fresh specialist sessions per file. Each receives a bounded
-   graph slice, reads and greps the source, writes
+6. **Hunt** — run leased specialist sessions per bounded graph slice. Each
+   receives shared immutable excerpts, can still read and grep the source, writes
    a PoC into `/workspace`, executes it in a network-isolated Docker
    container. `network: none`, `/code` read-only, `/workspace` tmpfs. Native
    PoCs are compiled into the isolated executable tmpfs at `/workspace/exec`.
@@ -62,8 +63,8 @@ Filter → C Analysis Graph → Rank → Selector → Sandbox Prepare
    two distinct model/prompt configurations.
 9. **Report** — consensus-gated canonical JSON + Markdown + SARIF 2.1.0.
 
-Each Hunter is a fresh session. They don't share history; the diversity
-of independent runs is the point.
+Each Hunter is a fresh session. They do not share conversation history; only
+snapshot-bound source context is reused.
 
 ---
 
@@ -96,6 +97,22 @@ In the sidebar: pick a repo (git URL or local path), pick an
 **Environment** (e.g. `python:3.12`, `java:21`), click **Save**,
 then run each step from top to bottom.
 
+For a Git-diff plan or scan from the CLI:
+
+```bash
+# Inspect the impacted C functions, callers/callees, slices, and sinks only.
+vulnhunt scan /path/to/repo \
+  --base-ref main --head-ref HEAD --plan-only
+
+# Remove --plan-only to prepare the sandbox and run Hunters.
+vulnhunt scan /path/to/repo \
+  --base-ref main --head-ref HEAD
+```
+
+Incremental mode is used only for a clean working tree whose checked-out
+revision matches `head-ref`. Missing refs, build changes, deleted C sources, or
+unresolved header impact fall back to a full scan and record the reason.
+
 For a native C repository, select `c:gcc-13`. Auto prepare builds CMake, Make,
 Meson, or Autotools projects with ASan/UBSan. C/H files use tree-sitter-c;
 Flex/Bison `.l`/`.y` sources are also retained for ranking and cross-file tracing.
@@ -110,6 +127,9 @@ reproductions, and strict end-to-end report promotion are documented in
 Durable worker leases, heartbeats, expired-task recovery, and partial
 reproduction resume are documented in
 [`docs/milestones/m7-resumable-operations.md`](docs/milestones/m7-resumable-operations.md).
+Signal routing, bounded slice work, hard budgets, shared context packets, and
+Git-diff incremental scans are documented in
+[`docs/milestones/m8-cost-aware-scheduler.md`](docs/milestones/m8-cost-aware-scheduler.md).
 
 The evidence-review and strict-export contract is documented in
 [`docs/milestones/m4-evidence-review-reporting.md`](docs/milestones/m4-evidence-review-reporting.md).

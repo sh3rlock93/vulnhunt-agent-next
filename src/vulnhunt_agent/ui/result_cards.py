@@ -69,6 +69,21 @@ def _analysis_graph(store: RunStore, d: dict) -> None:
         )
     else:
         st.error("Coverage plan has unresolved entrypoints or critical sinks.")
+    incremental = d.get("incremental_scope") or {}
+    if incremental.get("mode") == "incremental":
+        st.info(
+            f"Git diff scope · {len(incremental.get('changed_files', []))} changed "
+            f"file(s) → {len(incremental.get('selected_files', []))} impacted "
+            f"file(s) · {summary.get('file_reduction_percent', 0):.1f}% file reduction"
+        )
+    elif (
+        incremental.get("fallback_reason")
+        and incremental.get("fallback_reason") != "refs_not_configured"
+    ):
+        st.warning(
+            "Git diff scan fell back to full analysis: "
+            + incremental["fallback_reason"]
+        )
 
 
 def _selector(store: RunStore, d: dict) -> None:
@@ -86,6 +101,17 @@ def _selector(store: RunStore, d: dict) -> None:
         f"Analysis coverage selected {len(coverage)} file(s)"
         + (" · complete" if d.get("coverage_complete") else " · incomplete")
     )
+    incremental = d.get("incremental_scope") or {}
+    if incremental.get("mode") == "incremental":
+        full = len(d.get("full_coverage_selected") or [])
+        reduction = (
+            (1 - len(selected) / full) * 100
+            if full else 0.0
+        )
+        st.caption(
+            f"Incremental scope: {len(selected)}/{full} files "
+            f"({reduction:.1f}% reduction)"
+        )
 
 
 def _prepare(store: RunStore, d: dict) -> None:
