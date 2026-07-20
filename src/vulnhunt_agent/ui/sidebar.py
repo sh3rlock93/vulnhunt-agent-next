@@ -49,6 +49,11 @@ def default_config() -> dict:
         "max_tokens": app_settings.MAX_TOKENS,
         "max_hunters_parallel": 3,
         "hunter_max_iterations": 100,
+        "budget_max_hunter_sessions": 100,
+        "budget_max_input_tokens": 2_000_000,
+        "budget_max_output_tokens": 200_000,
+        "budget_max_wall_clock_minutes": 60,
+        "budget_max_retries_per_work_item": 1,
     }
 
 
@@ -119,6 +124,37 @@ def _settings_form(store: RunStore) -> None:
     max_iter = st.sidebar.number_input(
         "Max iter / hunter", 5, 500, cfg["hunter_max_iterations"],
     )
+    with st.sidebar.expander("Hunter budget", expanded=False):
+        budget_sessions = st.number_input(
+            "Max sessions",
+            1,
+            100_000,
+            cfg["budget_max_hunter_sessions"],
+        )
+        budget_input = st.number_input(
+            "Max input tokens",
+            1,
+            1_000_000_000,
+            cfg["budget_max_input_tokens"],
+        )
+        budget_output = st.number_input(
+            "Max output tokens",
+            1,
+            1_000_000_000,
+            cfg["budget_max_output_tokens"],
+        )
+        budget_minutes = st.number_input(
+            "Max wall-clock minutes",
+            1,
+            10_080,
+            cfg["budget_max_wall_clock_minutes"],
+        )
+        budget_retries = st.number_input(
+            "Max retries / work",
+            0,
+            8,
+            cfg["budget_max_retries_per_work_item"],
+        )
 
     new_cfg = {
         **cfg,
@@ -129,6 +165,11 @@ def _settings_form(store: RunStore) -> None:
         "repo_source": repo_source,
         "max_hunters_parallel": int(max_par),
         "hunter_max_iterations": int(max_iter),
+        "budget_max_hunter_sessions": int(budget_sessions),
+        "budget_max_input_tokens": int(budget_input),
+        "budget_max_output_tokens": int(budget_output),
+        "budget_max_wall_clock_minutes": int(budget_minutes),
+        "budget_max_retries_per_work_item": int(budget_retries),
     }
 
     if st.sidebar.button("Save", type="primary", use_container_width=True):

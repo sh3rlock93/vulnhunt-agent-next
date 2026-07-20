@@ -532,6 +532,40 @@ class SqliteRepository:
                 f"unknown or actively leased task: {run_id}/{task_type}/{task_key}"
             )
 
+    def defer_task_for_budget(
+        self,
+        run_id: str,
+        task_type: str,
+        task_key: str,
+        *,
+        reason: str,
+        now: datetime | None = None,
+    ) -> None:
+        """Finish pending, unleased work without consuming an execution attempt."""
+        if not reason.strip():
+            raise ValueError("budget deferral reason must be non-empty")
+        current = _as_utc(now)
+        cursor = self.connection.execute(
+            """
+            UPDATE tasks
+            SET status = 'budget_deferred', last_error = ?, completed_at = ?
+            WHERE run_id = ? AND task_type = ? AND task_key = ?
+              AND status = 'pending' AND lease_token IS NULL
+            """,
+            (
+                reason[:2000],
+                current.isoformat(),
+                run_id,
+                task_type,
+                task_key,
+            ),
+        )
+        if cursor.rowcount != 1:
+            raise KeyError(
+                "unknown, active, or non-pending task: "
+                f"{run_id}/{task_type}/{task_key}"
+            )
+
     def save_budget_usage(self, usage: BudgetUsage) -> BudgetUsage:
         usage = BudgetUsage.model_validate(usage)
         self._required_run(usage.run_id)
