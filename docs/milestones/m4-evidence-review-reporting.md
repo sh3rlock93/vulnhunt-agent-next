@@ -1,6 +1,6 @@
 # M4 — Evidence review, consensus, and reporting
 
-Status: Implementation complete; CI pending
+Status: Complete
 
 ## Outcome
 
@@ -69,7 +69,7 @@ provided as `v2_db_path` in that run's `config.json`.
   OASIS SARIF 2.1.0 JSON schema.
 - [x] Streamlit exposes finding state, evidence count, Reviewer count, and
   consensus without granting state-transition authority to the UI.
-- [ ] GitHub Actions passes on supported Python versions.
+- [x] GitHub Actions passes on supported Python versions.
 
 ## Verification
 
@@ -94,4 +94,5 @@ this project.
 On 2026-07-20, the local validation passed 66 automated tests at 63.74% branch
 coverage, all three real Docker isolation contracts, the complete OASIS schema,
 and a live evidence-packet review through Codex CLI 0.144.1 using the logged-in
-ChatGPT subscription.
+ChatGPT subscription. GitHub Actions also passed the Python 3.11, 3.12, and
+3.13 matrix plus the hardened Docker job.
