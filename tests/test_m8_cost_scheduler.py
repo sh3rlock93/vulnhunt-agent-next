@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -10,11 +11,15 @@ from pydantic import ValidationError
 from tests.factories import HASH_A
 from vulnhunt_agent.agents.tools import HunterTools
 from vulnhunt_agent.agents.queue import HuntQueueStore
+from vulnhunt_agent.agents.durable_queue import DurableHuntQueueStore
+from vulnhunt_agent.analysis import context_for_work_item
 from vulnhunt_agent.core.events import EventBus
 from vulnhunt_agent.core.llm import LLMResponse
+from vulnhunt_agent.core.run_store import RunStore
 from vulnhunt_agent.domain.schemas import (
     BudgetPolicy,
     BudgetUsage,
+    HunterRoutingPlan,
     HunterWorkItem,
     RunRecord,
 )
@@ -30,8 +35,14 @@ from vulnhunt_agent.analysis.models import (
 )
 from vulnhunt_agent.infrastructure.sqlite_repository import SqliteRepository
 from vulnhunt_agent.pipeline.hunt.hunters import run_hunters
+from vulnhunt_agent.pipeline.analysis_graph import run_analysis_graph
+from vulnhunt_agent.pipeline.file_selector import run_file_selector
+from vulnhunt_agent.pipeline.filter_files import run_filter
+from vulnhunt_agent.pipeline.source_snapshot import run_source_snapshot
+from vulnhunt_agent.pipeline import hunt as hunt_pipeline
 from vulnhunt_agent.scheduling import (
     build_routing_plan,
+    build_slice_work_items,
     build_shadow_plan,
     total_usage,
     work_id_for,
@@ -362,3 +373,217 @@ def test_critical_specialist_is_forced_even_when_not_manually_enabled() -> None:
     ]
     assert routed.work_items[0].required is True
     assert routed.covered_critical_sink_ids == ("sig-format",)
+
+
+def test_overlapping_routes_collapse_to_bounded_slice_work(
+    tmp_path: Path,
+) -> None:
+    repo, files = _native_router_fixture(tmp_path)
+    graph = build_c_analysis_graph(repo, files)
+    coverage = build_coverage_plan(graph)
+    analysis = {
+        "language": "c",
+        "graph": graph.model_dump(mode="json"),
+        "coverage_plan": coverage.model_dump(mode="json"),
+    }
+    routing = build_routing_plan(
+        run_id="run-1",
+        source_snapshot=HASH_A,
+        selected_files=list(coverage.selected_files),
+        enabled_hunters=[
+            "c-bounds-integers",
+            "c-memory-lifetime",
+            "c-parser-state",
+        ],
+        analysis=analysis,
+    )
+
+    work = build_slice_work_items(routing, analysis)
+    replay = build_slice_work_items(routing, analysis)
+
+    assert work == replay
+    assert routing.scheduled_sessions == 4
+    assert len(work) == 2
+    assert {item.hunter for item in work} == {
+        "c-bounds-integers",
+        "c-parser-state",
+    }
+    assert all(1 <= len(item.files) <= 8 for item in work)
+    assert all(item.seed_file == "state.c" for item in work)
+    parser_work = next(
+        item for item in work if item.hunter == "c-parser-state"
+    )
+    assert parser_work.files == (
+        "state.c",
+        "cue_parser.y",
+        "cue_scanner.l",
+    )
+    context = context_for_work_item(analysis, parser_work)
+    assert context["work_id"] == parser_work.work_id
+    assert context["context_files"] == list(parser_work.files)
+    assert {
+        step["file"]
+        for item in context["slices"]
+        for step in item["path"]
+    } == set(parser_work.files)
+
+
+def test_slice_work_splits_instead_of_omitting_ninth_routed_file() -> None:
+    files = tuple(f"src/f{index}.c" for index in range(9))
+    coverage = CoveragePlan(
+        slices=(AnalysisSlice(
+            slice_id="slice-wide",
+            entrypoint_id="node-0",
+            node_ids=("node-0",),
+            files=files,
+            risk=4,
+            rationale="wide context",
+        ),),
+        selected_files=files,
+    )
+    routed = tuple(
+        HunterWorkItem(
+            work_id=work_id_for(
+                source_snapshot=HASH_A,
+                planning_policy="router-test",
+                slice_ids=("slice-wide",),
+                files=(path,),
+                hunter="c-bounds-integers",
+            ),
+            run_id="run-1",
+            source_snapshot=HASH_A,
+            planning_policy="router-test",
+            slice_ids=("slice-wide",),
+            seed_file=path,
+            files=(path,),
+            hunter="c-bounds-integers",
+            risk=4,
+            required=True,
+            routing_reasons=("test:wide",),
+        )
+        for path in files
+    )
+    plan = HunterRoutingPlan(
+        policy_version="router-test",
+        legacy_sessions=27,
+        work_items=routed,
+    )
+
+    work = build_slice_work_items(
+        plan,
+        {"coverage_plan": coverage.model_dump(mode="json")},
+    )
+
+    assert len(work) == 2
+    assert all(len(item.files) <= 8 for item in work)
+    assert {
+        path for item in work for path in item.files
+    } == set(files)
+
+
+def test_durable_slice_queue_uses_sqlite_lease_and_resumes_local_artifacts(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "state.db"
+    with SqliteRepository(database) as repository:
+        repository.save_run(RunRecord(run_id="run-1"))
+    item = build_shadow_plan(
+        run_id="run-1",
+        source_snapshot=HASH_A,
+        selected_files=["state.c"],
+        hunters=["c-bounds-integers"],
+        analysis={},
+    )[0]
+    qstore = DurableHuntQueueStore(
+        tmp_path / "hunters",
+        database,
+        "run-1",
+    )
+    task = qstore.init_from_work_items((item,)).tasks[0]
+
+    assert not (tmp_path / "hunters" / "_queue.json").exists()
+    assert qstore.task_dir(task).name == item.work_id
+    old = datetime(2000, 1, 1, tzinfo=UTC)
+    with SqliteRepository(database) as repository:
+        first = repository.acquire_task_lease(
+            "run-1",
+            "hunter",
+            item.work_id,
+            worker_id="dead-worker",
+            lease_seconds=1,
+            now=old,
+        )
+        assert first is not None
+    qstore.mark_file_running(task)
+    qstore.mark_hunt_done(task, item.hunter, findings_count=1)
+
+    resumed_task = qstore.load().tasks[0]
+    assert resumed_task.hunters[0].status == "done"
+    second = qstore.acquire(
+        resumed_task,
+        worker_id="replacement-worker",
+        lease_seconds=60,
+        max_attempts=3,
+    )
+    assert second is not None
+    assert second.attempt == 2
+    qstore.finish(second, status="done")
+
+    completed = qstore.load().tasks[0]
+    assert completed.status == "done"
+    with SqliteRepository(database, read_only=True) as repository:
+        visible = repository.list_tasks("run-1")[0]
+    assert visible["attempt"] == 2
+    assert "lease_token" not in visible
+
+
+async def test_hunt_pipeline_executes_slice_queue_without_legacy_json(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    repo, _ = _native_router_fixture(tmp_path)
+    store = RunStore(tmp_path / "run-slice")
+    store.save_config({
+        "repo_path": str(repo),
+        "environment": "c:gcc-13",
+        "model_id": "gpt-5.6-sol",
+        "max_hunters_parallel": 2,
+        "hunter_max_iterations": 3,
+        "hunter_lease_seconds": 30,
+    })
+    bus = EventBus(store.dir / "events.jsonl")
+    await run_source_snapshot(store, bus)
+    await run_filter(store, bus)
+    await run_analysis_graph(store, bus)
+    await run_file_selector(store, bus)
+    store.save_step("sandbox_prepare", {"status": "failed"})
+    monkeypatch.setattr(
+        hunt_pipeline,
+        "LLMClient",
+        lambda **kwargs: _FinalJsonClient(),
+    )
+    monkeypatch.setattr(
+        hunt_pipeline,
+        "base_image_for",
+        lambda environment: "unused:latest",
+    )
+
+    await hunt_pipeline.run_hunt(store, bus)
+
+    plan = store.load_step("hunt_plan")
+    summary = store.load_step("hunt")
+    assert plan is not None
+    assert summary is not None
+    assert plan["mode"] == "slice"
+    assert plan["scheduled_sessions"] == 2
+    assert summary["done"] == 2
+    assert summary["failed"] == 0
+    assert not (store.dir / "hunters" / "_queue.json").exists()
+    with SqliteRepository(store.dir / "state.db", read_only=True) as repository:
+        tasks = [
+            task for task in repository.list_tasks(store.dir.name)
+            if task["task_type"] == "hunter"
+        ]
+    assert len(tasks) == 2
+    assert {task["status"] for task in tasks} == {"done"}
+    assert all(task["attempt"] == 1 for task in tasks)

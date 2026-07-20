@@ -11,6 +11,7 @@ import json
 import streamlit as st
 
 from ...agents.queue import HuntQueueStore
+from ...agents.durable_queue import DurableHuntQueueStore
 from ...core.run_store import RunStore
 from ...prompts import hunters_for
 from ...sandbox import language_of
@@ -36,7 +37,16 @@ def render_hunt_view(store: RunStore) -> None:
                 + ", ".join(plan["uncovered_critical_sink_ids"])
             )
 
-    qstore = HuntQueueStore(store.dir / "hunters")
+    durable = DurableHuntQueueStore(
+        store.dir / "hunters",
+        store.dir / "state.db",
+        store.dir.name,
+    )
+    qstore = (
+        durable
+        if durable.has_durable_tasks()
+        else HuntQueueStore(store.dir / "hunters")
+    )
     queue = qstore.load()
 
     st.divider()
@@ -76,6 +86,10 @@ def _iter_hunter_rows(queue) -> list[dict]:
                 "status": sub.status,
                 "hunter": sub.name,
                 "file": t.file,
+                "context_files": len(t.files) or 1,
+                "slices": len(t.slice_ids),
+                "risk": t.risk,
+                "required": t.required,
                 "findings": sub.findings_count,
                 "started_at": sub.started_at.replace("T", " ") if sub.started_at else "",
                 "error": sub.error[:80] if sub.error else "",

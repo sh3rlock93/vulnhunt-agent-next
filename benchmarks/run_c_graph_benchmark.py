@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Sequence
 
 from vulnhunt_agent.analysis import build_c_analysis_graph, build_coverage_plan
-from vulnhunt_agent.scheduling import build_routing_plan
+from vulnhunt_agent.scheduling import build_routing_plan, build_slice_work_items
 
 _C_SUFFIXES = frozenset({".c", ".h", ".l", ".y"})
 _EXCLUDED_PARTS = frozenset({"test", "tests", "vendor", "third_party"})
@@ -47,6 +47,14 @@ def evaluate(repo: Path, spec_path: Path, expect: str) -> dict:
             "coverage_plan": plan.model_dump(mode="json"),
         },
     )
+    slice_work = build_slice_work_items(
+        routing,
+        {"coverage_plan": plan.model_dump(mode="json")},
+    )
+    slice_reduction = (
+        round((1 - len(slice_work) / routing.legacy_sessions) * 100, 2)
+        if routing.legacy_sessions else 0.0
+    )
 
     spec = tomllib.loads(spec_path.read_text())
     truth = spec["ground_truth"]
@@ -76,16 +84,16 @@ def evaluate(repo: Path, spec_path: Path, expect: str) -> dict:
             and bool(trace_slices)
             and any("lower_guard=no" in item.detail for item in target_signals)
             and not routing.uncovered_critical_sink_ids
-            and routing.session_reduction_percent >= 50
+            and slice_reduction >= 60
             and any(
                 item.hunter == "c-bounds-integers"
-                and item.seed_file == truth["sink_file"]
-                for item in routing.work_items
+                and truth["sink_file"] in item.files
+                for item in slice_work
             )
             and any(
                 item.hunter == "c-parser-state"
-                and item.seed_file == truth["sink_file"]
-                for item in routing.work_items
+                and truth["sink_file"] in item.files
+                for item in slice_work
             )
         )
     else:
@@ -123,8 +131,9 @@ def evaluate(repo: Path, spec_path: Path, expect: str) -> dict:
         "trace_files": [list(item.files) for item in trace_slices],
         "routing": {
             "legacy_sessions": routing.legacy_sessions,
-            "scheduled_sessions": routing.scheduled_sessions,
-            "session_reduction_percent": routing.session_reduction_percent,
+            "routed_file_sessions": routing.scheduled_sessions,
+            "scheduled_sessions": len(slice_work),
+            "session_reduction_percent": slice_reduction,
             "critical_sinks_detected": len(
                 routing.detected_critical_sink_ids
             ),
@@ -138,7 +147,7 @@ def evaluate(repo: Path, spec_path: Path, expect: str) -> dict:
                     "risk": item.risk,
                     "required": item.required,
                 }
-                for item in routing.work_items
+                for item in slice_work
             ],
         },
     }

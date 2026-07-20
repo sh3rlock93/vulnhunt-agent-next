@@ -20,6 +20,7 @@ async def run_hunters(
     arch: dict, analysis_context: dict, sandbox_info: str, max_iter: int, sem, bus,
     sandbox_enabled: bool,
     work_items: dict[str, HunterWorkItem] | None = None,
+    before_commit=None,
 ) -> tuple[dict[str, list[dict]], list[BudgetUsage]]:
     """Run all hunters for one file in parallel; return {hunter_name: findings}."""
     out: dict[str, list[dict]] = {}
@@ -67,6 +68,8 @@ async def run_hunters(
                 result = await agent.hunt(task.file, analysis_context)
                 if result.findings:
                     finalize.rewrite_poc_paths(result.findings)
+                if before_commit is not None:
+                    before_commit()
                 (hunt_dir / "findings.json").write_text(
                     json.dumps(asdict(result), indent=2, ensure_ascii=False)
                 )
