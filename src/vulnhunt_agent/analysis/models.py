@@ -100,3 +100,33 @@ class CoveragePlan(AnalysisModel):
     @property
     def complete(self) -> bool:
         return not self.uncovered_entrypoint_ids and not self.uncovered_sink_ids
+
+
+class IncrementalScope(AnalysisModel):
+    policy_version: str = "c-git-diff-v1"
+    mode: str = Field(pattern=r"^(full|incremental)$")
+    base_ref: str = ""
+    head_ref: str = ""
+    base_commit: str = ""
+    head_commit: str = ""
+    merge_base_commit: str = ""
+    fallback_reason: str = ""
+    changed_files: tuple[str, ...] = ()
+    changed_line_ranges: dict[str, tuple[tuple[int, int], ...]] = Field(
+        default_factory=dict
+    )
+    changed_node_ids: tuple[str, ...] = ()
+    expanded_node_ids: tuple[str, ...] = ()
+    selected_slice_ids: tuple[str, ...] = ()
+    selected_files: tuple[str, ...] = ()
+    critical_sink_ids: tuple[str, ...] = ()
+    full_selected_files: int = Field(default=0, ge=0)
+
+    @property
+    def file_reduction_percent(self) -> float:
+        if not self.full_selected_files:
+            return 0.0
+        return round(
+            (1 - len(self.selected_files) / self.full_selected_files) * 100,
+            2,
+        )

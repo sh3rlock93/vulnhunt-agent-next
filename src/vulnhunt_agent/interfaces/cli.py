@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import sqlite3
 from pathlib import Path
@@ -24,6 +25,35 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     subparsers.add_parser("runs", help="list runs")
+
+    scan = subparsers.add_parser(
+        "scan",
+        help="plan or execute a full/incremental repository scan",
+    )
+    scan.add_argument("repo")
+    scan.add_argument("--base-ref", default="")
+    scan.add_argument("--head-ref", default="HEAD")
+    scan.add_argument("--environment", default="c:gcc-13")
+    scan.add_argument("--model-id")
+    scan.add_argument("--run-id")
+    scan.add_argument(
+        "--run-root",
+        type=Path,
+        default=Path(".vulnhunt/runs"),
+    )
+    scan.add_argument(
+        "--plan-only",
+        action="store_true",
+        help="stop after graph, diff scope, and file selection",
+    )
+    scan.add_argument("--skip-verify", action="store_true")
+    scan.add_argument(
+        "--prepare-mode",
+        choices=("auto", "custom"),
+        default="auto",
+    )
+    scan.add_argument("--custom-image", default="")
+    scan.add_argument("--max-hunter-sessions", type=int, default=100)
 
     status = subparsers.add_parser("status", help="show one run and task counts")
     status.add_argument("run_id")
@@ -62,6 +92,11 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.command == "scan":
+        try:
+            return asyncio.run(_run_scan(args))
+        except (FileNotFoundError, RuntimeError, ValueError) as exc:
+            parser.error(f"scan failed: {exc}")
     try:
         with SqliteRepository(
             args.db, read_only=args.command not in {"export", "recover"}
@@ -149,6 +184,78 @@ def main(argv: Sequence[str] | None = None) -> int:
     except (FileNotFoundError, sqlite3.OperationalError) as exc:
         parser.error(f"cannot access V2 database or artifacts: {exc}")
     return 2
+
+
+async def _run_scan(args) -> int:
+    from ..core import settings as app_settings
+    from ..core.events import EventBus
+    from ..core.run_store import RunStore, new_run_id
+    from ..pipeline.analysis_graph import run_analysis_graph
+    from ..pipeline.file_selector import run_file_selector
+    from ..pipeline.filter_files import run_filter
+    from ..pipeline.hunt import run_hunt
+    from ..pipeline.sandbox_prepare import run_prepare
+    from ..pipeline.source_snapshot import run_source_snapshot
+    from ..pipeline.verify import run_verify
+    from ..repo.fetch import resolve
+
+    repo = resolve(args.repo)
+    run_id = args.run_id or new_run_id()
+    store = RunStore(args.run_root.resolve() / run_id)
+    model_id = args.model_id or app_settings.DEFAULT_MODEL.model_id
+    store.save_config({
+        "repo_source": args.repo,
+        "repo_path": str(repo),
+        "environment": args.environment,
+        "model_id": model_id,
+        "model_id_ranker": model_id,
+        "model_id_reviewer": model_id,
+        "scan_base_ref": args.base_ref,
+        "scan_head_ref": args.head_ref if args.base_ref else "",
+        "prepare_mode": args.prepare_mode,
+        "custom_image": args.custom_image,
+        "max_hunters_parallel": 3,
+        "hunter_max_iterations": 100,
+        "budget_max_hunter_sessions": args.max_hunter_sessions,
+        "budget_max_input_tokens": 2_000_000,
+        "budget_max_output_tokens": 200_000,
+        "budget_max_wall_clock_minutes": 60,
+        "budget_max_retries_per_work_item": 1,
+    })
+    bus = EventBus(store.dir / "events.jsonl")
+    for step in (
+        run_source_snapshot,
+        run_filter,
+        run_analysis_graph,
+        run_file_selector,
+    ):
+        await step(store, bus)
+
+    analysis = store.load_step("analysis_graph") or {}
+    selector = store.load_step("file_selector") or {}
+    if args.plan_only:
+        _print_json({
+            "run_id": run_id,
+            "run_dir": str(store.dir),
+            "mode": "plan_only",
+            "incremental_scope": analysis.get("incremental_scope") or {},
+            "selected_files": selector.get("selected") or [],
+        })
+        return 0
+
+    await run_prepare(store, bus)
+    await run_hunt(store, bus)
+    if not args.skip_verify:
+        await run_verify(store, bus)
+    _print_json({
+        "run_id": run_id,
+        "run_dir": str(store.dir),
+        "mode": "complete",
+        "incremental_scope": analysis.get("incremental_scope") or {},
+        "hunt": store.load_step("hunt") or {},
+        "verify": store.load_step("verify") or {},
+    })
+    return 0
 
 
 def _print_json(value: object) -> None:

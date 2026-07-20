@@ -101,7 +101,9 @@ def evaluate(repo: Path, spec_path: Path, expect: str) -> dict:
             bool(target_signals)
             and not critical
             and any(
-                item.risk < 4 and "lower_guard=yes" in item.detail
+                item.risk < 4
+                and "lower_guard=yes" in item.detail
+                and "upper_guard=yes" in item.detail
                 for item in target_signals
             )
         )

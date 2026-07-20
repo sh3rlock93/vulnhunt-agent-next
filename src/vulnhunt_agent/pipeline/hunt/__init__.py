@@ -86,6 +86,29 @@ async def run_hunt(store: RunStore, bus: EventBus) -> None:
             + ", ".join(routing_plan.uncovered_critical_sink_ids)
         )
     work_items = build_slice_work_items(routing_plan, analysis)
+    incremental = analysis.get("incremental_scope") or {}
+    if incremental.get("mode") == "incremental":
+        full_analysis = {
+            **analysis,
+            "incremental_scope": {
+                **incremental,
+                "mode": "full",
+            },
+        }
+        full_selected = list(
+            (analysis.get("coverage_plan") or {}).get("selected_files", [])
+        )
+        full_routing = build_routing_plan(
+            run_id=store.dir.name,
+            source_snapshot=source_snapshot,
+            selected_files=full_selected,
+            enabled_hunters=hunters,
+            analysis=full_analysis,
+        )
+        full_work_items = build_slice_work_items(full_routing, full_analysis)
+    else:
+        full_routing = routing_plan
+        full_work_items = work_items
     by_work_id = {item.work_id: item for item in work_items}
     hunt_plan = {
         "mode": "slice",
@@ -94,6 +117,20 @@ async def run_hunt(store: RunStore, bus: EventBus) -> None:
             if work_items else "c-slice-work-v1"
         ),
         "execution_changed": True,
+        "scan_mode": incremental.get("mode", "full"),
+        "scan_base_ref": incremental.get("base_ref", ""),
+        "scan_head_ref": incremental.get("head_ref", ""),
+        "changed_files": len(incremental.get("changed_files", [])),
+        "impacted_files": len(incremental.get("selected_files", [])),
+        "full_scan_legacy_pairs": full_routing.legacy_sessions,
+        "full_scan_scheduled_sessions": len(full_work_items),
+        "incremental_session_reduction_percent": (
+            round(
+                (1 - len(work_items) / len(full_work_items)) * 100,
+                2,
+            )
+            if full_work_items else 0.0
+        ),
         "legacy_pairs": routing_plan.legacy_sessions,
         "routed_file_sessions": routing_plan.scheduled_sessions,
         "scheduled_sessions": len(work_items),
@@ -182,8 +219,26 @@ async def run_hunt(store: RunStore, bus: EventBus) -> None:
              total=len(admitted_ids), parallel=max_parallel, max_iter=max_iter,
              image=hunter_image, hunters=hunters)
 
-    hunter_client = LLMClient(model_id=cfg["model_id"])
     budget_controller = BudgetController(budget_policy, persisted_usage)
+    if not admitted_ids:
+        _save_summary(
+            store,
+            qstore,
+            bus,
+            hunter_image,
+            total_usage(persisted_usage),
+            budget_policy,
+            budget_controller.snapshot(),
+            context_cache_stats,
+        )
+        advance_run(
+            store,
+            RunState.REPRODUCING,
+            reason="No Hunter work admitted for this scan",
+        )
+        return
+
+    hunter_client = LLMClient(model_id=cfg["model_id"])
     budgeted_hunter_client = BudgetedLLMClient(
         hunter_client,
         budget_controller,

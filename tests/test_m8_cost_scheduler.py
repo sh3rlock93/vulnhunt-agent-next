@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sqlite3
+import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -15,6 +16,7 @@ from vulnhunt_agent.agents.queue import HuntQueueStore
 from vulnhunt_agent.agents.durable_queue import DurableHuntQueueStore
 from vulnhunt_agent.analysis import (
     SharedContextCache,
+    build_incremental_scope,
     context_cache_key,
     context_for_work_item,
 )
@@ -39,6 +41,7 @@ from vulnhunt_agent.analysis.models import (
     SignalRole,
 )
 from vulnhunt_agent.infrastructure.sqlite_repository import SqliteRepository
+from vulnhunt_agent.interfaces.cli import main as cli_main
 from vulnhunt_agent.pipeline.hunt.hunters import run_hunters
 from vulnhunt_agent.pipeline.analysis_graph import run_analysis_graph
 from vulnhunt_agent.pipeline.file_selector import run_file_selector
@@ -417,6 +420,218 @@ def _native_router_fixture(tmp_path: Path) -> tuple[Path, list[str]]:
         "}\n"
     )
     return repo, ["cue_parser.y", "cue_scanner.l", "state.c", "state.h"]
+
+
+def _commit_all(repo: Path, message: str) -> str:
+    subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "commit", "-m", message],
+        check=True,
+        capture_output=True,
+    )
+    return subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
+def _git_incremental_fixture(
+    tmp_path: Path,
+) -> tuple[Path, list[str], str, str]:
+    repo, files = _native_router_fixture(tmp_path)
+    (repo / "unrelated.c").write_text(
+        "#include <stdio.h>\n"
+        "void unrelated_log(const char *value) { printf(value); }\n"
+    )
+    files.append("unrelated.c")
+    subprocess.run(["git", "-C", str(repo), "init", "-b", "main"], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "user.email", "tests@example.com"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "user.name", "Tests"],
+        check=True,
+    )
+    base = _commit_all(repo, "base")
+    (repo / "state.c").write_text(
+        '#include "state.h"\n'
+        "void track_set_index(struct track *track, int index, long value) {\n"
+        "    /* changed validation path */\n"
+        "    if (index > 99) return;\n"
+        "    track->values[index] = value;\n"
+        "}\n"
+    )
+    head = _commit_all(repo, "change state path")
+    return repo, files, base, head
+
+
+def test_git_diff_scope_expands_changed_function_and_parser_flow(
+    tmp_path: Path,
+) -> None:
+    repo, files, base, head = _git_incremental_fixture(tmp_path)
+    graph = build_c_analysis_graph(repo, files)
+    coverage = build_coverage_plan(graph)
+
+    scope = build_incremental_scope(
+        repo,
+        base_ref=base,
+        head_ref=head,
+        graph=graph,
+        coverage=coverage,
+    )
+
+    assert scope.mode == "incremental"
+    assert scope.fallback_reason == ""
+    assert scope.changed_files == ("state.c",)
+    assert scope.base_commit == base
+    assert scope.head_commit == head
+    assert any(node_id.startswith("state.c::track_set_index") for node_id in scope.changed_node_ids)
+    assert {"state.c", "cue_parser.y", "cue_scanner.l"}.issubset(
+        scope.selected_files
+    )
+    assert "unrelated.c" not in scope.selected_files
+    assert set(scope.critical_sink_ids) < set(graph.critical_sink_ids)
+    assert any(
+        signal.path == "state.c"
+        and signal.signal_id in scope.critical_sink_ids
+        for signal in graph.signals
+    )
+    assert scope.file_reduction_percent > 0
+
+    analysis = {
+        "language": "c",
+        "graph": graph.model_dump(mode="json"),
+        "coverage_plan": coverage.model_dump(mode="json"),
+        "incremental_scope": scope.model_dump(mode="json"),
+    }
+    routed = build_routing_plan(
+        run_id="run-incremental",
+        source_snapshot=HASH_A,
+        selected_files=list(scope.selected_files),
+        enabled_hunters=[
+            "c-bounds-integers",
+            "c-parser-state",
+        ],
+        analysis=analysis,
+    )
+    assert set(routed.detected_critical_sink_ids) == set(scope.critical_sink_ids)
+    assert routed.uncovered_critical_sink_ids == ()
+
+
+def test_git_diff_scope_expands_header_consumers_and_falls_back_safely(
+    tmp_path: Path,
+) -> None:
+    repo, files = _native_router_fixture(tmp_path)
+    subprocess.run(["git", "-C", str(repo), "init", "-b", "main"], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "user.email", "tests@example.com"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "user.name", "Tests"],
+        check=True,
+    )
+    base = _commit_all(repo, "base")
+    (repo / "state.h").write_text(
+        "/* contract changed */\n"
+        "void track_set_index(struct track *track, int index, long value);\n"
+    )
+    head = _commit_all(repo, "change header")
+    graph = build_c_analysis_graph(repo, files)
+    coverage = build_coverage_plan(graph)
+
+    header_scope = build_incremental_scope(
+        repo,
+        base_ref=base,
+        head_ref=head,
+        graph=graph,
+        coverage=coverage,
+    )
+    assert header_scope.mode == "incremental"
+    assert header_scope.changed_files == ("state.h",)
+    assert "state.c" in header_scope.selected_files
+    assert header_scope.critical_sink_ids
+
+    (repo / "orphan.h").write_text("/* no known consumer */\n")
+    orphan_base = _commit_all(repo, "add orphan header")
+    (repo / "state.h").write_text(
+        (repo / "state.h").read_text() + "/* second contract change */\n"
+    )
+    (repo / "orphan.h").write_text("/* changed without consumer */\n")
+    orphan_head = _commit_all(repo, "change known and unknown headers")
+    graph = build_c_analysis_graph(repo, [*files, "orphan.h"])
+    coverage = build_coverage_plan(graph)
+    unknown_consumer = build_incremental_scope(
+        repo,
+        base_ref=orphan_base,
+        head_ref=orphan_head,
+        graph=graph,
+        coverage=coverage,
+    )
+    assert unknown_consumer.mode == "full"
+    assert unknown_consumer.fallback_reason == "header_consumers_unknown"
+
+    (repo / "state.c").write_text(
+        (repo / "state.c").read_text() + "\n/* dirty */\n"
+    )
+    dirty = build_incremental_scope(
+        repo,
+        base_ref=orphan_base,
+        head_ref=orphan_head,
+        graph=graph,
+        coverage=coverage,
+    )
+    assert dirty.mode == "full"
+    assert dirty.fallback_reason == "working_tree_dirty"
+    assert dirty.selected_files == coverage.selected_files
+
+    subprocess.run(
+        ["git", "-C", str(repo), "restore", "state.c"],
+        check=True,
+    )
+    missing = build_incremental_scope(
+        repo,
+        base_ref="refs/heads/does-not-exist",
+        head_ref="HEAD",
+        graph=graph,
+        coverage=coverage,
+    )
+    assert missing.mode == "full"
+    assert missing.fallback_reason == "ref_not_available"
+
+
+def test_scan_cli_materializes_incremental_plan(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    repo, _, base, head = _git_incremental_fixture(tmp_path)
+    run_root = tmp_path / "runs"
+
+    result = cli_main([
+        "scan",
+        str(repo),
+        "--base-ref",
+        base,
+        "--head-ref",
+        head,
+        "--plan-only",
+        "--run-root",
+        str(run_root),
+        "--run-id",
+        "cli-incremental",
+    ])
+
+    assert result == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["mode"] == "plan_only"
+    assert payload["run_id"] == "cli-incremental"
+    assert payload["incremental_scope"]["mode"] == "incremental"
+    assert "state.c" in payload["selected_files"]
+    assert "unrelated.c" not in payload["selected_files"]
+    assert (run_root / "cli-incremental" / "state.db").is_file()
 
 
 def test_signal_router_reduces_libcue_shape_and_covers_critical_sink(
@@ -904,3 +1119,54 @@ async def test_hunt_pipeline_reports_work_deferred_by_session_budget(
         task for task in deferred_rows if task["status"] == "budget_deferred"
     )
     assert deferred["last_error"] == "max_hunter_sessions"
+
+
+async def test_incremental_scan_with_no_impacted_work_skips_model_client(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    repo, _ = _native_router_fixture(tmp_path)
+    store = RunStore(tmp_path / "run-empty-incremental")
+    store.save_config({
+        "repo_path": str(repo),
+        "environment": "c:gcc-13",
+        "model_id": "must-not-be-created",
+    })
+    bus = EventBus(store.dir / "events.jsonl")
+    await run_source_snapshot(store, bus)
+    await run_filter(store, bus)
+    await run_analysis_graph(store, bus)
+    analysis = store.load_step("analysis_graph")
+    assert analysis is not None
+    analysis["incremental_scope"] = {
+        "mode": "incremental",
+        "base_ref": "main",
+        "head_ref": "HEAD",
+        "changed_files": [],
+        "selected_files": [],
+        "critical_sink_ids": [],
+    }
+    store.save_step("analysis_graph", analysis)
+    store.save_step("file_selector", {"selected": []})
+    store.save_step("sandbox_prepare", {"status": "failed"})
+
+    def fail_if_created(**kwargs):
+        raise AssertionError(f"model client was initialized: {kwargs}")
+
+    monkeypatch.setattr(hunt_pipeline, "LLMClient", fail_if_created)
+    monkeypatch.setattr(
+        hunt_pipeline,
+        "base_image_for",
+        lambda environment: "unused:latest",
+    )
+
+    await hunt_pipeline.run_hunt(store, bus)
+
+    plan = store.load_step("hunt_plan")
+    summary = store.load_step("hunt")
+    assert plan is not None
+    assert summary is not None
+    assert plan["scan_mode"] == "incremental"
+    assert plan["scheduled_sessions"] == 0
+    assert summary["total"] == 0
+    assert summary["done"] == 0

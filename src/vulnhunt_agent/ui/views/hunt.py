@@ -59,6 +59,12 @@ def render_hunt_view(store: RunStore) -> None:
                 f"{cache.get('hits', 0)} hits · "
                 f"{cache.get('misses', 0)} misses"
             )
+        if plan.get("scan_mode") == "incremental":
+            st.caption(
+                "Git diff sessions: "
+                f"{scheduled}/{plan.get('full_scan_scheduled_sessions', scheduled)} "
+                f"({plan.get('incremental_session_reduction_percent', 0):.1f}% reduction)"
+            )
 
     durable = DurableHuntQueueStore(
         store.dir / "hunters",

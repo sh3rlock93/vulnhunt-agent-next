@@ -57,6 +57,20 @@ def render_cost_block(store: RunStore) -> None:
             f"{operations['poc_writes']:,} PoC writes · "
             f"{operations['exec_calls']:,} sandbox executions"
         )
+    plan = store.load_step("hunt_plan") or {}
+    if plan:
+        actual_sessions = operations.get("sessions", 0) if operations else 0
+        st.caption(
+            "Session plan: "
+            f"{plan.get('scheduled_sessions', 0):,} estimated · "
+            f"{actual_sessions:,} actual"
+            + (
+                f" · full-scan estimate "
+                f"{plan.get('full_scan_scheduled_sessions', 0):,}"
+                if plan.get("scan_mode") == "incremental"
+                else ""
+            )
+        )
 
     distinct = {specs[k].model_id for k in specs}
     if len(distinct) > 1:
