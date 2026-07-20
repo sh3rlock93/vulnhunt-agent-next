@@ -32,6 +32,18 @@ def build_parser() -> argparse.ArgumentParser:
     findings.add_argument("run_id")
     findings.add_argument("--state", choices=[state.value for state in FindingState])
 
+    tasks = subparsers.add_parser(
+        "tasks", help="list durable tasks, attempts, and lease state"
+    )
+    tasks.add_argument("run_id")
+    tasks.add_argument("--status")
+
+    recover = subparsers.add_parser(
+        "recover", help="requeue expired task leases without changing task identity"
+    )
+    recover.add_argument("run_id")
+    recover.add_argument("--max-attempts", type=int, default=3)
+
     export = subparsers.add_parser(
         "export", help="materialize consensus-verified Markdown, JSON, and SARIF"
     )
@@ -52,7 +64,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         with SqliteRepository(
-            args.db, read_only=args.command != "export"
+            args.db, read_only=args.command not in {"export", "recover"}
         ) as repository:
             if args.command == "runs":
                 _print_json([run.model_dump(mode="json") for run in repository.list_runs()])
@@ -69,6 +81,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                     {
                         "run": run.model_dump(mode="json"),
                         "task_counts": counts,
+                        "leased_tasks": sum(
+                            1 for task in tasks if task["lease_owner"] is not None
+                        ),
                         "finding_count": len(repository.list_candidates(args.run_id)),
                     }
                 )
@@ -77,6 +92,25 @@ def main(argv: Sequence[str] | None = None) -> int:
                 state = FindingState(args.state) if args.state else None
                 findings = repository.list_candidates(args.run_id, state)
                 _print_json([finding.model_dump(mode="json") for finding in findings])
+                return 0
+            if args.command == "tasks":
+                tasks = repository.list_tasks(args.run_id)
+                if args.status:
+                    tasks = [
+                        task for task in tasks
+                        if task["status"] == args.status
+                    ]
+                _print_json(tasks)
+                return 0
+            if args.command == "recover":
+                try:
+                    result = repository.reclaim_expired_tasks(
+                        args.run_id,
+                        max_attempts=args.max_attempts,
+                    )
+                except (KeyError, ValueError) as exc:
+                    parser.error(str(exc))
+                _print_json(result)
                 return 0
             service = StrictReportService(
                 repository, ArtifactStore(args.artifacts)

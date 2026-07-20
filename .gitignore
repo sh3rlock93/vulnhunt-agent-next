@@ -161,6 +161,7 @@ docs/milestones/*
 !docs/milestones/m4-evidence-review-reporting.md
 !docs/milestones/m5-c-analysis-graph.md
 !docs/milestones/m6-verified-pipeline.md
+!docs/milestones/m7-resumable-operations.md
 notes/
 tools/
 docker/local/

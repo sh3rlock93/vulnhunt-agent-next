@@ -47,6 +47,22 @@ def render_evidence_status(store: RunStore) -> None:
                         f"{state}: {count}" for state, count in sorted(counts.items())
                     ) or "No candidates"
                 )
+                tasks = repository.list_tasks(run.run_id)
+                if tasks:
+                    st.markdown("##### Durable tasks")
+                    st.dataframe(
+                        [{
+                            "Type": task["task_type"],
+                            "Key": task["task_key"],
+                            "Status": task["status"],
+                            "Attempt": task["attempt"],
+                            "Worker": task["lease_owner"] or "",
+                            "Lease expires": task["lease_expires_at"] or "",
+                            "Last error": task["last_error"] or "",
+                        } for task in tasks],
+                        hide_index=True,
+                        use_container_width=True,
+                    )
                 rows = []
                 for finding in findings:
                     evidence = repository.list_candidate_evidence(finding.candidate_id)

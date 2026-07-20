@@ -107,6 +107,9 @@ positive/negative graph benchmark are documented in
 The immutable source snapshot, exact Hunter command ledger, two clean native
 reproductions, and strict end-to-end report promotion are documented in
 [`docs/milestones/m6-verified-pipeline.md`](docs/milestones/m6-verified-pipeline.md).
+Durable worker leases, heartbeats, expired-task recovery, and partial
+reproduction resume are documented in
+[`docs/milestones/m7-resumable-operations.md`](docs/milestones/m7-resumable-operations.md).
 
 The evidence-review and strict-export contract is documented in
 [`docs/milestones/m4-evidence-review-reporting.md`](docs/milestones/m4-evidence-review-reporting.md).

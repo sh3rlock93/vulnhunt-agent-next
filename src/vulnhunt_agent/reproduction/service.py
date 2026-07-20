@@ -2,8 +2,11 @@
 from __future__ import annotations
 
 import hashlib
+import uuid
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from enum import StrEnum
+from typing import Callable
 
 from ..domain.schemas import (
     Evidence,
@@ -13,12 +16,16 @@ from ..domain.schemas import (
 )
 from ..domain.states import FindingState
 from ..infrastructure.artifacts import ArtifactStore
-from ..infrastructure.sqlite_repository import SqliteRepository
+from ..infrastructure.sqlite_repository import (
+    SqliteRepository,
+    TaskLeaseLostError,
+)
 from ..sandbox.base import SandboxBackend, SandboxJob
 from .oracles import evaluate_oracle
 
 
 class ReproductionStatus(StrEnum):
+    IN_PROGRESS = "in_progress"
     REPRODUCED = "reproduced"
     FAILED = "failed"
     FLAKY = "flaky"
@@ -39,10 +46,17 @@ class ReproducerService:
         repository: SqliteRepository,
         artifacts: ArtifactStore,
         backend: SandboxBackend,
+        *,
+        worker_id: str | None = None,
+        lease_seconds: int = 120,
+        clock: Callable[[], datetime] | None = None,
     ):
         self.repository = repository
         self.artifacts = artifacts
         self.backend = backend
+        self.worker_id = worker_id or f"reproducer-{uuid.uuid4().hex[:16]}"
+        self.lease_seconds = lease_seconds
+        self.clock = clock or (lambda: datetime.now(UTC))
 
     async def reproduce(self, spec: ReproductionSpec) -> ReproductionOutcome:
         spec = ReproductionSpec.model_validate(spec)
@@ -93,6 +107,33 @@ class ReproducerService:
             raise ValueError(
                 "environment-blocked reproduction requires a new reproduction_id to retry"
             )
+        if finding.state not in {
+            FindingState.POC_READY,
+            FindingState.ENVIRONMENT_BLOCKED,
+            FindingState.REPRODUCTION_PENDING,
+        }:
+            raise ValueError(
+                f"candidate is not reproducible from state {finding.state.value}"
+            )
+        lease_seconds = max(
+            self.lease_seconds,
+            (len(spec.setup_argvs) + 1) * spec.timeout_seconds + 30,
+        )
+        lease = self.repository.acquire_task_lease(
+            spec.run_id,
+            "reproduction",
+            spec.reproduction_id,
+            worker_id=self.worker_id,
+            lease_seconds=lease_seconds,
+            now=self.clock(),
+        )
+        if lease is None:
+            return ReproductionOutcome(
+                reproduction_id=spec.reproduction_id,
+                status=ReproductionStatus.IN_PROGRESS,
+                evidence=tuple(existing),
+                error="reproduction task is leased by another worker or already terminal",
+            )
         if finding.state in {FindingState.POC_READY, FindingState.ENVIRONMENT_BLOCKED}:
             self.repository.transition_finding(
                 spec.candidate_id,
@@ -100,33 +141,41 @@ class ReproducerService:
                 idempotency_key=f"{spec.reproduction_id}:pending",
                 reason="independent reproduction started",
             )
-        elif finding.state is not FindingState.REPRODUCTION_PENDING:
-            raise ValueError(f"candidate is not reproducible from state {finding.state.value}")
-        self.repository.set_task_status(
-            spec.run_id, "reproduction", spec.reproduction_id, "running"
-        )
 
         evidence_by_attempt = {item.attempt: item for item in existing}
         try:
             for attempt in range(1, spec.attempts + 1):
                 if attempt in evidence_by_attempt:
                     continue
+                lease = self.repository.heartbeat_task_lease(
+                    lease,
+                    lease_seconds=lease_seconds,
+                    now=self.clock(),
+                )
                 attempt_evidence = await self._execute_attempt(spec, attempt)
                 self.repository.save_evidence(attempt_evidence)
                 evidence_by_attempt[attempt] = attempt_evidence
         except Exception as exc:
-            self.repository.set_task_status(
-                spec.run_id,
-                "reproduction",
-                spec.reproduction_id,
-                "environment_blocked",
-            )
-            self.repository.transition_finding(
-                spec.candidate_id,
-                FindingState.ENVIRONMENT_BLOCKED,
-                idempotency_key=f"{spec.reproduction_id}:environment-blocked",
-                reason=str(exc)[:500],
-            )
+            try:
+                self.repository.finish_task_lease_and_transition_finding(
+                    lease,
+                    status=ReproductionStatus.ENVIRONMENT_BLOCKED.value,
+                    candidate_id=spec.candidate_id,
+                    target=FindingState.ENVIRONMENT_BLOCKED,
+                    idempotency_key=f"{spec.reproduction_id}:environment-blocked",
+                    reason=str(exc)[:500],
+                    error=str(exc),
+                    now=self.clock(),
+                )
+            except TaskLeaseLostError:
+                return ReproductionOutcome(
+                    reproduction_id=spec.reproduction_id,
+                    status=ReproductionStatus.IN_PROGRESS,
+                    evidence=tuple(
+                        item for _, item in sorted(evidence_by_attempt.items())
+                    ),
+                    error="worker lost the reproduction task lease",
+                )
             return ReproductionOutcome(
                 reproduction_id=spec.reproduction_id,
                 status=ReproductionStatus.ENVIRONMENT_BLOCKED,
@@ -136,6 +185,21 @@ class ReproducerService:
                 error=str(exc),
             )
 
+        try:
+            lease = self.repository.heartbeat_task_lease(
+                lease,
+                lease_seconds=lease_seconds,
+                now=self.clock(),
+            )
+        except TaskLeaseLostError:
+            return ReproductionOutcome(
+                reproduction_id=spec.reproduction_id,
+                status=ReproductionStatus.IN_PROGRESS,
+                evidence=tuple(
+                    item for _, item in sorted(evidence_by_attempt.items())
+                ),
+                error="worker lost the reproduction task lease",
+            )
         group_evidence = tuple(
             item for _, item in sorted(evidence_by_attempt.items())
         )
@@ -154,14 +218,14 @@ class ReproducerService:
         else:
             state = FindingState.REJECTED
             status = ReproductionStatus.FAILED
-        self.repository.transition_finding(
-            spec.candidate_id,
-            state,
+        self.repository.finish_task_lease_and_transition_finding(
+            lease,
+            status=status.value,
+            candidate_id=spec.candidate_id,
+            target=state,
             idempotency_key=f"{spec.reproduction_id}:result",
             reason=f"independent reproduction result: {status.value}",
-        )
-        self.repository.set_task_status(
-            spec.run_id, "reproduction", spec.reproduction_id, status.value
+            now=self.clock(),
         )
         return ReproductionOutcome(
             reproduction_id=spec.reproduction_id,

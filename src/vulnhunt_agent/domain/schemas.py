@@ -360,6 +360,33 @@ class RunRecord(DomainModel):
     updated_at: datetime = Field(default_factory=utc_now)
 
 
+class TaskLease(DomainModel):
+    run_id: str = Field(min_length=1, max_length=200)
+    task_type: str = Field(min_length=1, max_length=100)
+    task_key: str = Field(min_length=1, max_length=1000)
+    worker_id: str = Field(min_length=1, max_length=200)
+    lease_token: str = Field(min_length=16, max_length=128)
+    attempt: int = Field(ge=1)
+    acquired_at: datetime
+    heartbeat_at: datetime
+    expires_at: datetime
+    payload: dict = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_lease_window(self) -> "TaskLease":
+        if self.acquired_at.tzinfo is None:
+            raise ValueError("task lease acquired_at must be timezone-aware")
+        if self.heartbeat_at.tzinfo is None:
+            raise ValueError("task lease heartbeat_at must be timezone-aware")
+        if self.expires_at.tzinfo is None:
+            raise ValueError("task lease expires_at must be timezone-aware")
+        if self.heartbeat_at < self.acquired_at:
+            raise ValueError("task lease heartbeat precedes acquisition")
+        if self.expires_at <= self.heartbeat_at:
+            raise ValueError("task lease expiry must follow heartbeat")
+        return self
+
+
 class ArtifactRef(DomainModel):
     digest: str = Field(pattern=SHA256_PATTERN)
     size: int = Field(ge=0)
