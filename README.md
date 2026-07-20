@@ -21,8 +21,9 @@ model — no preview model required.
 For every top-ranked file the scanner runs an independent hunter
 session — fresh context, no shared history.
 
-A separate **Reviewer** stage re-runs each finding's PoC and is allowed
-to drop a group entirely if it doesn't reproduce. Per-file bounding
+A separate **Reproducer** runs each PoC twice in clean containers. The
+evidence-only **Reviewer** can confirm, reject, or request a declarative
+reproduction variant, but cannot execute commands itself. Per-file bounding
 gives deterministic coverage and clean parallelism.
 
 These three pieces (Hunter · Clusterer · Reviewer) **adapt the Mythos
@@ -51,8 +52,9 @@ Filter → Rank → Selector → Sandbox Prepare → Hunt (Hunter → Cluster �
    container. `network: none`, `/code` read-only, `/workspace` tmpfs. Native
    PoCs are compiled into the isolated executable tmpfs at `/workspace/exec`.
 6. **Cluster** — group near-duplicate findings within a file.
-7. **Review** — verdict + CVSS + writeup.
-8. **Report** — JSON + Markdown.
+7. **Review** — evidence citations + CVSS/CWE; high/critical findings require
+   two distinct model/prompt configurations.
+8. **Report** — consensus-gated canonical JSON + Markdown + SARIF 2.1.0.
 
 Each Hunter is a fresh session. They don't share history; the diversity
 of independent runs is the point.
@@ -94,6 +96,16 @@ Flex/Bison `.l`/`.y` sources are also retained for ranking and cross-file tracin
 The pinned libcue benchmark and its blind-test procedure are documented in
 [`docs/milestones/m3-c-native-analysis.md`](docs/milestones/m3-c-native-analysis.md).
 
+The evidence-review and strict-export contract is documented in
+[`docs/milestones/m4-evidence-review-reporting.md`](docs/milestones/m4-evidence-review-reporting.md).
+For a populated V2 metadata store, export all consensus-verified findings with:
+
+```bash
+vulnhunt --db .vulnhunt/state.db export RUN_ID \
+  --artifacts .vulnhunt/artifacts \
+  --output output
+```
+
 The default `openai_auto` provider checks the configured key environment
 variable first. It uses the Responses API when the key is non-empty; otherwise
 it invokes the logged-in Codex CLI. Runtime API failures do not silently switch
@@ -105,9 +117,10 @@ remains available as an explicit provider.
   <img src="assets/img/ui_screenshot.png" alt="Streamlit UI — mid-run" width="90%">
 </p>
 
-When a run finishes, the Final Report ranks every grouped finding by
-CVSS; each row expands into a writeup with a Reviewer summary, the CWE /
-CVSS vector, and the PoC that reproduced in the sandbox.
+When a run has V2 metadata, the UI also shows its finding states, evidence
+counts, Reviewer counts, and consensus. Strict exports include the source
+snapshot, reproduction command/oracle, evidence IDs, CVSS/CWE, Reviewer and
+policy provenance, and affected code locations.
 
 ---
 
@@ -142,6 +155,8 @@ src/vulnhunt_agent/
   ui/            streamlit (sidebar, steps, result_cards, cost)
   sandbox/       Docker executor
   repo/          git/local source resolver
+  reviewing/     evidence packets, Reviewer agent, consensus
+  reporting/     strict policy, Markdown/JSON/SARIF exporters
 prompts/
   hunters/*.md           # language hunters
   rankers/<lang>.md      # per-language ranker hint

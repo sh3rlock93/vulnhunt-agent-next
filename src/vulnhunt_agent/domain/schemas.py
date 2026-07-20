@@ -17,6 +17,7 @@ CVSS31_PATTERN = (
     r"^CVSS:3\.1/AV:[NALP]/AC:[LH]/PR:[NLH]/UI:[NR]/S:[UC]/"
     r"C:[HLN]/I:[HLN]/A:[HLN]$"
 )
+CWE_PATTERN = r"^CWE-[1-9][0-9]{0,4}$"
 
 
 def utc_now() -> datetime:
@@ -272,12 +273,31 @@ class Verdict(StrEnum):
     UNCLEAR = "unclear"
 
 
+class ConsensusStatus(StrEnum):
+    VERIFIED = "verified"
+    REJECTED = "rejected"
+    DISAGREEMENT = "disagreement"
+    NEEDS_SECOND_REVIEW = "needs_second_review"
+    VARIANT_REQUESTED = "variant_requested"
+
+
+class ReproductionVariantType(StrEnum):
+    SAFE_INPUT = "safe_input"
+    CONFIG_TOGGLE = "config_toggle"
+    FIXED_REVISION = "fixed_revision"
+    ALTERNATE_TRIGGER = "alternate_trigger"
+
+
 class ReviewVerdict(DomainModel):
     candidate_id: str = Field(min_length=1)
     verdict: Verdict
     notes: str = Field(min_length=1)
     cvss_vector: str = ""
+    cwe_id: str = ""
+    evidence_ids: tuple[str, ...] = Field(default=(), max_length=128)
     reviewer: str = Field(min_length=1)
+    model_id: str = ""
+    prompt_version: str = "evidence-review-v1"
     created_at: datetime = Field(default_factory=utc_now)
 
     @model_validator(mode="after")
@@ -289,9 +309,37 @@ class ReviewVerdict(DomainModel):
 
             if re.fullmatch(CVSS31_PATTERN, self.cvss_vector) is None:
                 raise ValueError("invalid CVSS 3.1 vector")
-        elif self.cvss_vector:
-            raise ValueError("non-real verdict must not carry a CVSS vector")
+            if re.fullmatch(CWE_PATTERN, self.cwe_id) is None:
+                raise ValueError("real verdict requires a valid CWE identifier")
+            if not self.evidence_ids:
+                raise ValueError("real verdict requires cited evidence IDs")
+        elif self.cvss_vector or self.cwe_id:
+            raise ValueError("non-real verdict must not carry CVSS or CWE classification")
+        if len(set(self.evidence_ids)) != len(self.evidence_ids):
+            raise ValueError("review evidence IDs must be unique")
         return self
+
+
+class ConsensusDecision(DomainModel):
+    candidate_id: str = Field(min_length=1)
+    status: ConsensusStatus
+    reviewers: tuple[str, ...] = ()
+    verdict: Verdict | None = None
+    cvss_vector: str = ""
+    cwe_id: str = ""
+    evidence_ids: tuple[str, ...] = ()
+    reasons: tuple[str, ...] = ()
+
+
+class ReproductionVariantRequest(DomainModel):
+    request_id: str = Field(min_length=1)
+    run_id: str = Field(min_length=1)
+    candidate_id: str = Field(min_length=1)
+    reviewer: str = Field(min_length=1)
+    base_reproduction_group: str = Field(min_length=1)
+    variant_type: ReproductionVariantType
+    rationale: str = Field(min_length=1)
+    requested_change: str = Field(min_length=1)
 
 
 class RunRecord(DomainModel):
