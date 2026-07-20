@@ -65,7 +65,7 @@ def test_v1_database_migrates_tasks_in_place(tmp_path: Path) -> None:
         assert legacy_task["lease_owner"] is None
 
     with SqliteRepository(path) as repository:
-        assert repository.schema_version() == 2
+        assert repository.schema_version() == 3
         task = repository.list_tasks("run-legacy")[0]
         assert task["task_key"] == "target.c"
         assert task["lease_owner"] is None

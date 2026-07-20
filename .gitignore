@@ -162,6 +162,7 @@ docs/milestones/*
 !docs/milestones/m5-c-analysis-graph.md
 !docs/milestones/m6-verified-pipeline.md
 !docs/milestones/m7-resumable-operations.md
+!docs/milestones/m8-cost-aware-scheduler.md
 notes/
 tools/
 docker/local/

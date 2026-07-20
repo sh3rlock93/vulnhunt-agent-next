@@ -20,8 +20,10 @@ from ...core.llm import LLMClient
 from ...core.run_store import RunStore
 from ...core.v2_run import advance_run, assert_source_snapshot_current
 from ...domain.states import RunState
+from ...infrastructure.sqlite_repository import SqliteRepository
 from ...prompts import hunters_for
 from ...sandbox import base_image_for, language_of
+from ...scheduling import build_shadow_plan, total_usage
 from .. import finalize
 from ..registry import Step, register
 from .cluster import run_clusterer
@@ -31,7 +33,7 @@ from .hunters import flatten, run_hunters
 async def run_hunt(store: RunStore, bus: EventBus) -> None:
     cfg = store.load_config() or {}
     prepare = store.load_step("sandbox_prepare") or {}
-    assert_source_snapshot_current(store)
+    source_snapshot = assert_source_snapshot_current(store)
     advance_run(store, RunState.HUNTING, reason="Hunter execution started")
 
     repo = Path(cfg["repo_path"])
@@ -57,6 +59,30 @@ async def run_hunt(store: RunStore, bus: EventBus) -> None:
         store.dir / "steps", language_of(env)
     )
     pairs = [(f, h) for f in files for h in hunters]
+    work_items = build_shadow_plan(
+        run_id=store.dir.name,
+        source_snapshot=source_snapshot,
+        selected_files=files,
+        hunters=hunters,
+        analysis=analysis,
+    )
+    by_pair = {
+        (item.seed_file, item.hunter): item
+        for item in work_items
+    }
+    store.save_step("hunt_plan", {
+        "mode": "shadow",
+        "policy_version": (
+            work_items[0].planning_policy if work_items
+            else "legacy-cartesian-shadow-v1"
+        ),
+        "execution_changed": False,
+        "legacy_pairs": len(pairs),
+        "work_items": [
+            item.model_dump(mode="json")
+            for item in work_items
+        ],
+    })
 
     qstore = HuntQueueStore(store.dir / "hunters")
     queue = qstore.init_from_pairs(pairs)
@@ -81,17 +107,27 @@ async def run_hunt(store: RunStore, bus: EventBus) -> None:
     )
 
     hunter_sem = asyncio.Semaphore(max_parallel)
+
     async def run_file(task: HuntTask) -> None:
         if task.status in {"done", "failed"}:
             return
         try:
             qstore.mark_file_running(task)
             analysis_context = context_for_file(analysis, task.file)
-            findings_by_cat = await run_hunters(
+            findings_by_cat, usage_items = await run_hunters(
                 task, qstore, repo, hunter_client, hunter_image,
                 arch, analysis_context, sandbox_info, max_iter, hunter_sem, bus,
                 sandbox_enabled,
+                {
+                    sub.name: by_pair[(task.file, sub.name)]
+                    for sub in task.hunters
+                    if (task.file, sub.name) in by_pair
+                },
             )
+            if usage_items:
+                with SqliteRepository(store.dir / "state.db") as repository:
+                    for usage in usage_items:
+                        repository.save_budget_usage(usage)
             all_findings, origins = flatten(findings_by_cat)
             if not all_findings:
                 qstore.mark_file_done(task)
@@ -107,7 +143,17 @@ async def run_hunt(store: RunStore, bus: EventBus) -> None:
             bus.emit("file_failed", file=task.file, error=str(e))
 
     await asyncio.gather(*[run_file(t) for t in queue.tasks])
-    _save_summary(store, qstore, bus, hunter_image)
+    with SqliteRepository(store.dir / "state.db", read_only=True) as repository:
+        persisted_usage = repository.list_budget_usage(
+            store.dir.name, scope="hunter"
+        )
+    _save_summary(
+        store,
+        qstore,
+        bus,
+        hunter_image,
+        total_usage(persisted_usage),
+    )
     advance_run(
         store,
         RunState.REPRODUCING,
@@ -140,7 +186,13 @@ def _maybe_other_client(cfg: dict, key: str, fallback: LLMClient, bus: EventBus)
     return fallback
 
 
-def _save_summary(store: RunStore, qstore: HuntQueueStore, bus: EventBus, image: str) -> None:
+def _save_summary(
+    store: RunStore,
+    qstore: HuntQueueStore,
+    bus: EventBus,
+    image: str,
+    usage: dict[str, int | float | None],
+) -> None:
     final = qstore.load()
     summary = {
         "total": len(final.tasks),
@@ -151,6 +203,7 @@ def _save_summary(store: RunStore, qstore: HuntQueueStore, bus: EventBus, image:
             sum(s.findings_count for s in t.hunters) for t in final.tasks
         ),
         "image": image,
+        "usage": usage,
         "tasks": [asdict(t) for t in final.tasks],
     }
     store.save_step("hunt", summary)

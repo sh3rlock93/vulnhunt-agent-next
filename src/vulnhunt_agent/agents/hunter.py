@@ -108,6 +108,10 @@ class HuntResult:
     output_tokens: int = 0
     cache_read_tokens: int = 0
     cache_write_tokens: int = 0
+    tool_calls: int = 0
+    repeated_reads: int = 0
+    poc_writes: int = 0
+    exec_calls: int = 0
     stopped: str = ""   # "final_json" | "max_iter" | "error"
 
 
@@ -220,3 +224,7 @@ class HunterAgent:
         result.written_pocs = list(
             getattr(self.tools, "written_pocs", [])
         )
+        result.tool_calls = int(getattr(self.tools, "tool_calls", 0))
+        result.repeated_reads = int(getattr(self.tools, "repeated_reads", 0))
+        result.poc_writes = int(getattr(self.tools, "poc_write_calls", 0))
+        result.exec_calls = len(result.executions)

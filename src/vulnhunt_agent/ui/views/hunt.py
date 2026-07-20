@@ -18,6 +18,13 @@ from ...sandbox import language_of
 
 def render_hunt_view(store: RunStore) -> None:
     _render_hunter_picker(store)
+    plan = store.load_step("hunt_plan") or {}
+    if plan:
+        st.caption(
+            f"Scheduler: {plan.get('mode', 'legacy')} · "
+            f"{plan.get('legacy_pairs', len(plan.get('work_items', [])))} planned sessions · "
+            "shadow mode does not alter execution"
+        )
 
     qstore = HuntQueueStore(store.dir / "hunters")
     queue = qstore.load()

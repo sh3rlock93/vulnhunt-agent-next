@@ -12,6 +12,7 @@ from typing import Iterator
 
 from ..domain.schemas import (
     ArtifactRef,
+    BudgetUsage,
     CandidateFinding,
     Evidence,
     PocSpec,
@@ -36,7 +37,7 @@ class TaskLeaseLostError(RuntimeError):
     """A worker attempted to mutate a task after losing its lease."""
 
 
-_SCHEMA_VERSION = 2
+_SCHEMA_VERSION = 3
 _TASK_LEASE_COLUMNS = {
     "lease_owner": "TEXT",
     "lease_token": "TEXT",
@@ -113,8 +114,16 @@ CREATE TABLE IF NOT EXISTS legacy_imports (
     summary_json TEXT NOT NULL,
     imported_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS work_usage (
+    run_id TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+    work_id TEXT NOT NULL,
+    scope TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    PRIMARY KEY(run_id, work_id, scope)
+);
 CREATE INDEX IF NOT EXISTS findings_run_state ON findings(run_id, state);
 CREATE INDEX IF NOT EXISTS tasks_run_status ON tasks(run_id, status);
+CREATE INDEX IF NOT EXISTS work_usage_run_scope ON work_usage(run_id, scope);
 """
 
 
@@ -523,6 +532,63 @@ class SqliteRepository:
                 f"unknown or actively leased task: {run_id}/{task_type}/{task_key}"
             )
 
+    def save_budget_usage(self, usage: BudgetUsage) -> BudgetUsage:
+        usage = BudgetUsage.model_validate(usage)
+        self._required_run(usage.run_id)
+        payload = _dump(usage)
+        row = self.connection.execute(
+            """
+            SELECT payload_json FROM work_usage
+            WHERE run_id = ? AND work_id = ? AND scope = ?
+            """,
+            (usage.run_id, usage.work_id, usage.scope),
+        ).fetchone()
+        if row:
+            existing = BudgetUsage.model_validate_json(row["payload_json"])
+            if existing != usage:
+                raise RepositoryConflictError(
+                    "work usage is immutable once recorded: "
+                    f"{usage.run_id}/{usage.work_id}/{usage.scope}"
+                )
+            return existing
+        self.connection.execute(
+            """
+            INSERT INTO work_usage(run_id, work_id, scope, payload_json)
+            VALUES (?, ?, ?, ?)
+            """,
+            (usage.run_id, usage.work_id, usage.scope, payload),
+        )
+        return usage
+
+    def list_budget_usage(
+        self,
+        run_id: str,
+        *,
+        scope: str | None = None,
+    ) -> list[BudgetUsage]:
+        if not self._table_available("work_usage"):
+            return []
+        if scope is None:
+            rows = self.connection.execute(
+                """
+                SELECT payload_json FROM work_usage
+                WHERE run_id = ? ORDER BY scope, work_id
+                """,
+                (run_id,),
+            ).fetchall()
+        else:
+            rows = self.connection.execute(
+                """
+                SELECT payload_json FROM work_usage
+                WHERE run_id = ? AND scope = ? ORDER BY work_id
+                """,
+                (run_id, scope),
+            ).fetchall()
+        return [
+            BudgetUsage.model_validate_json(row["payload_json"])
+            for row in rows
+        ]
+
     def save_candidate(self, finding: CandidateFinding) -> tuple[CandidateFinding, bool]:
         finding = CandidateFinding.model_validate(finding)
         self._required_run(finding.run_id)
@@ -803,6 +869,13 @@ class SqliteRepository:
             for row in self.connection.execute("PRAGMA table_info(tasks)").fetchall()
         }
         return set(_TASK_LEASE_COLUMNS).issubset(columns)
+
+    def _table_available(self, name: str) -> bool:
+        row = self.connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (name,),
+        ).fetchone()
+        return row is not None
 
     def _required_task_row(
         self, run_id: str, task_type: str, task_key: str

@@ -360,6 +360,70 @@ class RunRecord(DomainModel):
     updated_at: datetime = Field(default_factory=utc_now)
 
 
+class HunterWorkItem(DomainModel):
+    """Stable unit of Hunter scheduling, independent of its queue backend."""
+
+    work_id: str = Field(pattern=r"^work_[0-9a-f]{64}$")
+    run_id: str = Field(min_length=1)
+    source_snapshot: str = Field(pattern=SHA256_PATTERN)
+    planning_policy: str = Field(min_length=1)
+    slice_ids: tuple[str, ...] = ()
+    seed_file: str = Field(min_length=1)
+    files: tuple[str, ...] = Field(min_length=1, max_length=32)
+    hunter: str = Field(min_length=1)
+    pass_index: int = Field(default=1, ge=1, le=8)
+    risk: int = Field(default=1, ge=1, le=5)
+    required: bool = False
+    routing_reasons: tuple[str, ...] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def validate_work_item(self) -> "HunterWorkItem":
+        _validate_relative_path(self.seed_file, label="Hunter seed file")
+        for path in self.files:
+            _validate_relative_path(path, label="Hunter context file")
+        if self.seed_file not in self.files:
+            raise ValueError("Hunter seed file must be included in files")
+        if len(set(self.files)) != len(self.files):
+            raise ValueError("Hunter context files must be unique")
+        if len(set(self.slice_ids)) != len(self.slice_ids):
+            raise ValueError("Hunter slice IDs must be unique")
+        return self
+
+
+class BudgetPolicy(DomainModel):
+    """Hard scheduling limits. Token limits work for API and subscription modes."""
+
+    max_hunter_sessions: int = Field(default=100, ge=1)
+    max_input_tokens: int = Field(default=2_000_000, ge=1)
+    max_output_tokens: int = Field(default=200_000, ge=1)
+    max_wall_clock_minutes: int = Field(default=60, ge=1)
+    max_retries_per_work_item: int = Field(default=1, ge=0, le=8)
+
+
+class BudgetUsage(DomainModel):
+    """Provider-neutral observed consumption for one schedulable work item."""
+
+    run_id: str = Field(min_length=1)
+    work_id: str = Field(pattern=r"^work_[0-9a-f]{64}$")
+    scope: str = Field(pattern=r"^(ranker|hunter|reviewer)$")
+    model_id: str = Field(min_length=1)
+    transport: str = Field(min_length=1)
+    sessions: int = Field(default=0, ge=0)
+    calls: int = Field(default=0, ge=0)
+    iterations: int = Field(default=0, ge=0)
+    input_tokens: int = Field(default=0, ge=0)
+    output_tokens: int = Field(default=0, ge=0)
+    cache_read_tokens: int = Field(default=0, ge=0)
+    cache_write_tokens: int = Field(default=0, ge=0)
+    tool_calls: int = Field(default=0, ge=0)
+    repeated_reads: int = Field(default=0, ge=0)
+    poc_writes: int = Field(default=0, ge=0)
+    exec_calls: int = Field(default=0, ge=0)
+    wall_time_ms: int = Field(default=0, ge=0)
+    estimated_cost_usd: float | None = Field(default=None, ge=0)
+    created_at: datetime = Field(default_factory=utc_now)
+
+
 class TaskLease(DomainModel):
     run_id: str = Field(min_length=1, max_length=200)
     task_type: str = Field(min_length=1, max_length=100)
