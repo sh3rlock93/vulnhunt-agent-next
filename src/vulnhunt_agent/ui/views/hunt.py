@@ -51,6 +51,14 @@ def render_hunt_view(store: RunStore) -> None:
                 f"{len(deferred_critical)} critical work item(s) were not analysed "
                 "because the hard session budget was too small."
             )
+        cache = plan.get("context_cache") or {}
+        if cache:
+            st.caption(
+                "Shared context cache: "
+                f"{cache.get('entries', 0)} entries · "
+                f"{cache.get('hits', 0)} hits · "
+                f"{cache.get('misses', 0)} misses"
+            )
 
     durable = DurableHuntQueueStore(
         store.dir / "hunters",

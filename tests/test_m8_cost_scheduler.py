@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
@@ -8,11 +9,15 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from tests.factories import HASH_A
+from tests.factories import HASH_A, HASH_B
 from vulnhunt_agent.agents.tools import HunterTools
 from vulnhunt_agent.agents.queue import HuntQueueStore
 from vulnhunt_agent.agents.durable_queue import DurableHuntQueueStore
-from vulnhunt_agent.analysis import context_for_work_item
+from vulnhunt_agent.analysis import (
+    SharedContextCache,
+    context_cache_key,
+    context_for_work_item,
+)
 from vulnhunt_agent.core.events import EventBus
 from vulnhunt_agent.core.llm import LLMResponse
 from vulnhunt_agent.core.run_store import RunStore
@@ -580,6 +585,96 @@ def test_overlapping_routes_collapse_to_bounded_slice_work(
     } == set(parser_work.files)
 
 
+def test_shared_context_cache_reuses_cross_hunter_packet_and_snapshot_keys(
+    tmp_path: Path,
+) -> None:
+    repo, files = _native_router_fixture(tmp_path)
+    (repo / "Makefile").write_text("all:\n\t$(CC) -c state.c\n")
+    graph = build_c_analysis_graph(repo, files)
+    coverage = build_coverage_plan(graph)
+    analysis = {
+        "language": "c",
+        "graph": graph.model_dump(mode="json"),
+        "coverage_plan": coverage.model_dump(mode="json"),
+    }
+    routing = build_routing_plan(
+        run_id="run-1",
+        source_snapshot=HASH_A,
+        selected_files=list(coverage.selected_files),
+        enabled_hunters=[
+            "c-bounds-integers",
+            "c-parser-state",
+        ],
+        analysis=analysis,
+    )
+    work = build_slice_work_items(routing, analysis)
+    assert len(work) == 2
+    cache_root = tmp_path / "cache"
+    cache = SharedContextCache(
+        cache_root,
+        repo,
+        source_snapshot=HASH_A,
+        analysis=analysis,
+    )
+
+    first = cache.get(work[0])
+    second = cache.get(work[1])
+
+    assert first == second
+    stats = cache.stats()
+    assert stats["policy_version"] == "c-shared-context-v1"
+    assert stats["entries"] == 1
+    assert stats["hits"] == 1
+    assert stats["misses"] == 1
+    assert int(stats["bytes"]) > 0
+    assert "work_id" not in first
+    assert first["source_snapshot"] == HASH_A
+    excerpt_kinds = {
+        item["path"]: item["kind"]
+        for item in first["source_excerpts"]
+    }
+    assert excerpt_kinds["state.c"] == "slice"
+    assert excerpt_kinds["cue_parser.y"] == "parser"
+    assert excerpt_kinds["cue_scanner.l"] == "parser"
+    assert excerpt_kinds["state.h"] == "header"
+    assert excerpt_kinds["Makefile"] == "build"
+    state_excerpt = next(
+        item for item in first["source_excerpts"] if item["path"] == "state.c"
+    )
+    assert "track->values[index]" in state_excerpt["content"]
+    assert len(list(cache_root.glob("context_*.json"))) == 1
+
+    cache_path = next(cache_root.glob("context_*.json"))
+    tampered = json.loads(cache_path.read_text())
+    tampered["source_excerpts"][0]["content"] = "tampered"
+    cache_path.write_text(json.dumps(tampered))
+    repairing_cache = SharedContextCache(
+        cache_root,
+        repo,
+        source_snapshot=HASH_A,
+        analysis=analysis,
+    )
+    repaired = repairing_cache.get(work[0])
+    assert repairing_cache.stats()["misses"] == 1
+    assert repaired["source_excerpts"][0]["content"] != "tampered"
+
+    new_snapshot_key = context_cache_key(
+        source_snapshot=HASH_B,
+        analysis=analysis,
+        work_item=work[0],
+    )
+    assert new_snapshot_key != first["cache_key"]
+    new_snapshot = SharedContextCache(
+        cache_root,
+        repo,
+        source_snapshot=HASH_B,
+        analysis=analysis,
+    ).get(work[0])
+    assert new_snapshot["source_snapshot"] == HASH_B
+    assert new_snapshot["cache_key"] == new_snapshot_key
+    assert len(list(cache_root.glob("context_*.json"))) == 2
+
+
 def test_slice_work_splits_instead_of_omitting_ninth_routed_file() -> None:
     files = tuple(f"src/f{index}.c" for index in range(9))
     coverage = CoveragePlan(
@@ -728,9 +823,15 @@ async def test_hunt_pipeline_executes_slice_queue_without_legacy_json(
     assert summary is not None
     assert plan["mode"] == "slice"
     assert plan["scheduled_sessions"] == 2
+    assert plan["context_cache"]["entries"] == 1
+    assert plan["context_cache"]["misses"] == 1
+    assert plan["context_cache"]["hits"] == 1
+    assert len(set(plan["context_cache_keys"].values())) == 1
     assert summary["done"] == 2
     assert summary["failed"] == 0
+    assert summary["context_cache"] == plan["context_cache"]
     assert not (store.dir / "hunters" / "_queue.json").exists()
+    assert len(list((store.dir / "cache" / "context").glob("*.json"))) == 1
     with SqliteRepository(store.dir / "state.db", read_only=True) as repository:
         tasks = [
             task for task in repository.list_tasks(store.dir.name)

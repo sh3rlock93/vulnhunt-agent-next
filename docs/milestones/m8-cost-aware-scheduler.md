@@ -1,6 +1,6 @@
 # M8 — Cost-aware slice scheduling
 
-Status: In progress (PR 4 of 6 complete)
+Status: In progress (PR 5 of 6 complete)
 
 ## Goal
 
@@ -42,8 +42,7 @@ cannot perturb identity.
 
 ## Remaining increments
 
-1. Shared immutable context cache.
-2. Git-diff incremental scanning and final benchmark gates.
+1. Git-diff incremental scanning and final benchmark gates.
 
 ## PR 1 acceptance gates
 
@@ -181,3 +180,45 @@ budget_max_retries_per_work_item = 1
 - [x] Retry attempts are capped by the budget policy.
 - [x] Budget deferral is durable and distinct from failure.
 - [x] Unanalysed and critical-unanalysed work is visible in artifacts and UI.
+
+## PR 5 — Shared immutable context cache
+
+Hunter sessions that cover the same source snapshot, graph version, slice set,
+and bounded file set now reuse one content-addressed context packet. Hunter
+identity is deliberately absent from the key, so Bounds and Parser specialists
+following the same path receive byte-identical starting context.
+
+Each packet contains:
+
+- compact graph paths, signals, sink metadata, and slice rationale;
+- bounded, line-numbered source excerpts around relevant graph nodes;
+- complete bounded excerpts for Flex/Bison sources;
+- directly included local headers;
+- up to two root build descriptors such as `CMakeLists.txt`, `meson.build`, or
+  `Makefile`;
+- an explicit instruction that the packet is a starting point, not a read
+  boundary.
+
+Packets live under `cache/context/context_<sha256>.json`. The key includes the
+source snapshot digest, graph schema, coverage policy, exact slice IDs, context
+files, and excerpt policy limits. A different source snapshot always produces
+a different key. Each packet also has a canonical payload digest; corrupted or
+partially written entries are rebuilt instead of being trusted.
+
+Writes use a temporary file followed by atomic replacement. The Hunt step
+materializes packets before concurrent model execution, records the work-to-key
+mapping, and publishes entries/hits/misses/bytes in both the Hunt plan and
+summary. The existing `read_file`, `grep`, and sibling-file exploration tools
+are unchanged, so the cache cannot hide context that was not preloaded.
+
+## PR 5 acceptance gates
+
+- [x] Cross-Hunter work with identical slices reuses one packet.
+- [x] Reordered work does not change the cache key or packet content.
+- [x] Snapshot changes cannot hit an older packet.
+- [x] Graph, slice, file-bound, and excerpt-policy changes affect identity.
+- [x] C source, parser, local-header, and build context is bounded and included.
+- [x] Packet corruption is detected and rebuilt.
+- [x] Cache writes complete before parallel Hunter execution.
+- [x] Arbitrary follow-up `read_file` and `grep` exploration remains available.
+- [x] Cache hit/miss evidence is visible in durable artifacts and the UI.

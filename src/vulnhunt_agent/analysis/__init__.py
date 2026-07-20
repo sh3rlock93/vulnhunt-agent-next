@@ -2,6 +2,11 @@
 
 from .c_graph import build_c_analysis_graph
 from .context import context_for_file, context_for_work_item
+from .context_cache import (
+    CONTEXT_CACHE_POLICY,
+    SharedContextCache,
+    context_cache_key,
+)
 from .models import (
     AnalysisSlice,
     CAnalysisGraph,
@@ -29,4 +34,7 @@ __all__ = [
     "build_coverage_plan",
     "context_for_file",
     "context_for_work_item",
+    "CONTEXT_CACHE_POLICY",
+    "SharedContextCache",
+    "context_cache_key",
 ]
