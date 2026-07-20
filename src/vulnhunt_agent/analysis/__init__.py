@@ -1,7 +1,7 @@
 """Deterministic analysis graphs, coverage plans, and Hunter context."""
 
 from .c_graph import build_c_analysis_graph
-from .context import context_for_file
+from .context import context_for_file, context_for_work_item
 from .models import (
     AnalysisSlice,
     CAnalysisGraph,
@@ -28,4 +28,5 @@ __all__ = [
     "build_c_analysis_graph",
     "build_coverage_plan",
     "context_for_file",
+    "context_for_work_item",
 ]

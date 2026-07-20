@@ -1,6 +1,6 @@
 # M8 — Cost-aware slice scheduling
 
-Status: In progress (PR 2 of 6 complete)
+Status: In progress (PR 3 of 6 complete)
 
 ## Goal
 
@@ -42,10 +42,9 @@ cannot perturb identity.
 
 ## Remaining increments
 
-1. Slice queue and M7 lease integration.
-2. Hard budgets and adaptive iteration limits.
-3. Shared immutable context cache.
-4. Git-diff incremental scanning and final benchmark gates.
+1. Hard budgets and adaptive iteration limits.
+2. Shared immutable context cache.
+3. Git-diff incremental scanning and final benchmark gates.
 
 ## PR 1 acceptance gates
 
@@ -88,3 +87,44 @@ sessions to four while preserving 100% of detected critical-sink coverage.
 - [x] The libcue-shaped regression schedules Bounds and Parser specialists.
 - [x] The regression reduces Hunter sessions by more than 50%.
 - [x] The UI reports legacy sessions, scheduled sessions, reduction, and coverage.
+
+## PR 3 — Bounded slice work and durable leases
+
+File-routed work is now collapsed by overlapping AnalysisSlice nodes, edges,
+and sink identity. Each resulting work item contains one to eight ordered
+context files, exact slice IDs, the routed specialist, risk, and critical-work
+flag. Its directory is exactly `hunters/<work_id>/`, so restarting a process
+does not create timestamp-derived artifact paths.
+
+New runs no longer create or update `hunters/_queue.json`. Each work item is a
+V2 SQLite `hunter` task whose key is the stable work ID. The M7 lease contract
+now applies to Hunter execution:
+
+- acquisition is atomic across workers;
+- a background heartbeat renews long model sessions;
+- expired work retains its work ID and increments its attempt;
+- a live lease prevents duplicate execution;
+- the final findings write is preceded by a fenced heartbeat;
+- only the current lease token can mark work done or failed;
+- tokens remain absent from CLI and UI task data.
+
+Per-work `task.json`, traces, PoCs, findings, and clustering artifacts remain
+available for crash recovery and verification. The old JSON queue implementation
+is retained solely for reading and importing legacy runs. The hunt UI
+automatically chooses the durable queue when SQLite work items are present.
+
+On the parser-to-index-write fixture, four routed file sessions collapse to two
+slice sessions: one Bounds session and one Parser session, both receiving the
+same bounded three-file path.
+
+## PR 3 acceptance gates
+
+- [x] Overlap grouping and work IDs are deterministic.
+- [x] Context contains at most eight files and the seed file is always present.
+- [x] New Hunter work creates no `_queue.json`.
+- [x] Only one worker can hold a live Hunter task lease.
+- [x] Expired Hunter work resumes under the same work ID at the next attempt.
+- [x] Completed subtask metadata survives process replacement.
+- [x] Lease tokens are absent from read APIs and UI data.
+- [x] End-to-end hunt execution completes through the SQLite slice queue.
+- [x] Legacy JSON queue tests and importer behavior remain supported.

@@ -1,8 +1,8 @@
-"""Step 7: Hunt — Hunter and clustering pipeline per file.
+"""Step 7: Hunt — leased Hunter execution per bounded AnalysisSlice group.
 
-  Phase A (hunters):  parallel HunterAgent per (file, hunter)
-  Phase B (cluster):  ClustererAgent groups similar findings (skipped if
-                      <2 findings or only 1 hunter produced findings)
+  Phase A: signal routing and overlapping-slice grouping
+  Phase B: one leased HunterAgent per stable slice work item
+  Phase C: deterministic finding clustering inside each work item
 Evidence-aware reproduction, review, and reporting run in the following
 Verified Findings step.
 """
@@ -10,20 +10,29 @@ from __future__ import annotations
 
 import asyncio
 import json
+import uuid
 from dataclasses import asdict
 from pathlib import Path
 
-from ...analysis import context_for_file
-from ...agents.queue import HuntQueueStore, HuntTask
+from ...analysis import context_for_work_item
+from ...agents.durable_queue import DurableHuntQueueStore
+from ...agents.queue import HuntTask
 from ...core.events import EventBus
 from ...core.llm import LLMClient
 from ...core.run_store import RunStore
 from ...core.v2_run import advance_run, assert_source_snapshot_current
 from ...domain.states import RunState
-from ...infrastructure.sqlite_repository import SqliteRepository
+from ...infrastructure.sqlite_repository import (
+    SqliteRepository,
+    TaskLeaseLostError,
+)
 from ...prompts import hunters_for
 from ...sandbox import base_image_for, language_of
-from ...scheduling import build_routing_plan, total_usage
+from ...scheduling import (
+    build_routing_plan,
+    build_slice_work_items,
+    total_usage,
+)
 from .. import finalize
 from ..registry import Step, register
 from .cluster import run_clusterer
@@ -70,22 +79,26 @@ async def run_hunt(store: RunStore, bus: EventBus) -> None:
             "signal router left critical sinks uncovered: "
             + ", ".join(routing_plan.uncovered_critical_sink_ids)
         )
-    work_items = routing_plan.work_items
-    pairs = [
-        (item.seed_file, item.hunter)
-        for item in work_items
-    ]
-    by_pair = {
-        (item.seed_file, item.hunter): item
-        for item in work_items
-    }
+    work_items = build_slice_work_items(routing_plan, analysis)
+    by_work_id = {item.work_id: item for item in work_items}
     store.save_step("hunt_plan", {
-        "mode": "signal",
-        "policy_version": routing_plan.policy_version,
+        "mode": "slice",
+        "policy_version": (
+            work_items[0].planning_policy
+            if work_items else "c-slice-work-v1"
+        ),
         "execution_changed": True,
         "legacy_pairs": routing_plan.legacy_sessions,
-        "scheduled_sessions": routing_plan.scheduled_sessions,
-        "session_reduction_percent": routing_plan.session_reduction_percent,
+        "routed_file_sessions": routing_plan.scheduled_sessions,
+        "scheduled_sessions": len(work_items),
+        "routed_file_reduction_percent": routing_plan.session_reduction_percent,
+        "session_reduction_percent": (
+            round(
+                (1 - len(work_items) / routing_plan.legacy_sessions) * 100,
+                2,
+            )
+            if routing_plan.legacy_sessions else 0.0
+        ),
         "detected_critical_sink_ids": list(
             routing_plan.detected_critical_sink_ids
         ),
@@ -102,8 +115,12 @@ async def run_hunt(store: RunStore, bus: EventBus) -> None:
         ],
     })
 
-    qstore = HuntQueueStore(store.dir / "hunters")
-    queue = qstore.init_from_pairs(pairs)
+    qstore = DurableHuntQueueStore(
+        store.dir / "hunters",
+        store.dir / "state.db",
+        store.dir.name,
+    )
+    queue = qstore.init_from_work_items(work_items)
 
     bus.emit("step_start", step="hunt",
              total=len(work_items), parallel=max_parallel, max_iter=max_iter,
@@ -125,29 +142,60 @@ async def run_hunt(store: RunStore, bus: EventBus) -> None:
     )
 
     hunter_sem = asyncio.Semaphore(max_parallel)
+    worker_id = f"hunter-{uuid.uuid4().hex[:16]}"
+    lease_seconds = int(cfg.get("hunter_lease_seconds", 900))
+    max_attempts = int(cfg.get("hunter_max_attempts", 3))
 
-    async def run_file(task: HuntTask) -> None:
+    async def run_work(task: HuntTask) -> None:
         if task.status in {"done", "failed"}:
             return
+        item = by_work_id.get(task.work_id)
+        if item is None:
+            raise RuntimeError(f"durable queue returned unknown work: {task.work_id}")
+        lease = qstore.acquire(
+            task,
+            worker_id=worker_id,
+            lease_seconds=lease_seconds,
+            max_attempts=max_attempts,
+        )
+        if lease is None:
+            bus.emit("hunter_lease_unavailable", work_id=task.work_id)
+            return
+        heartbeat_stop = asyncio.Event()
+        heartbeat_errors: list[Exception] = []
+        heartbeat = asyncio.create_task(_heartbeat_lease(
+            qstore,
+            lease,
+            lease_seconds=lease_seconds,
+            stop=heartbeat_stop,
+            errors=heartbeat_errors,
+        ))
         try:
             qstore.mark_file_running(task)
-            analysis_context = context_for_file(analysis, task.file)
+            analysis_context = context_for_work_item(analysis, item)
             findings_by_cat, usage_items = await run_hunters(
                 task, qstore, repo, hunter_client, hunter_image,
                 arch, analysis_context, sandbox_info, max_iter, hunter_sem, bus,
                 sandbox_enabled,
-                {
-                    sub.name: by_pair[(task.file, sub.name)]
-                    for sub in task.hunters
-                    if (task.file, sub.name) in by_pair
-                },
+                {item.hunter: item},
+                lambda: qstore.heartbeat(
+                    lease,
+                    lease_seconds=lease_seconds,
+                ),
             )
+            failed = [sub.error for sub in task.hunters if sub.status == "failed"]
+            if failed:
+                raise RuntimeError(failed[0] or "Hunter work failed")
             if usage_items:
                 with SqliteRepository(store.dir / "state.db") as repository:
                     for usage in usage_items:
                         repository.save_budget_usage(usage)
             all_findings, origins = flatten(findings_by_cat)
             if not all_findings:
+                await _stop_heartbeat(heartbeat_stop, heartbeat)
+                if heartbeat_errors:
+                    raise heartbeat_errors[0]
+                qstore.finish(lease, status="done")
                 qstore.mark_file_done(task)
                 return
 
@@ -155,12 +203,31 @@ async def run_hunt(store: RunStore, bus: EventBus) -> None:
             await run_clusterer(
                 task, qstore, reviewer_client, all_findings, origins, bus,
             )
+            await _stop_heartbeat(heartbeat_stop, heartbeat)
+            if heartbeat_errors:
+                raise heartbeat_errors[0]
+            qstore.finish(lease, status="done")
             qstore.mark_file_done(task)
         except Exception as e:
+            await _stop_heartbeat(heartbeat_stop, heartbeat)
+            try:
+                qstore.finish(lease, status="failed", error=str(e))
+            except TaskLeaseLostError:
+                bus.emit(
+                    "hunter_lease_lost",
+                    work_id=task.work_id,
+                    error=str(e),
+                )
+                return
             qstore.mark_file_failed(task, error=str(e))
-            bus.emit("file_failed", file=task.file, error=str(e))
+            bus.emit(
+                "file_failed",
+                file=task.file,
+                work_id=task.work_id,
+                error=str(e),
+            )
 
-    await asyncio.gather(*[run_file(t) for t in queue.tasks])
+    await asyncio.gather(*[run_work(t) for t in queue.tasks])
     with SqliteRepository(store.dir / "state.db", read_only=True) as repository:
         persisted_usage = repository.list_budget_usage(
             store.dir.name, scope="hunter"
@@ -204,9 +271,37 @@ def _maybe_other_client(cfg: dict, key: str, fallback: LLMClient, bus: EventBus)
     return fallback
 
 
+async def _heartbeat_lease(
+    qstore: DurableHuntQueueStore,
+    lease,
+    *,
+    lease_seconds: int,
+    stop: asyncio.Event,
+    errors: list[Exception],
+) -> None:
+    interval = max(1.0, min(60.0, lease_seconds / 3))
+    while not stop.is_set():
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=interval)
+        except TimeoutError:
+            try:
+                qstore.heartbeat(lease, lease_seconds=lease_seconds)
+            except Exception as exc:
+                errors.append(exc)
+                return
+
+
+async def _stop_heartbeat(
+    stop: asyncio.Event,
+    heartbeat: asyncio.Task,
+) -> None:
+    stop.set()
+    await heartbeat
+
+
 def _save_summary(
     store: RunStore,
-    qstore: HuntQueueStore,
+    qstore,
     bus: EventBus,
     image: str,
     usage: dict[str, int | float | None],

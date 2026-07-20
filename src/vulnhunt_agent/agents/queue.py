@@ -42,6 +42,11 @@ class ReviewSubTask:
 class HuntTask:
     file: str                         # relative path
     hash: str                         # deterministic dir name
+    work_id: str = ""                 # M8 stable slice-work identity
+    files: list[str] = field(default_factory=list)
+    slice_ids: list[str] = field(default_factory=list)
+    risk: int = 1
+    required: bool = False
     status: str = "pending"           # pending | hunting | clustering | reviewing | done | failed
     started_at: str = ""
     finished_at: str = ""
@@ -216,6 +221,11 @@ def _task_from(d: dict) -> HuntTask:
     return HuntTask(
         file=d["file"],
         hash=d["hash"],
+        work_id=d.get("work_id", ""),
+        files=list(d.get("files", [])),
+        slice_ids=list(d.get("slice_ids", [])),
+        risk=int(d.get("risk", 1)),
+        required=bool(d.get("required", False)),
         status=d.get("status", "pending"),
         started_at=d.get("started_at", ""),
         finished_at=d.get("finished_at", ""),
