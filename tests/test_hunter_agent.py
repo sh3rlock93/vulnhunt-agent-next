@@ -85,7 +85,10 @@ async def test_hunter_tool_loop_and_final_json_contract() -> None:
         max_iterations=3,
     )
 
-    result = await agent.hunt("insecure_app/app.py")
+    result = await agent.hunt(
+        "insecure_app/app.py",
+        {"policy_version": "c-coverage-v1", "slices": [{"slice_id": "slice-1"}]},
+    )
 
     assert result.stopped == "final_json"
     assert result.iterations == 2
@@ -95,3 +98,6 @@ async def test_hunter_tool_loop_and_final_json_contract() -> None:
     assert tools.calls == [("read_file", {"path": "insecure_app/app.py"})]
     second_request = client.messages_seen[1]
     assert second_request[-1]["content"][0]["toolResult"]["toolUseId"] == "call-1"
+    first_prompt = client.messages_seen[0][0]["content"][0]["text"]
+    assert "c-coverage-v1" in first_prompt
+    assert "slice-1" in first_prompt

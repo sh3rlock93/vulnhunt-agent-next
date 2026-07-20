@@ -2,6 +2,7 @@
 
 from .registry import STEPS, Step
 from . import filter_files     # noqa: F401
+from . import analysis_graph   # noqa: F401
 from . import rank             # noqa: F401
 from . import file_selector    # noqa: F401
 from . import sandbox_prepare  # noqa: F401

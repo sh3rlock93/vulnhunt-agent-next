@@ -226,7 +226,7 @@ async def run_prepare(store: RunStore, bus: EventBus) -> None:
 
 register(Step(
     name="sandbox_prepare",
-    title="4. Sandbox Prepare",
+    title="5. Sandbox Prepare",
     fn=run_prepare,
     depends_on=[],
 ))

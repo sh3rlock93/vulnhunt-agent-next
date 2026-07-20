@@ -76,6 +76,7 @@ def _render_hunter_picker(store: RunStore) -> None:
 
     sel_path = store.dir / "steps" / "hunter_selection.json"
     legacy = store.dir / "steps" / "category_selection.json"
+    has_saved_selection = sel_path.exists() or legacy.exists()
     if not sel_path.exists() and legacy.exists():
         # Older runs stored selection under "categories"; migrate.
         saved = json.loads(legacy.read_text()).get("categories", [])
@@ -85,6 +86,12 @@ def _render_hunter_picker(store: RunStore) -> None:
         saved = []
     selected = set(saved)
     available = hunters_for(lang)
+    if not has_saved_selection:
+        selected = {hunter.name for hunter in available if hunter.default}
+        sel_path.parent.mkdir(parents=True, exist_ok=True)
+        sel_path.write_text(json.dumps(
+            {"hunters": sorted(selected)}, indent=2
+        ))
 
     if len(available) <= 1:
         names = [h.name for h in available]

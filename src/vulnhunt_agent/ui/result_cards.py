@@ -44,6 +44,26 @@ def _rank(store: RunStore, d: dict) -> None:
               help="LLM-scored files. Use File Selector to pick which to hunt.")
 
 
+def _analysis_graph(store: RunStore, d: dict) -> None:
+    summary = d.get("summary") or {}
+    if d.get("language") != "c":
+        st.caption("C graph analysis is not applicable to this environment.")
+        return
+    cols = st.columns(5)
+    for col, key, label in zip(
+        cols,
+        ("nodes", "edges", "entrypoints", "critical_sinks", "slices"),
+        ("Nodes", "Edges", "Entrypoints", "Critical sinks", "Slices"),
+    ):
+        col.metric(label, summary.get(key, 0))
+    if summary.get("coverage_complete"):
+        st.success(
+            f"Coverage complete · {summary.get('selected_files', 0)} files planned"
+        )
+    else:
+        st.error("Coverage plan has unresolved entrypoints or critical sinks.")
+
+
 def _selector(store: RunStore, d: dict) -> None:
     files = d.get("files") or []
     selected = d.get("selected") or []
@@ -54,6 +74,11 @@ def _selector(store: RunStore, d: dict) -> None:
     c2.metric("Candidates", f"{len(files):,}")
     c3.metric("Scored", "yes" if has_scores else "no",
               help="Run File Ranker to populate scores (optional).")
+    coverage = d.get("coverage_selected") or []
+    st.caption(
+        f"Analysis coverage selected {len(coverage)} file(s)"
+        + (" · complete" if d.get("coverage_complete") else " · incomplete")
+    )
 
 
 def _prepare(store: RunStore, d: dict) -> None:
@@ -293,6 +318,7 @@ def _duration(start: datetime, end: datetime) -> str:
 
 _RENDERERS = {
     "filtered_files":  _filter,
+    "analysis_graph":  _analysis_graph,
     "ranked_files":    _rank,
     "file_selector":   _selector,
     "sandbox_prepare": _prepare,

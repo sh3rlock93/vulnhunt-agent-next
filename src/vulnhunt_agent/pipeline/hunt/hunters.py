@@ -14,7 +14,7 @@ from .. import finalize
 
 async def run_hunters(
     task, qstore, repo: Path, client, image: str,
-    arch: dict, sandbox_info: str, max_iter: int, sem, bus,
+    arch: dict, analysis_context: dict, sandbox_info: str, max_iter: int, sem, bus,
     sandbox_enabled: bool,
 ) -> dict[str, list[dict]]:
     """Run all hunters for one file in parallel; return {hunter_name: findings}."""
@@ -58,7 +58,7 @@ async def run_hunters(
                     sandbox_info=sandbox_info,
                     max_iterations=max_iter, on_event=on_event,
                 )
-                result = await agent.hunt(task.file)
+                result = await agent.hunt(task.file, analysis_context)
                 if result.findings:
                     finalize.rewrite_poc_paths(result.findings)
                 (hunt_dir / "findings.json").write_text(

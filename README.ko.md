@@ -38,23 +38,28 @@ Hunters · Reviewer) 을 공개 모델 환경에 맞춰 변형(adapt)** 한 것�
 </p>
 
 ```
-Filter → Rank → Selector → Sandbox Prepare → Hunt (Hunter → Cluster → Review) → Report
+Filter → C Analysis Graph → Rank → Selector → Sandbox Prepare
+       → Hunt (Hunter Portfolio → Dedup/Cluster → Review) → Report
 ```
 
 1. **Filter** — 테스트 / 벤더링된 / 생성 코드 제외 (LLM 미사용).
-2. **Rank** — 모든 source file 을 보안 관련도 1–5 점으로 채점.
-3. **Selector** — Hunter 가 실행할 파일을 고름.
-4. **Sandbox Prepare** — repo 별 Docker 이미지 빌드 (environment 단위 결정론
+2. **C Analysis Graph** — call, parser flow, entrypoint, 위험 sink를 찾고
+   감지된 모든 entrypoint/critical sink를 최소 한 slice로 계획 (LLM 미사용).
+3. **Rank** — 모든 source file 을 보안 관련도 1–5 점으로 채점.
+4. **Selector** — graph 필수 파일과 최상위 rank 파일의 합집합을 선택.
+5. **Sandbox Prepare** — repo 별 Docker 이미지 빌드 (environment 단위 결정론
    install/build: pip / mvn / npm / CMake / Make / Meson / Autotools).
    또는 직접 빌드한 custom image 사용 가능.
-5. **Hunt** — *파일 당 독립 세션 1개*. 코드를 읽고, grep 하고,
+6. **Hunt** — 파일별 fresh 전문 Hunter 세션을 실행. 각 Hunter는 제한된
+   graph slice를 받아 코드를 읽고, grep 하고,
    `/workspace` 에 PoC 를 작성한 뒤 network-isolated Docker 컨테이너에서 실행.
    `network: none`, `/code` read-only, `/workspace` tmpfs. C 네이티브 PoC
    바이너리는 분리된 실행 가능 tmpfs인 `/workspace/exec`에 컴파일됩니다.
-6. **Cluster** — 같은 파일 내 near-duplicate finding 을 group.
-7. **Review** — evidence citation + CVSS/CWE. High/Critical은 서로 다른
+7. **Dedup / Cluster** — exact duplicate를 fingerprint로 먼저 제거하고
+   남은 대표 finding만 의미 기반으로 group.
+8. **Review** — evidence citation + CVSS/CWE. High/Critical은 서로 다른
    model/prompt 구성 두 개가 필요.
-8. **Report** — consensus를 통과한 canonical JSON + Markdown + SARIF 2.1.0.
+9. **Report** — consensus를 통과한 canonical JSON + Markdown + SARIF 2.1.0.
 
 각 Hunter는 fresh 세션입니다. 히스토리를 공유하지 않고, 독립 실행의 다양성이
 그 자체로 이 도구의 핵심입니다.
@@ -94,6 +99,10 @@ Meson, Autotools 프로젝트를 ASan/UBSan으로 빌드합니다. C/H 파일은
 tree-sitter-c로 인덱싱하고 Flex/Bison의 `.l`/`.y`도 랭킹과 파일 간 추적
 대상에 포함합니다. 고정된 libcue 벤치마크와 블라인드 검증 절차는
 [`docs/milestones/m3-c-native-analysis.md`](docs/milestones/m3-c-native-analysis.md)에
+정리되어 있습니다.
+결정론적 C graph, coverage 정책, 6개 전문 Hunter, 취약/수정 버전 graph
+대조 검증은
+[`docs/milestones/m5-c-analysis-graph.md`](docs/milestones/m5-c-analysis-graph.md)에
 정리되어 있습니다.
 
 증거 기반 review와 strict export 계약은
@@ -138,7 +147,9 @@ provider 한 개를 가리키며 hunter / reviewer / ranker 모델은 사이드�
 독립 swap할 수 있습니다.
 
 **[prompts/](prompts/)** — 모든 프롬프트가 여기:
-- `prompts/hunters/python.md`, `c.md` — 광범위한 언어별 review prompt.
+- `prompts/hunters/python.md` — 광범위한 Python review prompt.
+- `prompts/hunters/c/*.md` — C 전문 Hunter 6개. bounds, lifetime,
+  parser-state는 기본 활성화.
 - `prompts/rankers/<lang>.md` — 언어별 ranker hint.
 
 dotenv는 자동 로드하지 않습니다. 구독 fallback 인증은 `codex login`에
@@ -150,8 +161,9 @@ dotenv는 자동 로드하지 않습니다. 구독 fallback 인증은 `codex log
 
 ```
 src/vulnhunt_agent/
+  analysis/      결정론적 C graph, slice, context, dedup
   agents/        hunter, reviewer, clusterer, queue
-  pipeline/      filter → rank → selector → sandbox_prepare → hunt → finalize
+  pipeline/      filter → graph → rank → selector → sandbox → hunt → finalize
   core/          llm, settings, run_store, cvss, events
   ui/            streamlit (sidebar, steps, result_cards, cost)
   sandbox/       Docker executor
@@ -159,7 +171,8 @@ src/vulnhunt_agent/
   reviewing/     evidence packet, Reviewer agent, consensus
   reporting/     strict policy, Markdown/JSON/SARIF exporter
 prompts/
-  hunters/*.md           # language hunter
+  hunters/*.md           # broad language hunter
+  hunters/c/*.md         # C 전문 Hunter portfolio
   rankers/<lang>.md      # 언어별 ranker hint
 settings.example.toml    # settings.toml 의 template (settings.toml 은 gitignored)
 ```
