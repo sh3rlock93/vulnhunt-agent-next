@@ -55,7 +55,9 @@ jobs:
       - name: Install project and development tools
         run: python -m pip install -e ".[dev]"
       - name: Pull test runtime
-        run: docker pull python:3.12-slim
+        run: |
+          docker pull python:3.12-slim
+          docker pull gcc:13-bookworm
       - name: Run real sandbox escape contract
         env:
           VULNHUNT_RUN_DOCKER_TESTS: "1"

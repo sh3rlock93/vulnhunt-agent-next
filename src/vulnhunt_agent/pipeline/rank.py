@@ -44,6 +44,30 @@ def _summarize_file(fi: FileIndex, max_symbols: int = 8) -> str:
     )
 
 
+def _index_with_text_fallbacks(
+    repo: Path, source_files: list[str], language: str
+) -> list[FileIndex]:
+    """Keep non-tree-sitter source formats visible to the Ranker.
+
+    Native repositories commonly include Flex/Bison inputs. Their mixed grammar
+    is not valid C syntax, but path and size are still valuable ranking signals.
+    """
+    indexed = TreeSitterIndexer().index_repo(repo, source_files)
+    by_path = {item.path: item for item in indexed.files}
+    files: list[FileIndex] = []
+    for relative in source_files:
+        item = by_path.get(relative)
+        if item is None:
+            source = (repo / relative).read_bytes()
+            item = FileIndex(
+                path=relative,
+                language=language,
+                loc=source.count(b"\n") + 1,
+            )
+        files.append(item)
+    return files
+
+
 async def _rank_batch(
     client: LLMClient,
     language: str,
@@ -83,10 +107,10 @@ async def run_rank(store: RunStore, bus: EventBus) -> None:
     repo = Path(cfg["repo_path"])
     language = language_of(cfg["environment"])
     source_files = filtered.get("source_files", [])
-    index = TreeSitterIndexer().index_repo(repo, source_files)
-    bus.emit("rank_indexed", indexed=len(index.files), total=len(source_files))
+    indexed_files = _index_with_text_fallbacks(repo, source_files, language)
+    bus.emit("rank_indexed", indexed=len(indexed_files), total=len(source_files))
 
-    summaries = [_summarize_file(f) for f in index.files]
+    summaries = [_summarize_file(f) for f in indexed_files]
     batches = [summaries[i:i + BATCH_SIZE] for i in range(0, len(summaries), BATCH_SIZE)]
 
     bus.emit("step_start", step="rank",

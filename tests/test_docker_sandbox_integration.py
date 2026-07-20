@@ -18,6 +18,7 @@ from vulnhunt_agent.sandbox.container import ContainerExecutor
 from vulnhunt_agent.sandbox.hardened import HardenedDockerBackend
 
 IMAGE = "python:3.12-slim"
+NATIVE_IMAGE = "gcc:13-bookworm"
 
 
 async def test_real_build_and_hunt_sandboxes_use_baked_source_without_mounts(
@@ -43,8 +44,17 @@ async def test_real_build_and_hunt_sandboxes_use_baked_source_without_mounts(
             capture_output=True,
             text=True,
         ).stdout)[0]
-        assert inspect["HostConfig"]["Binds"] is None
+        build_host = inspect["HostConfig"]
+        assert build_host["Binds"] is None
         assert inspect["Mounts"] == []
+        assert build_host["CapDrop"] == ["ALL"]
+        assert set(build_host["CapAdd"]) == {
+            "CAP_CHOWN",
+            "CAP_DAC_OVERRIDE",
+            "CAP_FOWNER",
+            "CAP_SETGID",
+            "CAP_SETUID",
+        }
         check = await build.exec(
             "python -c \"from pathlib import Path; "
             "assert Path('/code/target.py').read_text() == 'VALUE = 7\\\\n'\""
@@ -74,6 +84,7 @@ async def test_real_build_and_hunt_sandboxes_use_baked_source_without_mounts(
         assert host["NetworkMode"] == "none"
         assert host["ReadonlyRootfs"] is True
         assert host["CapDrop"] == ["ALL"]
+        assert host["CapAdd"] is None
         assert host["PidsLimit"] == 128
         assert inspect["Config"]["User"] == "65532:65532"
         assert "no-new-privileges" in host["SecurityOpt"]
@@ -106,6 +117,107 @@ async def test_real_build_and_hunt_sandboxes_use_baked_source_without_mounts(
         )
         assert source_write.exit_code != 0
         assert (source / "target.py").read_text() == "VALUE = 7\n"
+    finally:
+        await hunt.stop()
+        subprocess.run(
+            ["docker", "image", "rm", "-f", prepared_image],
+            check=False,
+            capture_output=True,
+        )
+
+
+async def test_real_native_hunter_compiles_and_runs_asan_poc_in_exec_tmpfs(
+    tmp_path,
+) -> None:
+    _require_docker()
+    source = tmp_path / "native-source"
+    source.mkdir()
+    (source / "target.c").write_text(
+        "#include <stdlib.h>\n"
+        "void write_index(int index) {\n"
+        "    int *values = malloc(4 * sizeof(*values));\n"
+        "    values[index] = 7;\n"
+        "    free(values);\n"
+        "}\n"
+    )
+    prepared_image = f"scanner/prepared:m3-c-test-{uuid.uuid4().hex[:12]}"
+
+    build = ContainerExecutor(
+        repo=source,
+        image=NATIVE_IMAGE,
+        network="none",
+        code_writable=True,
+    )
+    try:
+        await build.start()
+        compile_target = await build.exec(
+            "mkdir -p /opt/vulnhunt/build && "
+            "cc -O1 -g -fno-omit-frame-pointer -fsanitize=address,undefined "
+            "-c /code/target.c -o /opt/vulnhunt/build/target.o"
+        )
+        assert compile_target.exit_code == 0, compile_target.stderr
+        await build.commit(prepared_image)
+    finally:
+        await build.stop()
+
+    hunt = ContainerExecutor(
+        repo=source,
+        image=prepared_image,
+        network="none",
+        source_baked=True,
+    )
+    try:
+        await hunt.start()
+        inspect = json.loads(subprocess.run(
+            ["docker", "inspect", hunt.name],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout)[0]
+        host = inspect["HostConfig"]
+        assert host["Binds"] is None
+        assert inspect["Mounts"] == []
+        assert host["NetworkMode"] == "none"
+        assert host["ReadonlyRootfs"] is True
+        assert inspect["Config"]["User"] == "65532:65532"
+        assert "noexec" in host["Tmpfs"]["/workspace"]
+        assert "exec" in host["Tmpfs"]["/workspace/exec"]
+        assert "noexec" in host["Tmpfs"]["/tmp"]
+
+        await hunt.write_file(
+            "poc.c",
+            "void write_index(int index);\n"
+            "int main(void) { write_index(100); return 0; }\n",
+        )
+        compile_poc = await hunt.exec_argv((
+            "cc",
+            "-O1",
+            "-g",
+            "-fno-omit-frame-pointer",
+            "-fsanitize=address,undefined",
+            "/workspace/poc.c",
+            "/opt/vulnhunt/build/target.o",
+            "-o",
+            "/workspace/exec/poc",
+        ))
+        assert compile_poc.exit_code == 0, compile_poc.stderr
+
+        noexec_copy = await hunt.exec_argv((
+            "cp", "/workspace/exec/poc", "/workspace/poc-blocked",
+        ))
+        assert noexec_copy.exit_code == 0, noexec_copy.stderr
+        blocked = await hunt.exec_argv(("/workspace/poc-blocked",))
+        assert blocked.exit_code != 0
+
+        result = await hunt.exec_argv((
+            "env",
+            "ASAN_OPTIONS=detect_leaks=0:abort_on_error=1",
+            "/workspace/exec/poc",
+        ))
+        evidence = result.stdout + result.stderr
+        assert result.exit_code != 0
+        assert "AddressSanitizer" in evidence
+        assert "write_index" in evidence
     finally:
         await hunt.stop()
         subprocess.run(

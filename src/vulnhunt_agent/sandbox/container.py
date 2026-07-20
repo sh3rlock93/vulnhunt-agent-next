@@ -18,6 +18,7 @@ from .base import ExecResult, validate_argv
 
 
 _WORKSPACE_SIZE = "256m"
+_EXEC_WORKSPACE_SIZE = "64m"
 _OUTPUT_LIMIT = 1024 * 1024
 
 
@@ -80,6 +81,12 @@ class ContainerExecutor:
             "--cap-drop=ALL",
             "--security-opt=no-new-privileges",
         ]
+        if self.code_writable:
+            # The disposable prepare container has no host mounts. Debian's apt
+            # needs these narrowly-scoped capabilities to switch to its download
+            # user and unpack packages. Hunter containers never receive them.
+            for capability in ("CHOWN", "DAC_OVERRIDE", "FOWNER", "SETGID", "SETUID"):
+                security_args.extend(("--cap-add", capability))
         filesystem_args = (
             []
             if self.code_writable
@@ -88,6 +95,8 @@ class ContainerExecutor:
                 "--user", "65532:65532",
                 "--tmpfs",
                 f"/workspace:rw,noexec,nosuid,nodev,size={_WORKSPACE_SIZE},mode=1777",
+                "--tmpfs",
+                f"/workspace/exec:rw,exec,nosuid,nodev,size={_EXEC_WORKSPACE_SIZE},mode=1777",
                 "--tmpfs", "/tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777",
             ]
         )

@@ -91,6 +91,13 @@ _READY_HINTS = {
         "Run PoC from /code with `node /workspace/poc.js` "
         "or set `NODE_PATH=/code/node_modules`."
     ),
+    "c": (
+        "The target was built with ASan/UBSan. Source is read-only at /code and "
+        "prepared build artifacts are under /opt/vulnhunt/build (or /code for "
+        "in-tree Make builds). Write PoC source below /workspace, compile it "
+        "directly with cc to /workspace/exec, then execute that binary. "
+        "Do not rebuild the target or install packages."
+    ),
 }
 
 _FAILED_HINTS = {
@@ -105,6 +112,11 @@ _FAILED_HINTS = {
     "node": (
         "Network is disabled. `node` is available but external packages may be "
         "missing without node_modules."
+    ),
+    "c": (
+        "Network is disabled. `cc` is available, but the prepared target build "
+        "failed; static review and narrowly compiling dependency-free source may "
+        "still be possible. Do not claim runtime confirmation without evidence."
     ),
 }
 
