@@ -10,6 +10,7 @@ from vulnhunt_agent.analysis import (
 )
 from vulnhunt_agent.core.events import EventBus
 from vulnhunt_agent.core.run_store import RunStore
+from vulnhunt_agent.indexer.tree_sitter_indexer import TreeSitterIndexer
 from vulnhunt_agent.pipeline.analysis_graph import run_analysis_graph
 from vulnhunt_agent.pipeline.file_selector import run_file_selector
 from vulnhunt_agent.pipeline.hunt.cluster import run_clusterer
@@ -138,6 +139,36 @@ def test_lower_and_upper_index_guards_reduce_array_sink_priority(tmp_path) -> No
     assert signal.signal_id not in graph.critical_sink_ids
 
 
+def test_macro_decorated_long_function_is_recovered_with_security_signals(
+    tmp_path,
+) -> None:
+    repo = tmp_path / "macro-native"
+    repo.mkdir()
+    (repo / "zip.c").write_text(_macro_decorated_source())
+
+    graph = build_c_analysis_graph(repo, ["zip.c"])
+    node = next(
+        item for item in graph.nodes
+        if item.symbol == "zipOpenNewFileInZip4_64"
+    )
+    signal = next(
+        item for item in graph.signals
+        if item.node_id == node.node_id and item.operation == "ALLOC"
+    )
+    index = TreeSitterIndexer().index_repo(repo, ["zip.c"])
+
+    assert node.line == 3
+    assert node.end_line > node.line
+    assert signal.category == "allocation_size"
+    assert signal.risk == 4
+    assert signal.signal_id in graph.critical_sink_ids
+    assert any(
+        symbol.name == "zipOpenNewFileInZip4_64"
+        for file_index in index.files
+        for symbol in file_index.symbols
+    )
+
+
 class _NeverCalledClient:
     async def chat(self, **kwargs):
         raise AssertionError("exact deterministic duplicates must not call the LLM")
@@ -176,3 +207,22 @@ async def test_exact_cross_hunter_duplicates_skip_semantic_clusterer(tmp_path) -
     }]
     payload = json.loads((qstore.task_dir(task) / "clusters.json").read_text())
     assert payload["strategy"] == "deterministic"
+
+
+def _macro_decorated_source() -> str:
+    return (
+        "#define ALLOC(size) malloc(size)\n"
+        "#define ZEXPORT\n"
+        "extern int ZEXPORT zipOpenNewFileInZip4_64(\n"
+        "    void *file, const char *filename, const void *zipfi,\n"
+        "    const void *local, unsigned local_size, const void *global,\n"
+        "    unsigned global_size, const char *comment, int method, int level,\n"
+        "    int raw, int window_bits, int memory_level, int strategy,\n"
+        "    const char *password, unsigned crc, unsigned made_by,\n"
+        "    unsigned flag, int zip64) {\n"
+        "    unsigned size = 46 + global_size;\n"
+        "    char *header;\n"
+        "    header = (char *)ALLOC((unsigned)size + 32);\n"
+        "    return header == 0;\n"
+        "}\n"
+    )

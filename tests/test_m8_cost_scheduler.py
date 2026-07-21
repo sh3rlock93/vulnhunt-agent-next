@@ -468,6 +468,30 @@ def _git_incremental_fixture(
     return repo, files, base, head
 
 
+def _macro_diff_source(*, include_guard: bool) -> str:
+    guard = (
+        "    if (global_size > 0xffff) return -1;\n"
+        if include_guard else ""
+    )
+    return (
+        "#define ALLOC(size) malloc(size)\n"
+        "#define ZEXPORT\n"
+        "extern int ZEXPORT zipOpenNewFileInZip4_64(\n"
+        "    void *file, const char *filename, const void *zipfi,\n"
+        "    const void *local, unsigned local_size, const void *global,\n"
+        "    unsigned global_size, const char *comment, int method, int level,\n"
+        "    int raw, int window_bits, int memory_level, int strategy,\n"
+        "    const char *password, unsigned crc, unsigned made_by,\n"
+        "    unsigned flag, int zip64) {\n"
+        "    unsigned size = 46 + global_size;\n"
+        "    char *header;\n"
+        + guard
+        + "    header = (char *)ALLOC((unsigned)size + 32);\n"
+        "    return header == 0;\n"
+        "}\n"
+    )
+
+
 def test_git_diff_scope_expands_changed_function_and_parser_flow(
     tmp_path: Path,
 ) -> None:
@@ -519,6 +543,47 @@ def test_git_diff_scope_expands_changed_function_and_parser_flow(
     )
     assert set(routed.detected_critical_sink_ids) == set(scope.critical_sink_ids)
     assert routed.uncovered_critical_sink_ids == ()
+
+
+def test_deletion_only_diff_anchors_macro_recovered_function(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "macro-diff"
+    repo.mkdir()
+    subprocess.run(["git", "-C", str(repo), "init", "-b", "main"], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "user.email", "tests@example.com"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "user.name", "Tests"],
+        check=True,
+    )
+    (repo / "zip.c").write_text(_macro_diff_source(include_guard=True))
+    base = _commit_all(repo, "guarded")
+    (repo / "zip.c").write_text(_macro_diff_source(include_guard=False))
+    head = _commit_all(repo, "remove length guard")
+
+    graph = build_c_analysis_graph(repo, ["zip.c"])
+    coverage = build_coverage_plan(graph)
+    scope = build_incremental_scope(
+        repo,
+        base_ref=base,
+        head_ref=head,
+        graph=graph,
+        coverage=coverage,
+    )
+
+    target = next(
+        item for item in graph.nodes
+        if item.symbol == "zipOpenNewFileInZip4_64"
+    )
+    changed_start, changed_end = scope.changed_line_ranges["zip.c"][0]
+    assert target.line <= changed_start
+    assert target.end_line >= changed_end
+    assert target.node_id in scope.changed_node_ids
+    assert scope.selected_files == ("zip.c",)
+    assert scope.critical_sink_ids
 
 
 def test_git_diff_scope_expands_header_consumers_and_falls_back_safely(
