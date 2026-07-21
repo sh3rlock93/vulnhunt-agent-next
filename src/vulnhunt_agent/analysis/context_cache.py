@@ -7,9 +7,13 @@ import re
 from pathlib import Path
 
 from ..domain.schemas import HunterWorkItem
-from .context import context_for_work_item
+from .context import (
+    context_for_work_item,
+    matching_risk_chains,
+    matching_risk_chains_for_targets,
+)
 
-CONTEXT_CACHE_POLICY = "c-shared-context-v2"
+CONTEXT_CACHE_POLICY = "c-context-v4"
 MAX_CONTEXT_BYTES = 24_000
 MAX_LINES_PER_FILE = 80
 CONTEXT_LINE_RADIUS = 6
@@ -130,6 +134,8 @@ class SharedContextCache:
             self.analysis,
             slice_ids=set(work_item.slice_ids),
             files=set(work_item.files),
+            target_signal_ids=set(work_item.target_signal_ids),
+            target_node_ids=set(work_item.target_node_ids),
             changed_line_ranges=work_item.changed_line_ranges,
         )
         excerpts = self._excerpts(
@@ -263,6 +269,7 @@ def context_cache_key(
         "context_files": sorted(work_item.files),
         "target_node_ids": sorted(work_item.target_node_ids),
         "target_signal_ids": sorted(work_item.target_signal_ids),
+        "risk_chains": matching_risk_chains(graph, work_item)[:6],
         "changed_line_ranges": {
             path: sorted(ranges)
             for path, ranges in sorted(work_item.changed_line_ranges.items())
@@ -283,6 +290,8 @@ def _relevant_ranges(
     *,
     slice_ids: set[str],
     files: set[str],
+    target_signal_ids: set[str],
+    target_node_ids: set[str],
     changed_line_ranges: dict[str, tuple[tuple[int, int], ...]],
 ) -> dict[str, list[tuple[int, int]]]:
     graph = analysis.get("graph") or {}
@@ -302,6 +311,23 @@ def _relevant_ranges(
         for path, ranges in changed_line_ranges.items()
         if path in files
     }
+    for chain in matching_risk_chains_for_targets(
+        graph,
+        target_signal_ids=target_signal_ids,
+        target_node_ids=target_node_ids,
+    )[:6]:
+        path = str(chain.get("path", ""))
+        if path not in files:
+            continue
+        ordered_lines = (
+            *chain.get("source_lines", ()),
+            *(step.get("line", 1) for step in chain.get("transform_steps", ())),
+            *chain.get("guard_lines", ()),
+            *chain.get("sink_lines", ()),
+        )
+        out.setdefault(path, []).extend(
+            (int(line), int(line)) for line in ordered_lines
+        )
     for signal in graph.get("signals", []):
         if (
             signal.get("node_id") in selected_nodes
@@ -384,6 +410,10 @@ def _fit_packet(packet: dict) -> dict:
         slices = packet.get("slices") or []
         if slices:
             slices.pop()
+            continue
+        chains = packet.get("risk_chains") or []
+        if len(chains) > 1:
+            chains.pop()
             continue
         raise ValueError("context packet metadata exceeds the hard byte limit")
     return packet
