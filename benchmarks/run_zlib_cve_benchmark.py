@@ -86,16 +86,26 @@ def evaluate(
         },
     }
     if expect == "fixed":
-        passed = (
-            source_matches_pin
-            and target_node is not None
-            and bool(target_signals)
-            and all(item.category == "allocation_size_guarded" for item in target_signals)
-            and all(item.risk < 4 for item in target_signals)
-            and all(item.signal_id not in graph.critical_sink_ids for item in target_signals)
-            and all("16-bit reject guards=3" in item.detail for item in target_signals)
-        )
-        result["passed"] = passed
+        checks = {
+            "source_matches_pin": source_matches_pin,
+            "target_node_found": target_node is not None,
+            "target_signals_found": bool(target_signals),
+            "target_signals_guarded": all(
+                item.category == "allocation_size_guarded" for item in target_signals
+            ),
+            "target_risk_lowered": all(item.risk < 4 for item in target_signals),
+            "target_not_critical": all(
+                item.signal_id not in graph.critical_sink_ids for item in target_signals
+            ),
+            "three_reject_guards_found": all(
+                "16-bit reject guards=3" in item.detail for item in target_signals
+            ),
+        }
+        result["checks"] = checks
+        result["failed_checks"] = [
+            name for name, passed in checks.items() if not passed
+        ]
+        result["passed"] = all(checks.values())
         return result
 
     scope = build_incremental_scope(
@@ -139,37 +149,53 @@ def evaluate(
     first_excerpt = next(iter(packet.get("source_excerpts", [])), {}).get("path")
 
     target_signal_ids = {item.signal_id for item in target_signals}
-    passed = (
-        source_matches_pin
-        and target_node is not None
-        and bool(target_signals)
-        and all(item.category == "allocation_size" for item in target_signals)
-        and all(item.risk >= 4 for item in target_signals)
-        and scope.mode == "incremental"
-        and not scope.fallback_reason
-        and target_node.node_id in scope.changed_node_ids
-        and bool(target_signal_ids & set(scope.critical_sink_ids))
-        and not routing.uncovered_critical_sink_ids
-        and primary is not None
-        and primary.seed_file == truth["sink_file"]
-        and target_node.node_id in primary.target_node_ids
-        and bool(target_signal_ids & set(primary.target_signal_ids))
-        and len(work) <= int(limits["max_work_sessions"])
-        and all(len(item.slice_ids) <= int(limits["max_slices_per_work"]) for item in work)
-        and all(
+    checks = {
+        "source_matches_pin": source_matches_pin,
+        "target_node_found": target_node is not None,
+        "target_signals_found": bool(target_signals),
+        "target_signals_unguarded": all(
+            item.category == "allocation_size" for item in target_signals
+        ),
+        "target_risk_high": all(item.risk >= 4 for item in target_signals),
+        "incremental_scope": scope.mode == "incremental" and not scope.fallback_reason,
+        "target_node_changed": (
+            target_node is not None and target_node.node_id in scope.changed_node_ids
+        ),
+        "target_is_critical": bool(target_signal_ids & set(scope.critical_sink_ids)),
+        "critical_sinks_covered": not routing.uncovered_critical_sink_ids,
+        "primary_work_found": primary is not None,
+        "primary_seed_is_sink": (
+            primary is not None and primary.seed_file == truth["sink_file"]
+        ),
+        "primary_targets_node": (
+            target_node is not None
+            and primary is not None
+            and target_node.node_id in primary.target_node_ids
+        ),
+        "primary_targets_signal": (
+            primary is not None
+            and bool(target_signal_ids & set(primary.target_signal_ids))
+        ),
+        "work_session_limit": len(work) <= int(limits["max_work_sessions"]),
+        "slice_limit": all(
+            len(item.slice_ids) <= int(limits["max_slices_per_work"])
+            for item in work
+        ),
+        "target_node_limit": all(
             len(item.target_node_ids) <= int(limits["max_target_nodes_per_work"])
             for item in work
-        )
-        and all(
+        ),
+        "target_signal_limit": all(
             len(item.target_signal_ids) <= int(limits["max_target_signals_per_work"])
             for item in work
-        )
-        and packet_bytes <= int(limits["max_context_bytes"])
-        and packet_bytes > 0
-        and first_excerpt == truth["sink_file"]
-    )
+        ),
+        "context_size_limit": 0 < packet_bytes <= int(limits["max_context_bytes"]),
+        "sink_excerpt_first": first_excerpt == truth["sink_file"],
+    }
     result.update({
-        "passed": passed,
+        "passed": all(checks.values()),
+        "checks": checks,
+        "failed_checks": [name for name, passed in checks.items() if not passed],
         "incremental_scope": {
             "mode": scope.mode,
             "fallback_reason": scope.fallback_reason,
@@ -242,6 +268,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         head_ref=args.head_ref,
     )
     print(json.dumps(result, indent=2, ensure_ascii=False))
+    if not result["passed"]:
+        details = json.dumps({
+            "failed_checks": result.get("failed_checks", []),
+            "target_signals": result.get("target_signals", []),
+            "summary": result.get("summary", {}),
+        }, separators=(",", ":"), ensure_ascii=True)
+        print(f"::error title=zlib CVE regression failed::{details}")
     return 0 if result["passed"] else 1
 
 
