@@ -13,6 +13,7 @@ from ..domain.schemas import (
     EvidenceKind,
     OracleResult,
     ReproductionSpec,
+    TaskLease,
 )
 from ..domain.states import FindingState
 from ..infrastructure.artifacts import ArtifactStore
@@ -232,6 +233,99 @@ class ReproducerService:
             status=status,
             evidence=group_evidence,
         )
+
+    async def reproduce_variant(
+        self,
+        spec: ReproductionSpec,
+        lease: TaskLease,
+    ) -> ReproductionOutcome:
+        """Execute a compiled variant under its existing declarative task lease.
+
+        Variant evidence is attached for re-review but never changes the finding
+        state directly; only the evidence-only consensus path owns that decision.
+        """
+        spec = ReproductionSpec.model_validate(spec)
+        lease = TaskLease.model_validate(lease)
+        if (
+            lease.run_id != spec.run_id
+            or lease.task_type != "reproduction_variant"
+            or lease.task_key != spec.reproduction_id
+        ):
+            raise ValueError("variant spec does not match its task lease")
+        run = self.repository.get_run(spec.run_id)
+        finding = self.repository.get_candidate(spec.candidate_id)
+        if run is None or finding is None or finding.run_id != spec.run_id:
+            raise KeyError("variant candidate does not belong to its run")
+        if run.source_snapshot != spec.source_snapshot:
+            raise ValueError("variant snapshot does not match the run")
+        if (
+            finding.poc is None
+            or finding.poc.artifact != spec.poc_artifact
+            or finding.poc.setup_argvs != spec.setup_argvs
+            or finding.poc.cwd != spec.cwd
+        ):
+            raise ValueError("variant does not preserve the candidate PoC")
+        if finding.state not in {
+            FindingState.REPRODUCED,
+            FindingState.REVIEWER_VERIFIED,
+        }:
+            raise ValueError(
+                f"candidate is not eligible for a variant from {finding.state.value}"
+            )
+
+        existing = self._group_evidence(spec)
+        evidence_by_attempt = {item.attempt: item for item in existing}
+        lease_seconds = max(
+            self.lease_seconds,
+            (len(spec.setup_argvs) + 1) * spec.timeout_seconds + 30,
+        )
+        try:
+            for attempt in range(1, spec.attempts + 1):
+                if attempt in evidence_by_attempt:
+                    continue
+                lease = self.repository.heartbeat_task_lease(
+                    lease,
+                    lease_seconds=lease_seconds,
+                    now=self.clock(),
+                )
+                evidence = await self._execute_attempt(spec, attempt)
+                self.repository.save_evidence(evidence)
+                evidence_by_attempt[attempt] = evidence
+            group = tuple(
+                item for _, item in sorted(evidence_by_attempt.items())
+            )
+            self.repository.attach_candidate_evidence(
+                spec.candidate_id,
+                tuple(item.evidence_id for item in group),
+            )
+            if _is_deterministic(list(group), spec):
+                status = ReproductionStatus.REPRODUCED
+            elif any(
+                item.oracle and item.oracle.result == "passed"
+                for item in group
+            ):
+                status = ReproductionStatus.FLAKY
+            else:
+                status = ReproductionStatus.FAILED
+            self.repository.finish_task_lease(
+                lease,
+                status=status.value,
+                now=self.clock(),
+            )
+            return ReproductionOutcome(
+                reproduction_id=spec.reproduction_id,
+                status=status,
+                evidence=group,
+            )
+        except TaskLeaseLostError:
+            return ReproductionOutcome(
+                reproduction_id=spec.reproduction_id,
+                status=ReproductionStatus.IN_PROGRESS,
+                evidence=tuple(
+                    item for _, item in sorted(evidence_by_attempt.items())
+                ),
+                error="worker lost the reproduction variant lease",
+            )
 
     async def _execute_attempt(
         self, spec: ReproductionSpec, attempt: int

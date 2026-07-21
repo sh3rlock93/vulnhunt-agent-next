@@ -8,12 +8,23 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ..domain.compat import candidate_from_legacy
-from ..domain.schemas import CandidateFinding, PocSpec, ReproductionSpec
+from ..domain.schemas import (
+    CandidateFinding,
+    ConsensusStatus,
+    PocSpec,
+    ReproductionSpec,
+    ReproductionVariantRequest,
+)
 from ..domain.states import RUN_SEQUENCE, FindingState, RunState
 from ..infrastructure.artifacts import ArtifactStore
 from ..infrastructure.sqlite_repository import SqliteRepository
 from ..reporting.service import StrictReportService
 from ..reproduction.service import ReproducerService
+from ..reproduction.variants import (
+    LLMVariantCompiler,
+    ReproductionVariantExecutor,
+    VariantCompiler,
+)
 from ..reviewing.agent import EvidenceReviewerAgent
 from ..reviewing.service import EvidenceReviewCoordinator
 from ..sandbox.base import SandboxBackend
@@ -34,6 +45,9 @@ class VerificationSummary:
     recipes_rejected: int
     states: dict[str, int]
     reports: int
+    variants_executed: int = 0
+    variants_failed: int = 0
+    automatic_rereviews: int = 0
     errors: tuple[str, ...] = ()
 
 
@@ -46,12 +60,14 @@ class VerifiedPipelineService:
         reviewers: list[EvidenceReviewerAgent],
         *,
         output_root: Path,
+        variant_compiler: VariantCompiler | None = None,
     ):
         self.repository = repository
         self.artifacts = artifacts
         self.backend = backend
         self.reviewers = reviewers
         self.output_root = output_root
+        self.variant_compiler = variant_compiler
 
     async def verify(
         self,
@@ -114,12 +130,47 @@ class VerifiedPipelineService:
 
         self._advance_run(run_id, RunState.REVIEWING)
         coordinator = EvidenceReviewCoordinator(self.repository, self.artifacts)
+        compiler = self.variant_compiler
+        if compiler is None and self.reviewers:
+            compiler = LLMVariantCompiler(self.reviewers[0].client)
+        variant_executor = (
+            ReproductionVariantExecutor(
+                self.repository,
+                self.artifacts,
+                self.backend,
+                compiler,
+            )
+            if compiler is not None
+            else None
+        )
+        variants_executed = 0
+        variants_failed = 0
+        automatic_rereviews = 0
         for candidate_id in candidates:
             finding = self.repository.get_candidate(candidate_id)
             if finding is None or finding.state is not FindingState.REPRODUCED:
                 continue
             try:
-                await coordinator.review(candidate_id, self.reviewers)
+                decision = await coordinator.review(candidate_id, self.reviewers)
+                for _ in range(2):
+                    if decision.status is not ConsensusStatus.VARIANT_REQUESTED:
+                        break
+                    request = self._variant_request(run_id, candidate_id)
+                    if request is None or variant_executor is None:
+                        raise RuntimeError("variant request has no available executor")
+                    execution = await variant_executor.execute(request)
+                    if execution.outcome.status.value == "in_progress":
+                        break
+                    variants_executed += 1
+                    if execution.outcome.error:
+                        variants_failed += 1
+                        errors.append(
+                            f"{candidate_id}: variant {request.request_id}: "
+                            f"{execution.outcome.error}"
+                        )
+                        break
+                    automatic_rereviews += 1
+                    decision = await coordinator.review(candidate_id, self.reviewers)
             except Exception as exc:
                 errors.append(f"{candidate_id}: review: {exc}")
 
@@ -154,8 +205,29 @@ class VerifiedPipelineService:
             recipes_rejected=rejected,
             states=dict(sorted(state_counts.items())),
             reports=reports,
+            variants_executed=variants_executed,
+            variants_failed=variants_failed,
+            automatic_rereviews=automatic_rereviews,
             errors=tuple(errors),
         )
+
+    def _variant_request(
+        self,
+        run_id: str,
+        candidate_id: str,
+    ) -> ReproductionVariantRequest | None:
+        tasks = [
+            task for task in self.repository.list_tasks(run_id)
+            if task["task_type"] == "reproduction_variant"
+            and task["payload"].get("candidate_id") == candidate_id
+        ]
+        if not tasks:
+            return None
+        active = [
+            task for task in tasks if task["status"] in {"pending", "running"}
+        ]
+        selected = (active or tasks)[-1]
+        return ReproductionVariantRequest.model_validate(selected["payload"])
 
     def _group_findings(
         self,

@@ -68,6 +68,9 @@ async def run_verify(store: RunStore, bus: EventBus) -> None:
         step="verify",
         candidates=summary.candidates,
         reports=summary.reports,
+        variants_executed=summary.variants_executed,
+        variants_failed=summary.variants_failed,
+        automatic_rereviews=summary.automatic_rereviews,
         errors=len(summary.errors),
     )
 
