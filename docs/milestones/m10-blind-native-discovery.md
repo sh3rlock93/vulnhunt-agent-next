@@ -1,6 +1,6 @@
 # M10 — Blind native vulnerability discovery at repository scale
 
-Status: In progress — PR 3 complete
+Status: In progress — PR 4 complete
 
 ## Goal
 
@@ -262,13 +262,13 @@ Expected changes:
 
 ### PR 4 acceptance gates
 
-- [ ] Native full-scan work uses exact targets rather than `.` as the analysis unit.
-- [ ] The target chain's source, arithmetic, allocation, and sink ranges fit one packet.
-- [ ] No persisted context packet exceeds 24,000 bytes.
-- [ ] The context cache key changes when chain members or policy versions change.
-- [ ] Every admitted target receives exactly one valid disposition.
-- [ ] The target session inspects relevant source ranges without manual file selection.
-- [ ] Synthetic vulnerable and guarded fixtures produce finding and no-finding dispositions respectively.
+- [x] Native full-scan work uses exact targets rather than `.` as the analysis unit.
+- [x] The target chain's source, arithmetic, allocation, and sink ranges fit one packet.
+- [x] No persisted context packet exceeds 24,000 bytes.
+- [x] The context cache key changes when chain members or policy versions change.
+- [x] Every admitted target receives exactly one valid disposition.
+- [x] The target session inspects relevant source ranges without manual file selection.
+- [x] Synthetic vulnerable and guarded fixtures produce finding and no-finding dispositions respectively.
 
 ## PR 5 — Actual-target evidence provenance
 

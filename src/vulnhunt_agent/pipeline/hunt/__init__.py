@@ -71,6 +71,10 @@ async def run_hunt(store: RunStore, bus: EventBus) -> None:
     selector = store.load_step("file_selector") or {}
     analysis = store.load_step("analysis_graph") or {}
     files = list(selector.get("selected", []))
+    if language_of(env) == "c" and any(path in {"", "."} for path in files):
+        raise RuntimeError(
+            "native Hunter work requires exact file targets; repository root is invalid"
+        )
 
     hunters = _resolve_hunter_selection(
         store.dir / "steps", language_of(env)

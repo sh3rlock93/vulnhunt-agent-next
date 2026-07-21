@@ -49,6 +49,13 @@ Do NOT fabricate execution results.
 
 Before stopping, self-check: did you read the *callers* of suspicious functions, not just their definitions? Did you check sibling files in the same module? For each "looks safe" sink, what input would make it unsafe — and does that input flow in? If any of these is unanswered, keep exploring.
 
+When `risk_chains` are present in the immutable context, start with them. Trace
+the external source and conversion, each arithmetic/type transform, the guard
+or missing guard, the allocation, and the later copy/index/loop bound in that
+order. Compare the value that sizes the allocation with any independent value
+that controls the later write. Treat the chain as a prioritization hypothesis,
+not proof: verify reachability and the actual C types before reporting.
+
 When done, STOP calling tools and output ONLY this JSON:
 {
   "target_dispositions": [
@@ -113,7 +120,8 @@ USER_TEMPLATE = """# Target file
 # Sandbox state
 {sandbox_info}
 
-The shared excerpts are a starting point, not a read boundary. Use read_file or
+The target IDs are exact completion obligations; this is not a repository-root
+exploration task. The shared excerpts are a starting point, not a read boundary. Use read_file or
 grep whenever you need missing ranges, callers, headers, or sibling files.
 Investigate this file and anything it touches. Produce the final JSON report when done.
 """
