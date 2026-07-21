@@ -2,13 +2,21 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from dataclasses import dataclass
+import hashlib
+import json
 from pathlib import Path
 
 from ..analysis.models import CAnalysisGraph, CoveragePlan, SecuritySignal
-from ..domain.schemas import HunterRoutingPlan, HunterWorkItem
+from ..domain.schemas import (
+    MAX_HUNTER_TARGET_NODES,
+    MAX_HUNTER_TARGET_SIGNALS,
+    HunterRoutingPlan,
+    HunterWorkItem,
+)
 from .shadow import work_id_for
 
-ROUTER_POLICY = "c-signal-router-v2"
+ROUTER_POLICY = "c-signal-router-v3"
 
 BOUNDS = "c-bounds-integers"
 LIFETIME = "c-memory-lifetime"
@@ -39,6 +47,17 @@ _CATEGORY_HUNTERS: dict[str, tuple[str, ...]] = {
     "error_contract": (ERRORS,),
 }
 _FALLBACKS = (BOUNDS, LIFETIME, PARSER, INJECTION, CONCURRENCY, ERRORS)
+
+
+@dataclass(frozen=True)
+class RoutingTargetBatch:
+    """Pre-validation target unit shared by every selected specialist."""
+
+    coverage_group: str
+    index: int
+    count: int
+    target_node_ids: tuple[str, ...]
+    target_signal_ids: tuple[str, ...]
 
 
 def build_routing_plan(
@@ -98,10 +117,16 @@ def build_routing_plan(
             item for item in graph.signals
             if item.path == path and (not node_ids or item.node_id in node_ids)
         ]
-        critical_local = [
-            item for item in local_signals
-            if item.signal_id in active_critical_ids
-        ]
+        critical_local = sorted(
+            (
+                item for item in graph.signals
+                if item.path == path and item.signal_id in active_critical_ids
+            ),
+            key=lambda item: item.signal_id,
+        )
+        local_signals = list({
+            item.signal_id: item for item in (*local_signals, *critical_local)
+        }.values())
         local_node_ids = {
             item.node_id for item in graph.nodes if item.path == path
         }
@@ -135,37 +160,47 @@ def build_routing_plan(
                 1,
             )
         )
+        target_batches = _target_batches(
+            path=path,
+            target_node_ids=target_node_ids,
+            target_signal_ids=target_signal_ids,
+        )
         for hunter, reasons in routed:
-            focus_reasons = list(reasons)
-            if target_node_ids:
-                focus_reasons.append("change-focus:direct-node")
-            elif target_signal_ids:
-                focus_reasons.append("change-focus:critical-sink")
-            items.append(HunterWorkItem(
-                work_id=work_id_for(
+            for batch in target_batches:
+                focus_reasons = list(reasons)
+                if batch.target_node_ids:
+                    focus_reasons.append("change-focus:direct-node")
+                elif batch.target_signal_ids:
+                    focus_reasons.append("change-focus:critical-sink")
+                focus_reasons.extend((
+                    f"coverage-group:{batch.coverage_group}",
+                    f"target-batch:{batch.index + 1}/{batch.count}",
+                ))
+                items.append(HunterWorkItem(
+                    work_id=work_id_for(
+                        source_snapshot=source_snapshot,
+                        planning_policy=ROUTER_POLICY,
+                        slice_ids=slice_ids,
+                        files=(path,),
+                        hunter=hunter,
+                        target_node_ids=batch.target_node_ids,
+                        target_signal_ids=batch.target_signal_ids,
+                        changed_line_ranges=local_changed_ranges,
+                    ),
+                    run_id=run_id,
                     source_snapshot=source_snapshot,
                     planning_policy=ROUTER_POLICY,
                     slice_ids=slice_ids,
+                    target_node_ids=batch.target_node_ids,
+                    target_signal_ids=batch.target_signal_ids,
+                    changed_line_ranges=local_changed_ranges,
+                    seed_file=path,
                     files=(path,),
                     hunter=hunter,
-                    target_node_ids=target_node_ids,
-                    target_signal_ids=target_signal_ids,
-                    changed_line_ranges=local_changed_ranges,
-                ),
-                run_id=run_id,
-                source_snapshot=source_snapshot,
-                planning_policy=ROUTER_POLICY,
-                slice_ids=slice_ids,
-                target_node_ids=target_node_ids,
-                target_signal_ids=target_signal_ids,
-                changed_line_ranges=local_changed_ranges,
-                seed_file=path,
-                files=(path,),
-                hunter=hunter,
-                risk=risk,
-                required=bool(critical_local),
-                routing_reasons=tuple(sorted(set(focus_reasons))),
-            ))
+                    risk=risk,
+                    required=bool(critical_local),
+                    routing_reasons=tuple(sorted(set(focus_reasons))),
+                ))
 
     covered = {
         signal.signal_id
@@ -195,6 +230,47 @@ def _active_critical_ids(
         active = set(incremental.get("critical_sink_ids", []))
         return tuple(sorted(active & set(graph.critical_sink_ids)))
     return graph.critical_sink_ids
+
+
+def _target_batches(
+    *,
+    path: str,
+    target_node_ids: tuple[str, ...],
+    target_signal_ids: tuple[str, ...],
+) -> tuple[RoutingTargetBatch, ...]:
+    """Chunk every explicit target before HunterWorkItem validation."""
+    nodes = tuple(sorted(dict.fromkeys(target_node_ids)))
+    signals = tuple(sorted(dict.fromkeys(target_signal_ids)))
+    node_chunks = tuple(
+        nodes[index:index + MAX_HUNTER_TARGET_NODES]
+        for index in range(0, len(nodes), MAX_HUNTER_TARGET_NODES)
+    ) or ((),)
+    signal_chunks = tuple(
+        signals[index:index + MAX_HUNTER_TARGET_SIGNALS]
+        for index in range(0, len(signals), MAX_HUNTER_TARGET_SIGNALS)
+    ) or ((),)
+    count = max(len(node_chunks), len(signal_chunks))
+    batches = []
+    for index in range(count):
+        batch_nodes = node_chunks[index] if index < len(node_chunks) else ()
+        batch_signals = signal_chunks[index] if index < len(signal_chunks) else ()
+        identity = json.dumps(
+            {
+                "path": path,
+                "target_node_ids": batch_nodes,
+                "target_signal_ids": batch_signals,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        batches.append(RoutingTargetBatch(
+            coverage_group=hashlib.sha256(identity.encode()).hexdigest()[:20],
+            index=index,
+            count=count,
+            target_node_ids=batch_nodes,
+            target_signal_ids=batch_signals,
+        ))
+    return tuple(batches)
 
 
 def _route_file(

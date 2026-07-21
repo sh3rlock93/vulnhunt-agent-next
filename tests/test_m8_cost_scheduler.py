@@ -859,6 +859,127 @@ def test_signal_router_reduces_libcue_shape_and_covers_critical_sink(
     }
 
 
+def test_full_router_prevalidates_dense_targets_without_truncation() -> None:
+    node = GraphNode(
+        node_id="dense.c::convert@1",
+        path="dense.c",
+        symbol="convert",
+        line=1,
+        end_line=400,
+        kind=NodeKind.FUNCTION,
+        visibility="external",
+    )
+    signals = tuple(
+        SecuritySignal(
+            signal_id=f"sig-dense-{index:03d}",
+            node_id=node.node_id,
+            path=node.path,
+            line=index + 2,
+            role=SignalRole.SINK,
+            category="allocation_size",
+            operation="malloc",
+            risk=4,
+        )
+        for index in range(293)
+    )
+    slices = tuple(
+        AnalysisSlice(
+            slice_id=f"slice-dense-{index:03d}",
+            entrypoint_id=node.node_id,
+            sink_signal_id=signal.signal_id,
+            node_ids=(node.node_id,),
+            files=(node.path,),
+            categories=(signal.category,),
+            risk=4,
+            rationale="dense target fixture",
+        )
+        for index, signal in enumerate(signals)
+    )
+
+    def route(*, reverse: bool) -> HunterRoutingPlan:
+        ordered_signals = tuple(reversed(signals)) if reverse else signals
+        ordered_slices = tuple(reversed(slices)) if reverse else slices
+        graph = CAnalysisGraph(
+            nodes=(node,),
+            signals=ordered_signals,
+            entrypoint_ids=(node.node_id,),
+            critical_sink_ids=tuple(
+                signal.signal_id for signal in ordered_signals
+            ),
+        )
+        coverage = CoveragePlan(
+            slices=ordered_slices,
+            selected_files=(node.path,),
+            covered_entrypoint_ids=(node.node_id,),
+            covered_sink_ids=tuple(
+                signal.signal_id for signal in ordered_signals
+            ),
+        )
+        return build_routing_plan(
+            run_id="run-dense",
+            source_snapshot=HASH_A,
+            selected_files=[node.path],
+            enabled_hunters=["c-bounds-integers"],
+            analysis={
+                "language": "c",
+                "graph": graph.model_dump(mode="json"),
+                "coverage_plan": coverage.model_dump(mode="json"),
+            },
+        )
+
+    first = route(reverse=False)
+    second = route(reverse=True)
+
+    assert first == second
+    assert first.policy_version == "c-signal-router-v3"
+    assert len(first.work_items) == 49
+    assert len({item.work_id for item in first.work_items}) == 49
+    assert all(len(item.target_signal_ids) <= 6 for item in first.work_items)
+    assert {
+        signal_id
+        for item in first.work_items
+        for signal_id in item.target_signal_ids
+    } == {signal.signal_id for signal in signals}
+    assert all(
+        any(reason.startswith("coverage-group:") for reason in item.routing_reasons)
+        for item in first.work_items
+    )
+
+    bounded = build_slice_work_items(first, {
+        "coverage_plan": CoveragePlan(
+            slices=slices,
+            selected_files=(node.path,),
+            covered_entrypoint_ids=(node.node_id,),
+            covered_sink_ids=tuple(signal.signal_id for signal in signals),
+        ).model_dump(mode="json"),
+    })
+    assert len(bounded) == 49
+    assert all(item.planning_policy == "c-slice-work-v4" for item in bounded)
+    assert all(len(item.target_signal_ids) <= 6 for item in bounded)
+    assert {
+        signal_id
+        for item in bounded
+        for signal_id in item.target_signal_ids
+    } == {signal.signal_id for signal in signals}
+
+
+def test_work_contract_rejects_targets_above_prompt_bounds() -> None:
+    base = build_shadow_plan(
+        run_id="run-bounds",
+        source_snapshot=HASH_A,
+        selected_files=["dense.c"],
+        hunters=["c-bounds-integers"],
+        analysis={},
+    )[0]
+    payload = base.model_dump()
+    payload["target_signal_ids"] = tuple(
+        f"sig-{index}" for index in range(7)
+    )
+
+    with pytest.raises(ValidationError):
+        HunterWorkItem.model_validate(payload)
+
+
 def test_critical_specialist_is_forced_even_when_not_manually_enabled() -> None:
     node = GraphNode(
         node_id="format.c::log_user@1",

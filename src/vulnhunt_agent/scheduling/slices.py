@@ -5,14 +5,19 @@ import hashlib
 from dataclasses import dataclass
 
 from ..analysis.models import AnalysisSlice, CoveragePlan
-from ..domain.schemas import HunterRoutingPlan, HunterWorkItem
+from ..domain.schemas import (
+    MAX_HUNTER_TARGET_NODES,
+    MAX_HUNTER_TARGET_SIGNALS,
+    HunterRoutingPlan,
+    HunterWorkItem,
+)
 from .shadow import work_id_for
 
-SLICE_WORK_POLICY = "c-slice-work-v3"
+SLICE_WORK_POLICY = "c-slice-work-v4"
 MAX_CONTEXT_FILES = 8
 MAX_SLICES_PER_WORK = 6
-MAX_TARGET_NODES_PER_WORK = 4
-MAX_TARGET_SIGNALS_PER_WORK = 6
+MAX_TARGET_NODES_PER_WORK = MAX_HUNTER_TARGET_NODES
+MAX_TARGET_SIGNALS_PER_WORK = MAX_HUNTER_TARGET_SIGNALS
 
 
 @dataclass(frozen=True)
@@ -69,21 +74,11 @@ def build_slice_work_items(
                     node_id
                     for item in ordered_members
                     for node_id in item.target_node_ids
-                    if any(
-                        node_id in slices[slice_id].node_ids
-                        for slice_id in slice_ids
-                        if slice_id in slices
-                    )
                 }))[:MAX_TARGET_NODES_PER_WORK]
                 target_signal_ids = tuple(sorted({
                     signal_id
                     for item in ordered_members
                     for signal_id in item.target_signal_ids
-                    if any(
-                        signal_id == slices[slice_id].sink_signal_id
-                        for slice_id in slice_ids
-                        if slice_id in slices
-                    )
                 }))[:MAX_TARGET_SIGNALS_PER_WORK]
                 changed_line_ranges = _merge_changed_ranges(ordered_members)
                 out.append(HunterWorkItem(

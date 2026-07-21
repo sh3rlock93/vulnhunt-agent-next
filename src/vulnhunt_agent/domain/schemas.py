@@ -360,6 +360,10 @@ class RunRecord(DomainModel):
     updated_at: datetime = Field(default_factory=utc_now)
 
 
+MAX_HUNTER_TARGET_NODES = 4
+MAX_HUNTER_TARGET_SIGNALS = 6
+
+
 class HunterWorkItem(DomainModel):
     """Stable unit of Hunter scheduling, independent of its queue backend."""
 
@@ -368,8 +372,14 @@ class HunterWorkItem(DomainModel):
     source_snapshot: str = Field(pattern=SHA256_PATTERN)
     planning_policy: str = Field(min_length=1)
     slice_ids: tuple[str, ...] = ()
-    target_node_ids: tuple[str, ...] = Field(default=(), max_length=128)
-    target_signal_ids: tuple[str, ...] = Field(default=(), max_length=128)
+    target_node_ids: tuple[str, ...] = Field(
+        default=(),
+        max_length=MAX_HUNTER_TARGET_NODES,
+    )
+    target_signal_ids: tuple[str, ...] = Field(
+        default=(),
+        max_length=MAX_HUNTER_TARGET_SIGNALS,
+    )
     changed_line_ranges: dict[str, tuple[tuple[int, int], ...]] = Field(
         default_factory=dict,
         max_length=32,
