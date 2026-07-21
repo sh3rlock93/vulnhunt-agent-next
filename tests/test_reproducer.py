@@ -3,11 +3,14 @@ from __future__ import annotations
 import pytest
 
 from tests.factories import HASH_B, candidate
+from vulnhunt_agent.core.llm import LLMResponse
 from vulnhunt_agent.domain.schemas import (
     OracleSpec,
     OracleType,
     PocSpec,
     ReproductionSpec,
+    ReproductionVariantRequest,
+    ReproductionVariantType,
     ReviewVerdict,
     RunRecord,
     Verdict,
@@ -21,6 +24,13 @@ from vulnhunt_agent.reproduction.service import (
     ReproductionStatus,
     ReproducerService,
 )
+from vulnhunt_agent.reproduction.variants import (
+    LLMVariantCompiler,
+    ReproductionVariantExecutor,
+    VariantExecutionPatch,
+    compile_variant_spec,
+)
+from vulnhunt_agent.reviewing.service import EvidenceReviewCoordinator
 from vulnhunt_agent.sandbox.base import ExecResult, SandboxExecution, SandboxJob
 
 
@@ -40,6 +50,44 @@ class FakeSandboxBackend:
 class BrokenSandboxBackend:
     async def execute(self, job: SandboxJob) -> SandboxExecution:
         raise RuntimeError("sandbox runtime unavailable")
+
+
+class SafeInputCompiler:
+    async def compile(self, request, base):
+        return compile_variant_spec(
+            request,
+            base,
+            VariantExecutionPatch(
+                argv=(*base.argv, "--safe-control"),
+                env_overrides={},
+                oracle=OracleSpec(
+                    type=OracleType.STDOUT_REGEX,
+                    pattern=r"SAFE_CONTROL=1",
+                ),
+            ),
+        )
+
+
+class FakeVariantCompileClient:
+    def __init__(self) -> None:
+        self.prompt = ""
+
+    async def chat(self, **kwargs) -> LLMResponse:
+        self.prompt = kwargs["messages"][0]["content"][0]["text"]
+        text = (
+            '{"argv":["python","/workspace/poc/poc.py","--safe"],'
+            '"env_overrides":{},"oracle":{"type":"exit_code",'
+            '"expected_exit_code":0}}'
+        )
+        return LLMResponse(
+            text=text,
+            input_tokens=10,
+            output_tokens=10,
+            cache_read_tokens=0,
+            cache_write_tokens=0,
+            stop_reason="end_turn",
+            content_blocks=[{"text": text}],
+        )
 
 
 async def test_reproducer_runs_twice_persists_evidence_and_unlocks_strict_report(
@@ -170,6 +218,127 @@ async def test_reproducer_distinguishes_environment_failure(tmp_path) -> None:
         repository, artifacts, retry_backend
     ).reproduce(spec.model_copy(update={"reproduction_id": "repro-cand-1-v2"}))
     assert retry.status is ReproductionStatus.REPRODUCED
+    repository.close()
+
+
+async def test_variant_executor_leases_runs_twice_and_preserves_finding_state(
+    tmp_path,
+) -> None:
+    repository, artifacts, spec = _prepared_candidate(tmp_path)
+    original = FakeSandboxBackend([
+        ExecResult(exit_code=0, stdout="LEAKED_SECRET=1", stderr=""),
+        ExecResult(exit_code=0, stdout="LEAKED_SECRET=1", stderr=""),
+    ])
+    await ReproducerService(repository, artifacts, original).reproduce(spec)
+    request = ReproductionVariantRequest(
+        request_id="variant-safe-control",
+        run_id="run-1",
+        candidate_id="cand-1",
+        reviewer="reviewer-a",
+        base_reproduction_group=spec.reproduction_id,
+        variant_type=ReproductionVariantType.SAFE_INPUT,
+        rationale="A negative control distinguishes the vulnerable path.",
+        requested_change="Use the PoC safe-control input.",
+    )
+    EvidenceReviewCoordinator(repository, artifacts).request_variant(request)
+    backend = FakeSandboxBackend([
+        ExecResult(exit_code=0, stdout="SAFE_CONTROL=1", stderr=""),
+        ExecResult(exit_code=0, stdout="SAFE_CONTROL=1", stderr=""),
+    ])
+    executor = ReproductionVariantExecutor(
+        repository,
+        artifacts,
+        backend,
+        SafeInputCompiler(),
+        worker_id="variant-test-worker",
+    )
+
+    result = await executor.execute(request)
+
+    assert result.outcome.status is ReproductionStatus.REPRODUCED
+    assert len(result.outcome.evidence) == 2
+    assert len(backend.jobs) == 2
+    assert all(job.argv[-1] == "--safe-control" for job in backend.jobs)
+    finding = repository.get_candidate("cand-1")
+    assert finding is not None and finding.state is FindingState.REPRODUCED
+    assert len(finding.evidence_ids) == 4
+    task = next(
+        item for item in repository.list_tasks("run-1")
+        if item["task_type"] == "reproduction_variant"
+    )
+    assert task["status"] == "reproduced"
+    assert task["attempt"] == 1
+
+    replay = await executor.execute(request)
+    assert replay.outcome.status is ReproductionStatus.REPRODUCED
+    assert len(backend.jobs) == 2
+    repository.close()
+
+
+def test_variant_compiler_cannot_change_executable_or_reuse_fixed_snapshot(
+    tmp_path,
+) -> None:
+    repository, _, base = _prepared_candidate(tmp_path)
+    safe_request = ReproductionVariantRequest(
+        request_id="variant-safe",
+        run_id="run-1",
+        candidate_id="cand-1",
+        reviewer="reviewer-a",
+        base_reproduction_group=base.reproduction_id,
+        variant_type=ReproductionVariantType.SAFE_INPUT,
+        rationale="Run a safe control.",
+        requested_change="Use safe input.",
+    )
+    with pytest.raises(ValueError, match="executable"):
+        compile_variant_spec(
+            safe_request,
+            base,
+            VariantExecutionPatch(
+                argv=("sh", "-c", "echo unsafe"),
+                env_overrides={},
+                oracle=base.oracle,
+            ),
+        )
+    fixed_request = safe_request.model_copy(update={
+        "variant_type": ReproductionVariantType.FIXED_REVISION,
+    })
+    with pytest.raises(ValueError, match="fixed_revision"):
+        compile_variant_spec(
+            fixed_request,
+            base,
+            VariantExecutionPatch(
+                argv=(*base.argv, "--fixed"),
+                env_overrides={},
+                oracle=base.oracle,
+            ),
+        )
+    repository.close()
+
+
+async def test_llm_variant_compiler_does_not_receive_environment_values(
+    tmp_path,
+) -> None:
+    repository, _, base = _prepared_candidate(tmp_path)
+    base = base.model_copy(update={
+        "env": {**base.env, "API_TOKEN": "supersecret-value"},
+    })
+    request = ReproductionVariantRequest(
+        request_id="variant-redacted",
+        run_id="run-1",
+        candidate_id="cand-1",
+        reviewer="reviewer-a",
+        base_reproduction_group=base.reproduction_id,
+        variant_type=ReproductionVariantType.SAFE_INPUT,
+        rationale="Run a safe control.",
+        requested_change="Use safe input.",
+    )
+    client = FakeVariantCompileClient()
+
+    compiled = await LLMVariantCompiler(client).compile(request, base)
+
+    assert "supersecret-value" not in client.prompt
+    assert "API_TOKEN" in client.prompt
+    assert compiled.env["API_TOKEN"] == "supersecret-value"
     repository.close()
 
 

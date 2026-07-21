@@ -11,8 +11,13 @@ from tests.factories import HASH_B
 from vulnhunt_agent.core.llm import LLMClient, LLMResponse
 from vulnhunt_agent.core.run_store import RunStore
 from vulnhunt_agent.core.v2_run import ensure_source_snapshot, v2_artifact_store
+from vulnhunt_agent.domain.schemas import OracleSpec, OracleType
 from vulnhunt_agent.infrastructure.sqlite_repository import SqliteRepository
 from vulnhunt_agent.reviewing.agent import EvidenceReviewerAgent
+from vulnhunt_agent.reproduction.variants import (
+    VariantExecutionPatch,
+    compile_variant_spec,
+)
 from vulnhunt_agent.sandbox.base import ExecResult, SandboxExecution, SandboxJob
 from vulnhunt_agent.verification.recipe import validate_recorded_recipe
 from vulnhunt_agent.verification.service import VerifiedPipelineService
@@ -71,6 +76,54 @@ class EvidenceCitingClient:
             cache_write_tokens=0,
             stop_reason="end_turn",
             content_blocks=[{"text": text}],
+        )
+
+
+class VariantThenRealClient(EvidenceCitingClient):
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def chat(self, **kwargs) -> LLMResponse:
+        self.calls += 1
+        if self.calls == 1:
+            payload = {
+                "verdict": "unclear",
+                "notes": "A safe control is required.",
+                "cvss_vector": "",
+                "cwe_id": "",
+                "evidence_ids": [],
+                "variant_request": {
+                    "variant_type": "safe_input",
+                    "rationale": "Separate the trigger from startup failure.",
+                    "requested_change": "Run the PoC with its safe-control input.",
+                },
+            }
+            text = json.dumps(payload)
+            return LLMResponse(
+                text=text,
+                input_tokens=100,
+                output_tokens=30,
+                cache_read_tokens=0,
+                cache_write_tokens=0,
+                stop_reason="end_turn",
+                content_blocks=[{"text": text}],
+            )
+        return await super().chat(**kwargs)
+
+
+class PipelineSafeInputCompiler:
+    async def compile(self, request, base):
+        return compile_variant_spec(
+            request,
+            base,
+            VariantExecutionPatch(
+                argv=(*base.argv, "--safe-control"),
+                env_overrides={},
+                oracle=OracleSpec(
+                    type=OracleType.EXIT_CODE,
+                    expected_exit_code=1,
+                ),
+            ),
         )
 
 
@@ -215,6 +268,82 @@ async def test_verified_pipeline_reproduces_reviews_reports_and_resumes(
     assert replay.states == {"reportable": 1}
     assert replay.reports == 1
     assert len(backend.jobs) == 2
+    repository.close()
+
+
+async def test_verified_pipeline_executes_variant_and_automatically_rereviews(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "target.c").write_text(
+        "void target(int *values) { values[100] = 7; }\n"
+    )
+    store = RunStore(tmp_path / "run-m9-variant")
+    store.save_config({
+        "repo_path": str(source),
+        "repo_source": "https://example.test/native.git",
+        "ref": "deadbeef",
+    })
+    ensure_source_snapshot(store)
+    hunt_dir = store.dir / "hunters" / "h1" / "hunts" / "task-1"
+    pocs = hunt_dir / "pocs"
+    pocs.mkdir(parents=True)
+    (pocs / "poc.c").write_text(
+        "void target(int *); int main(void) { int v[1]; target(v); }\n"
+    )
+    (hunt_dir / "findings.json").write_text(
+        json.dumps(_hunt_payload(_finding()))
+    )
+    backend = FakeNativeBackend()
+    client = VariantThenRealClient()
+    reviewers = [
+        EvidenceReviewerAgent(
+            client=cast(LLMClient, client),
+            reviewer="reviewer-a",
+            model_id="fake",
+            prompt_variant="challenge reachability",
+        ),
+        EvidenceReviewerAgent(
+            client=cast(LLMClient, client),
+            reviewer="reviewer-b",
+            model_id="fake",
+            prompt_variant="challenge impact",
+        ),
+    ]
+    repository = SqliteRepository(store.dir / "state.db")
+    summary = await VerifiedPipelineService(
+        repository,
+        v2_artifact_store(store),
+        backend,
+        reviewers,
+        output_root=store.dir / "verified",
+        variant_compiler=PipelineSafeInputCompiler(),
+    ).verify(
+        run_id=store.dir.name,
+        run_dir=store.dir,
+        image="scanner/prepared:m9-variant",
+    )
+
+    assert summary.variants_executed == 1
+    assert summary.variants_failed == 0
+    assert summary.automatic_rereviews == 1
+    assert summary.states == {"reportable": 1}
+    assert summary.reports == 1
+    assert summary.errors == ()
+    assert client.calls == 3
+    assert len(backend.jobs) == 4
+    assert [job.argv[-1] for job in backend.jobs[2:]] == [
+        "--safe-control",
+        "--safe-control",
+    ]
+    variant = next(
+        task for task in repository.list_tasks(store.dir.name)
+        if task["task_type"] == "reproduction_variant"
+    )
+    assert variant["status"] == "reproduced"
+    candidate = repository.list_candidates(store.dir.name)[0]
+    assert len(repository.list_candidate_evidence(candidate.candidate_id)) >= 5
     repository.close()
 
 

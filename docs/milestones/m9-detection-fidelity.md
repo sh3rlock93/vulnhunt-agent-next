@@ -1,6 +1,6 @@
 # M9 — Detection fidelity and closed-loop verification
 
-Status: In progress (4 of 6 increments)
+Status: In progress (5 of 6 increments)
 
 ## Goal
 
@@ -95,7 +95,32 @@ size. Run summaries expose finding/no-finding/deferred/missing target counts.
 - [x] Durable summaries fail the completion flag for missing/deferred targets.
 - [x] Vulnerable and fixed libcue gates retain 72.22% session reduction.
 
+## PR 5 — Leased reproduction variants and automatic re-review
+
+Pending `reproduction_variant` tasks are now executable closed-loop work. A
+no-tool compiler converts the Reviewer's declarative intent into a narrow
+`argv`, environment-override, and oracle patch. Code validation fixes the
+executable, PoC, setup commands, source snapshot, image, working directory,
+timeout, and capture contract before a sandbox can start. Environment values
+are not sent to the compiler.
+
+The Reproducer acquires the existing SQLite variant lease, heartbeats it across
+two clean attempts, persists the new evidence group, and leaves finding-state
+authority with consensus. Completed variants replay from evidence without a
+second sandbox execution. The verified pipeline automatically rebuilds the
+evidence packet and re-runs the requesting Reviewer, with a two-variant ceiling.
+`fixed_revision` fails closed until an independently approved snapshot exists.
+
+## PR 5 acceptance gates
+
+- [x] Declarative tasks never contain an executable command.
+- [x] Compiled variants cannot change executable, PoC, setup, image, or snapshot.
+- [x] A variant is leased, heartbeated, and executed twice in clean sandboxes.
+- [x] Variant evidence is attached without direct finding-state mutation.
+- [x] Terminal variant replay does not execute the sandbox again.
+- [x] New evidence triggers automatic re-review and can close strict reporting.
+- [x] Compiler failure and unsupported fixed revisions finish fail-closed.
+
 ## Remaining increments
 
-5. Leased reproduction-variant execution and automatic re-review.
 6. Pinned zlib vulnerable/fixed benchmark and final operational gates.
