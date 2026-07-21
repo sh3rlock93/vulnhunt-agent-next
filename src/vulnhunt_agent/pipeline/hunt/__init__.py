@@ -409,8 +409,10 @@ async def run_hunt(store: RunStore, bus: EventBus) -> None:
 
     await asyncio.gather(*[
         run_work(task)
-        for task in queue.tasks
-        if task.work_id in admitted_ids
+        for task in _tasks_in_admission_order(
+            queue.tasks,
+            allocation.admitted_work_ids,
+        )
     ])
     with SqliteRepository(store.dir / "state.db", read_only=True) as repository:
         persisted_usage = repository.list_budget_usage(
@@ -453,6 +455,19 @@ def _resolve_hunter_selection(steps_dir: Path, language: str) -> list[str]:
         hunter.name
         for hunter in hunters_for(language)
         if hunter.default
+    ]
+
+
+def _tasks_in_admission_order(
+    tasks: list[HuntTask],
+    admitted_work_ids: tuple[str, ...],
+) -> list[HuntTask]:
+    """Launch work in the exact persisted admission-rank order."""
+    by_work_id = {task.work_id: task for task in tasks}
+    return [
+        by_work_id[work_id]
+        for work_id in admitted_work_ids
+        if work_id in by_work_id
     ]
 
 

@@ -1,6 +1,6 @@
 # M10 — Blind native vulnerability discovery at repository scale
 
-Status: In progress — PR 6 complete
+Status: PR 7 implemented and release gates verified; pending merge
 
 ## Goal
 
@@ -394,16 +394,39 @@ findings, evidence subject, deferred critical targets, and oracle-access audit.
 
 ### PR 7 acceptance gates
 
-- [ ] The vulnerable and fixed Git trees match their pinned upstream commits.
-- [ ] Discovery completes without opening or receiving the oracle manifest.
-- [ ] Frozen artifacts and their SHA-256 manifest verify before evaluation.
-- [ ] The vulnerable target is found within 24 sessions and the fixed budget.
-- [ ] Two clean attempts reproduce the defect in the prepared target binary.
-- [ ] The fixed tree rejects the trigger or runs without matching sanitizer evidence.
-- [ ] The post-freeze fixed-tree negative control has no equivalent confirmed result.
-- [ ] Deterministic CI runs without API or subscription credentials.
-- [ ] Authenticated results record adapter, model, policies, cost, and run identity.
-- [ ] All M8, M9, Docker, and domain-contract regressions remain green.
+- [x] The vulnerable and fixed Git trees match their pinned upstream commits.
+- [x] Discovery completes without opening or receiving the oracle manifest.
+- [x] Frozen artifacts and their SHA-256 manifest verify before evaluation.
+- [x] The vulnerable target is found within 24 sessions and the fixed budget.
+- [x] Two clean attempts reproduce the defect in the prepared target binary.
+- [x] The fixed tree rejects the trigger or runs without matching sanitizer evidence.
+- [x] The post-freeze fixed-tree negative control has no equivalent confirmed result.
+- [x] Deterministic CI runs without API or subscription credentials.
+- [x] Authenticated results record adapter, model, policies, cost, and run identity.
+- [x] All M8, M9, Docker, and domain-contract regressions remain green.
+
+### Verified blind run — 2026-07-21
+
+Run `libtiff-blind-native-v1-20260721T080023Z-beeaaae9` used the Codex
+subscription adapter with `gpt-5.6-sol`. Before freeze it received only scan
+manifest SHA-256
+`5c1ceb10a3976bad045a294336ad5996282b93efa5d8d017e92f0781169ddf5d`,
+the pinned vulnerable tree, and prepared image metadata. Its access audit
+records no oracle or fixed-tree input and no denied oracle access attempt.
+
+The general risk-chain scheduler admitted `tools/raw2tiff.c` at rank 1. Codex
+reported the exact `width * nbands * depth` wrap and the allocation-to-`memcpy`
+path from line 128 to line 328 in its first bounds-Hunter call, 68 seconds and
+19,282 input tokens after the run began. The complete
+run used 22 sessions, 53 calls, 1,682,216 uncached input tokens, 269,568 cache
+read tokens, and 41,112 output tokens. The frozen root is
+`4f3e312b979fcf7f739c9c64cf945e436bd8543ec0506edc0beeabdc9624aafc`.
+
+Post-freeze evaluation matched that model finding to the withheld oracle. Two
+new clean prepared-target containers reproduced `heap-buffer-overflow` at
+`/code/tools/raw2tiff.c:328`; two clean fixed-tree containers rejected the same
+trigger with `Too large width size specified` and no sanitizer failure. Every
+evaluation check passed.
 
 ## Verification matrix
 

@@ -1,0 +1,42 @@
+[benchmark]
+schema_version = 1
+id = "libtiff-blind-native-v1"
+oracle_policy = "blind-oracle-v1"
+
+[source]
+repository = "https://gitlab.com/libtiff/libtiff.git"
+commit = "cb88a5b6bf1757060ec4d50055fa852fd7830cfe"
+tree = "41d6d3775738d3dae27fcdc5d74c131aaff443e3"
+
+[scan]
+environment = "c:gcc-13"
+hunters = [
+  "c-bounds-integers",
+  "c-memory-lifetime",
+  "c-parser-state",
+  "c-injection-format",
+  "c-concurrency-state",
+  "c-error-contracts",
+]
+
+[policies]
+signal_router = "c-signal-router-v3"
+risk_chain = "c-risk-chain-v1"
+slice_work = "c-slice-work-v4"
+context = "c-context-v4"
+admission = "c-diverse-admission-v1"
+evidence = "native-evidence-v2"
+model_protocol = "strict-tool-json-v3"
+
+[budget]
+max_hunter_sessions = 24
+max_input_tokens = 2000000
+max_output_tokens = 200000
+max_wall_clock_minutes = 60
+max_retries_per_work_item = 1
+max_format_repairs_per_work_item = 1
+
+[limits]
+max_target_signals_per_work = 6
+max_context_bytes = 24000
+max_parallel_hunters = 2
