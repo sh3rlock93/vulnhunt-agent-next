@@ -135,6 +135,23 @@ reproduction resume are documented in
 Signal routing, bounded slice work, hard budgets, shared context packets, and
 Git-diff incremental scans are documented in
 [`docs/milestones/m8-cost-aware-scheduler.md`](docs/milestones/m8-cost-aware-scheduler.md).
+The LibTIFF repository-scale blind benchmark keeps scanner input and CVE
+ground truth in separate manifests and enforces `discover`, `freeze`, then
+`evaluate` as separate commands. Run its credential-free planning gate with:
+
+```bash
+python benchmarks/run_libtiff_blind_benchmark.py discover \
+  --repo /path/to/pinned-libtiff \
+  --scan-manifest benchmarks/libtiff-blind-scan.toml \
+  --output /tmp/libtiff-discovery --mode deterministic
+python benchmarks/run_libtiff_blind_benchmark.py freeze \
+  --discovery /tmp/libtiff-discovery --frozen /tmp/libtiff-frozen
+```
+
+Only the later `evaluate` command accepts
+`benchmarks/oracles/libtiff-cve-2023-41175.toml` and a fixed tree. The full
+authenticated procedure and fixed budgets are documented in
+[`docs/milestones/m10-blind-native-discovery.md`](docs/milestones/m10-blind-native-discovery.md).
 
 The evidence-review and strict-export contract is documented in
 [`docs/milestones/m4-evidence-review-reporting.md`](docs/milestones/m4-evidence-review-reporting.md).
