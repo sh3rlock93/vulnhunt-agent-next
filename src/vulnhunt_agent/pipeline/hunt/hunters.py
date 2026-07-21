@@ -7,7 +7,9 @@ from dataclasses import asdict
 from pathlib import Path
 
 from ...agents import HunterAgent
+from ...agents.hunter import HuntResult
 from ...agents.tools import HunterTools
+from ...core.model_errors import ModelClientError
 from ...domain.schemas import BudgetUsage, HunterWorkItem
 from ...prompts import hunter_by_name
 from ...sandbox import ContainerExecutor
@@ -45,11 +47,29 @@ async def run_hunters(
             bus.emit("hunter_start", file=task.file, hunter=name)
             hunt_dir = qstore.hunt_dir(task, name)
             trace = (hunt_dir / "trace.jsonl").open("a")
+            checkpoint_path = hunt_dir / "usage-checkpoint.json"
+            initial_metrics = _load_usage_checkpoint(checkpoint_path)
+            prior_wall_time_ms = int(initial_metrics.get("wall_time_ms", 0))
 
             def on_event(event_type, **data):
                 return trace.write(
                     json.dumps({"type": event_type, **data}, ensure_ascii=False) + "\n"
                 )
+
+            def on_checkpoint(result) -> None:
+                payload = {
+                    field: getattr(result, field)
+                    for field in _CHECKPOINT_FIELDS
+                }
+                payload["wall_time_ms"] = prior_wall_time_ms + max(
+                    0,
+                    int((time.monotonic() - started) * 1000),
+                )
+                payload["model_id"] = str(getattr(client, "model_id", "unknown"))
+                payload["transport"] = str(
+                    getattr(client, "transport", "bedrock_converse")
+                )
+                _write_usage_checkpoint(checkpoint_path, payload)
 
             sandbox = (
                 ContainerExecutor(repo=repo, image=image, source_baked=True)
@@ -68,6 +88,8 @@ async def run_hunters(
                     max_iterations=max_iter,
                     max_tokens_per_call=max_tokens_per_call,
                     on_event=on_event,
+                    initial_metrics=initial_metrics,
+                    on_checkpoint=on_checkpoint,
                 )
                 result = await agent.hunt(task.file, analysis_context)
                 if result.findings:
@@ -89,25 +111,15 @@ async def run_hunters(
                     )
                 work_item = (work_items or {}).get(name)
                 if work_item is not None:
-                    usage_items.append(with_estimated_cost(BudgetUsage(
-                        run_id=work_item.run_id,
-                        work_id=work_item.work_id,
-                        scope="hunter",
-                        model_id=str(getattr(client, "model_id", "unknown")),
-                        transport=str(getattr(client, "transport", "bedrock_converse")),
-                        sessions=1,
-                        calls=result.iterations,
-                        iterations=result.iterations,
-                        input_tokens=result.input_tokens,
-                        output_tokens=result.output_tokens,
-                        cache_read_tokens=result.cache_read_tokens,
-                        cache_write_tokens=result.cache_write_tokens,
-                        tool_calls=result.tool_calls,
-                        repeated_reads=result.repeated_reads,
-                        poc_writes=result.poc_writes,
-                        exec_calls=result.exec_calls,
-                        wall_time_ms=max(0, int((time.monotonic() - started) * 1000)),
-                    )))
+                    usage_items.append(_usage_for_result(
+                        result,
+                        work_item,
+                        client,
+                        wall_time_ms=prior_wall_time_ms + max(
+                            0,
+                            int((time.monotonic() - started) * 1000),
+                        ),
+                    ))
                 bus.emit(
                     "hunter_deferred"
                     if result.stopped == "budget_exhausted" or result.incomplete_target_ids
@@ -121,6 +133,26 @@ async def run_hunters(
                 )
                 out[name] = result.findings
             except Exception as e:
+                if isinstance(e, ModelClientError):
+                    bus.emit(
+                        "hunter_model_failure",
+                        file=task.file,
+                        hunter=name,
+                        category=e.category.value,
+                        retryable=e.retryable,
+                    )
+                    partial = e.partial_result
+                    work_item = (work_items or {}).get(name)
+                    if isinstance(partial, HuntResult) and work_item is not None:
+                        usage_items.append(_usage_for_result(
+                            partial,
+                            work_item,
+                            client,
+                            wall_time_ms=prior_wall_time_ms + max(
+                                0,
+                                int((time.monotonic() - started) * 1000),
+                            ),
+                        ))
                 qstore.mark_hunt_failed(task, name, error=str(e))
                 bus.emit("hunter_failed", file=task.file, hunter=name, error=str(e))
             finally:
@@ -134,6 +166,66 @@ async def run_hunters(
     import asyncio
     await asyncio.gather(*[one(s.name) for s in task.hunters])
     return out, usage_items, deferred
+
+
+_CHECKPOINT_FIELDS = (
+    "iterations",
+    "input_tokens",
+    "output_tokens",
+    "cache_read_tokens",
+    "cache_write_tokens",
+    "tool_calls",
+    "repeated_reads",
+    "poc_writes",
+    "exec_calls",
+    "tool_argument_errors",
+    "protocol_repairs",
+    "protocol_repair_successes",
+    "transient_retries",
+    "model_failures",
+)
+
+
+def _load_usage_checkpoint(path: Path) -> dict:
+    try:
+        payload = json.loads(path.read_text()) if path.is_file() else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _write_usage_checkpoint(path: Path, payload: dict) -> None:
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(json.dumps(payload, sort_keys=True, separators=(",", ":")))
+    temporary.replace(path)
+
+
+def _usage_for_result(
+    result: HuntResult,
+    work_item: HunterWorkItem,
+    client,
+    *,
+    wall_time_ms: int,
+) -> BudgetUsage:
+    return with_estimated_cost(BudgetUsage(
+        run_id=work_item.run_id,
+        work_id=work_item.work_id,
+        scope="hunter",
+        model_id=str(getattr(client, "model_id", "unknown")),
+        transport=str(getattr(client, "transport", "bedrock_converse")),
+        sessions=1,
+        calls=result.iterations,
+        iterations=result.iterations,
+        input_tokens=result.input_tokens,
+        output_tokens=result.output_tokens,
+        cache_read_tokens=result.cache_read_tokens,
+        cache_write_tokens=result.cache_write_tokens,
+        tool_calls=result.tool_calls,
+        repeated_reads=result.repeated_reads,
+        poc_writes=result.poc_writes,
+        exec_calls=result.exec_calls,
+        wall_time_ms=wall_time_ms,
+    ))
 
 
 def flatten(by_name: dict[str, list[dict]]) -> tuple[list[dict], list[str]]:

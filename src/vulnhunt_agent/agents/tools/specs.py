@@ -14,6 +14,7 @@ READ_TOOLS = [
                     "end": {"type": "integer", "description": "Inclusive end line. Omit for full file."},
                 },
                 "required": ["path"],
+                "additionalProperties": False,
             }},
         }
     },
@@ -29,6 +30,7 @@ READ_TOOLS = [
                     "max_results": {"type": "integer", "default": 100},
                 },
                 "required": ["pattern"],
+                "additionalProperties": False,
             }},
         }
     },
@@ -42,6 +44,7 @@ READ_TOOLS = [
                     "path": {"type": "string", "description": "Relative dir path."},
                 },
                 "required": ["path"],
+                "additionalProperties": False,
             }},
         }
     },
@@ -61,6 +64,7 @@ POC_READ_TOOL = {
                 "path": {"type": "string", "description": "Relative path under PoC dir."},
             },
             "required": ["path"],
+            "additionalProperties": False,
         }},
     }
 }
@@ -83,6 +87,7 @@ SANDBOX_TOOLS = [
                     "content": {"type": "string"},
                 },
                 "required": ["path", "content"],
+                "additionalProperties": False,
             }},
         }
     },
@@ -111,6 +116,7 @@ SANDBOX_TOOLS = [
                     "timeout": {"type": "integer", "default": 60},
                 },
                 "required": ["argv"],
+                "additionalProperties": False,
             }},
         }
     },

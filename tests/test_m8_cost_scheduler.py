@@ -22,6 +22,7 @@ from vulnhunt_agent.analysis import (
 )
 from vulnhunt_agent.core.events import EventBus
 from vulnhunt_agent.core.llm import LLMResponse
+from vulnhunt_agent.core.model_errors import ModelClientError, ModelFailureCategory
 from vulnhunt_agent.core.run_store import RunStore
 from vulnhunt_agent.domain.schemas import (
     BudgetPolicy,
@@ -307,6 +308,43 @@ class _MeteredClient(_FinalJsonClient):
 
     async def chat(self, **kwargs) -> LLMResponse:
         self.max_tokens.append(kwargs["max_tokens"])
+        return await super().chat(**kwargs)
+
+
+class _ProtocolRepairPipelineClient(_FinalJsonClient):
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def chat(self, **kwargs) -> LLMResponse:
+        self.calls += 1
+        if self.calls == 1:
+            return LLMResponse(
+                text="",
+                input_tokens=40,
+                output_tokens=7,
+                cache_read_tokens=0,
+                cache_write_tokens=0,
+                stop_reason="tool_arguments_invalid",
+                content_blocks=[{
+                    "toolArgumentsInvalid": {
+                        "toolUseId": "call-grep",
+                        "name": "grep",
+                        "errorCode": "tool_arguments_invalid",
+                        "reason": "invalid_json",
+                        "allowedSchema": {
+                            "type": "object",
+                            "properties": {"pattern": {"type": "string"}},
+                            "required": ["pattern"],
+                        },
+                    }
+                }],
+            )
+        if self.calls == 2:
+            raise ModelClientError(
+                ModelFailureCategory.TRANSPORT,
+                "temporary transport failure",
+                retryable=True,
+            )
         return await super().chat(**kwargs)
 
 
@@ -1447,6 +1485,69 @@ async def test_hunt_pipeline_executes_slice_queue_without_legacy_json(
     assert len(tasks) == 2
     assert {task["status"] for task in tasks} == {"done"}
     assert all(task["attempt"] == 1 for task in tasks)
+
+
+async def test_hunt_pipeline_charges_protocol_repair_to_original_work(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    repo, _ = _native_router_fixture(tmp_path)
+    store = RunStore(tmp_path / "run-protocol-repair")
+    store.save_config({
+        "repo_path": str(repo),
+        "environment": "c:gcc-13",
+        "model_id": "gpt-5.6-sol",
+        "max_hunters_parallel": 1,
+        "hunter_max_iterations": 4,
+        "hunter_lease_seconds": 30,
+        "budget_max_hunter_sessions": 1,
+        "budget_max_input_tokens": 100_000,
+        "budget_max_output_tokens": 10_000,
+        "budget_max_wall_clock_minutes": 1,
+    })
+    bus = EventBus(store.dir / "events.jsonl")
+    await run_source_snapshot(store, bus)
+    await run_filter(store, bus)
+    await run_analysis_graph(store, bus)
+    await run_file_selector(store, bus)
+    store.save_step("sandbox_prepare", {"status": "failed"})
+    client = _ProtocolRepairPipelineClient()
+    monkeypatch.setattr(hunt_pipeline, "LLMClient", lambda **kwargs: client)
+    monkeypatch.setattr(
+        hunt_pipeline,
+        "base_image_for",
+        lambda environment: "unused:latest",
+    )
+
+    await hunt_pipeline.run_hunt(store, bus)
+
+    summary = store.load_step("hunt")
+    assert summary is not None
+    assert summary["done"] == 1
+    assert summary["usage"]["sessions"] == 1
+    assert summary["usage"]["calls"] == 3
+    assert summary["usage"]["input_tokens"] == 70
+    assert summary["usage"]["output_tokens"] == 12
+    assert summary["usage"]["wall_time_ms"] >= 0
+    assert summary["protocol_metrics"] == {
+        "tool_arguments_invalid": 1,
+        "protocol_repairs": 1,
+        "protocol_repair_successes": 1,
+        "transient_retries": 1,
+        "model_failures": {"transport": 1},
+    }
+    with SqliteRepository(store.dir / "state.db", read_only=True) as repository:
+        tasks = [
+            task for task in repository.list_tasks(store.dir.name)
+            if task["task_type"] == "hunter"
+        ]
+        usage = repository.list_budget_usage(store.dir.name, scope="hunter")
+    assert len(tasks) == 2
+    completed = next(task for task in tasks if task["status"] == "done")
+    assert completed["attempt"] == 1
+    assert len(usage) == 1
+    assert usage[0].work_id == completed["task_key"]
+    assert usage[0].calls == 3
 
 
 async def test_hunt_pipeline_reports_work_deferred_by_session_budget(

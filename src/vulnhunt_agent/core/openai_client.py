@@ -9,12 +9,13 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import uuid
 
 from openai import OpenAI
 
 from . import settings as _settings
 from .llm import LLMResponse
+from .model_errors import ModelClientError, ModelFailureCategory
+from .tool_protocol import tool_schema_map, validated_tool_block
 
 
 class OpenAIResponsesClient:
@@ -81,8 +82,14 @@ class OpenAIResponsesClient:
         if self.reasoning_effort:
             kwargs["reasoning"] = {"effort": self.reasoning_effort}
 
-        resp = await asyncio.to_thread(self._client.responses.create, **kwargs)
-        return _to_anthropic_response(resp)
+        try:
+            resp = await asyncio.to_thread(self._client.responses.create, **kwargs)
+        except Exception as exc:
+            raise _classify_openai_failure(exc) from exc
+        return _to_anthropic_response(
+            resp,
+            tool_schemas=tool_schema_map(oai_tools or []),
+        )
 
 
 def resolve_api_key(provider: _settings.ProviderSpec) -> str | None:
@@ -165,11 +172,17 @@ def _to_openai_input(messages: list[dict]) -> list[dict]:
 # ---------- conversion: OpenAI Responses -> Anthropic Converse ----------
 
 
-def _to_anthropic_response(resp) -> LLMResponse:
+def _to_anthropic_response(
+    resp,
+    *,
+    tool_schemas: dict[str, dict] | None = None,
+) -> LLMResponse:
     """Build Converse-shaped LLMResponse from OpenAI Responses output."""
     blocks: list[dict] = []
     text_chunks: list[str] = []
     stop_reason = "end_turn"
+    schemas = dict(tool_schemas or {})
+    allow_legacy_unknown_tools = tool_schemas is None
 
     for item in (resp.output or []):
         itype = getattr(item, "type", None)
@@ -192,20 +205,22 @@ def _to_anthropic_response(resp) -> LLMResponse:
                     blocks.append({"text": txt})
         elif itype == "function_call":
             stop_reason = "tool_use"
-            try:
-                args = json.loads(getattr(item, "arguments", "") or "{}")
-            except json.JSONDecodeError:
-                args = {}
-            blocks.append({"toolUse": {
-                "toolUseId": getattr(item, "call_id", None) or f"call_{uuid.uuid4().hex[:8]}",
-                "name": getattr(item, "name", ""),
-                "input": args,
-            }})
+            name = getattr(item, "name", "")
+            if name not in schemas and allow_legacy_unknown_tools:
+                schemas[name] = {"type": "object"}
+            blocks.append(validated_tool_block(
+                call_id=getattr(item, "call_id", None),
+                name=name,
+                arguments_text=getattr(item, "arguments", ""),
+                schemas=schemas,
+            ))
 
     usage = getattr(resp, "usage", None)
     input_total = getattr(usage, "input_tokens", 0) if usage else 0
     input_details = getattr(usage, "input_tokens_details", None) if usage else None
     cached = getattr(input_details, "cached_tokens", 0) if input_details else 0
+    if any("toolArgumentsInvalid" in block for block in blocks):
+        stop_reason = "tool_arguments_invalid"
     return LLMResponse(
         text="".join(text_chunks),
         input_tokens=max(input_total - cached, 0),
@@ -219,3 +234,55 @@ def _to_anthropic_response(resp) -> LLMResponse:
 
 # Backwards-compatible import for callers that used the old class name.
 OpenAIBedrockClient = OpenAIResponsesClient
+
+
+def _classify_openai_failure(exc: Exception) -> ModelClientError:
+    status = getattr(exc, "status_code", None)
+    kind = type(exc).__name__.casefold()
+    if status == 401:
+        return ModelClientError(
+            ModelFailureCategory.AUTHENTICATION,
+            "OpenAI API authentication failed; verify the configured API key.",
+            retryable=False,
+        )
+    if status == 403:
+        return ModelClientError(
+            ModelFailureCategory.AUTHORIZATION,
+            "OpenAI API authorization failed for the requested operation.",
+            retryable=False,
+        )
+    if status == 404:
+        return ModelClientError(
+            ModelFailureCategory.MODEL_UNAVAILABLE,
+            "The requested OpenAI model or endpoint is unavailable.",
+            retryable=False,
+        )
+    if status == 429:
+        return ModelClientError(
+            ModelFailureCategory.RATE_LIMIT,
+            "The OpenAI API rate limit was reached.",
+            retryable=True,
+        )
+    if "timeout" in kind:
+        return ModelClientError(
+            ModelFailureCategory.TIMEOUT,
+            "The OpenAI API request timed out.",
+            retryable=True,
+        )
+    if "connection" in kind:
+        return ModelClientError(
+            ModelFailureCategory.TRANSPORT,
+            "The OpenAI API transport failed.",
+            retryable=True,
+        )
+    if isinstance(status, int) and status >= 500:
+        return ModelClientError(
+            ModelFailureCategory.TRANSPORT,
+            "The OpenAI API reported a transient server failure.",
+            retryable=True,
+        )
+    return ModelClientError(
+        ModelFailureCategory.CONFIGURATION,
+        "The OpenAI API request was rejected; verify model and provider settings.",
+        retryable=False,
+    )

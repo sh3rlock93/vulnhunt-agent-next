@@ -10,6 +10,8 @@ from dataclasses import dataclass, field
 
 from ..core.jsonx import try_extract_object
 from ..core.llm import LLMClient
+from ..core.model_errors import ModelClientError
+from ..core.tool_protocol import TOOL_ARGUMENTS_INVALID
 from ..scheduling.budget import BudgetExceededError
 from .tools import HunterTools, tool_specs
 
@@ -143,6 +145,11 @@ class HuntResult:
     repeated_reads: int = 0
     poc_writes: int = 0
     exec_calls: int = 0
+    tool_argument_errors: int = 0
+    protocol_repairs: int = 0
+    protocol_repair_successes: int = 0
+    transient_retries: int = 0
+    model_failures: dict[str, int] = field(default_factory=dict)
     stopped: str = ""   # "final_json" | "max_iter" | "error"
     budget_reason: str = ""
 
@@ -158,6 +165,8 @@ class HunterAgent:
         max_iterations: int = 100,
         max_tokens_per_call: int = 4000,
         on_event=None,
+        initial_metrics: dict | None = None,
+        on_checkpoint=None,
     ):
         self.client = client
         self.tools = tools
@@ -167,15 +176,20 @@ class HunterAgent:
         self.max_iterations = max_iterations
         self.max_tokens_per_call = max_tokens_per_call
         self.on_event = on_event or (lambda *a, **k: None)
+        self.initial_metrics = initial_metrics or {}
+        self.on_checkpoint = on_checkpoint or (lambda result: None)
 
     async def hunt(
         self,
         target_file: str,
         analysis_context: dict | None = None,
     ) -> HuntResult:
-        result = HuntResult()
+        result = _result_with_initial_metrics(self.initial_metrics)
         expected_targets = _expected_target_ids(analysis_context)
         completion_repairs = 0
+        protocol_repair_pending = (
+            result.protocol_repairs > result.protocol_repair_successes
+        )
         with_sandbox = self.tools.sandbox is not None
         specs = tool_specs(with_sandbox)
 
@@ -214,12 +228,96 @@ class HunterAgent:
                     f"budget exhausted: {exc.reason}",
                 )
                 self._attach_tool_ledger(result)
+                self._checkpoint(result)
                 return result
-            result.iterations = i + 1
+            except ModelClientError as exc:
+                result.iterations += 1
+                category = exc.category.value
+                result.model_failures[category] = (
+                    result.model_failures.get(category, 0) + 1
+                )
+                self.on_event(
+                    "model_failure",
+                    category=category,
+                    retryable=exc.retryable,
+                )
+                if (
+                    exc.retryable
+                    and result.transient_retries < 1
+                    and i + 1 < self.max_iterations
+                ):
+                    result.transient_retries += 1
+                    self.on_event(
+                        "model_retry",
+                        category=category,
+                        retry=result.transient_retries,
+                    )
+                    self._attach_tool_ledger(result)
+                    self._checkpoint(result)
+                    continue
+                if exc.retryable:
+                    result.stopped = "model_retry_exhausted"
+                    result.budget_reason = f"model_{category}_retry_exhausted"
+                    result.incomplete_target_ids = list(expected_targets)
+                    result.target_dispositions = _deferred_dispositions(
+                        expected_targets,
+                        f"model {category} retry exhausted",
+                    )
+                    self._attach_tool_ledger(result)
+                    self._checkpoint(result)
+                    return result
+                self._attach_tool_ledger(result)
+                self._checkpoint(result)
+                exc.partial_result = result
+                raise
+            result.iterations += 1
             result.input_tokens += resp.input_tokens
             result.output_tokens += resp.output_tokens
             result.cache_read_tokens += resp.cache_read_tokens
             result.cache_write_tokens += resp.cache_write_tokens
+
+            invalid_arguments = [
+                block["toolArgumentsInvalid"]
+                for block in resp.content_blocks
+                if "toolArgumentsInvalid" in block
+            ]
+            if protocol_repair_pending and not invalid_arguments:
+                result.protocol_repair_successes += 1
+                protocol_repair_pending = False
+                self.on_event("tool_arguments_repair_succeeded")
+            if invalid_arguments:
+                result.tool_argument_errors += len(invalid_arguments)
+                self.on_event(
+                    TOOL_ARGUMENTS_INVALID,
+                    count=len(invalid_arguments),
+                    reasons=sorted({
+                        str(item.get("reason") or "contract")
+                        for item in invalid_arguments
+                    }),
+                )
+                if result.protocol_repairs < 1 and i + 1 < self.max_iterations:
+                    result.protocol_repairs += 1
+                    protocol_repair_pending = True
+                    messages.append({
+                        "role": "assistant",
+                        "content": [{"text": "Host tool arguments failed validation."}],
+                    })
+                    messages.append({
+                        "role": "user",
+                        "content": [{"text": _tool_repair_message(invalid_arguments)}],
+                    })
+                    self._checkpoint(result)
+                    continue
+                result.stopped = "tool_arguments_invalid"
+                result.budget_reason = TOOL_ARGUMENTS_INVALID
+                result.incomplete_target_ids = list(expected_targets)
+                result.target_dispositions = _deferred_dispositions(
+                    expected_targets,
+                    "tool arguments remained invalid after one protocol repair",
+                )
+                self._attach_tool_ledger(result)
+                self._checkpoint(result)
+                return result
 
             # Defense against models that occasionally return zero blocks —
             # Bedrock rejects messages whose content list is empty.
@@ -249,6 +347,7 @@ class HunterAgent:
                                     + json.dumps(expected_targets)
                                 )}],
                             })
+                            self._checkpoint(result)
                             continue
                         result.findings = findings
                         result.target_dispositions = _deferred_dispositions(
@@ -259,6 +358,7 @@ class HunterAgent:
                         result.stopped = "target_incomplete"
                         result.budget_reason = "target_completion_missing"
                         self._attach_tool_ledger(result)
+                        self._checkpoint(result)
                         return result
                     result.findings = findings
                     result.target_dispositions = dispositions
@@ -269,6 +369,7 @@ class HunterAgent:
                     if incomplete:
                         result.budget_reason = "target_deferred"
                     self._attach_tool_ledger(result)
+                    self._checkpoint(result)
                     return result
                 if expected_targets and completion_repairs >= 1:
                     result.target_dispositions = _deferred_dispositions(
@@ -279,12 +380,14 @@ class HunterAgent:
                     result.stopped = "target_incomplete"
                     result.budget_reason = "target_completion_missing"
                     self._attach_tool_ledger(result)
+                    self._checkpoint(result)
                     return result
                 completion_repairs += 1
                 messages.append({
                     "role": "user",
                     "content": [{"text": "Please output ONLY the final JSON report as specified."}],
                 })
+                self._checkpoint(result)
                 continue
 
             tool_results = []
@@ -303,6 +406,8 @@ class HunterAgent:
                     }
                 })
             messages.append({"role": "user", "content": tool_results})
+            self._attach_tool_ledger(result)
+            self._checkpoint(result)
 
         result.stopped = "max_iter"
         result.incomplete_target_ids = list(expected_targets)
@@ -313,6 +418,7 @@ class HunterAgent:
         if expected_targets:
             result.budget_reason = "target_completion_missing"
         self._attach_tool_ledger(result)
+        self._checkpoint(result)
         return result
 
     def _attach_tool_ledger(self, result: HuntResult) -> None:
@@ -322,10 +428,70 @@ class HunterAgent:
         result.written_pocs = list(
             getattr(self.tools, "written_pocs", [])
         )
-        result.tool_calls = int(getattr(self.tools, "tool_calls", 0))
-        result.repeated_reads = int(getattr(self.tools, "repeated_reads", 0))
-        result.poc_writes = int(getattr(self.tools, "poc_write_calls", 0))
-        result.exec_calls = len(result.executions)
+        result.tool_calls = int(self.initial_metrics.get("tool_calls", 0)) + int(
+            getattr(self.tools, "tool_calls", 0)
+        )
+        result.repeated_reads = int(
+            self.initial_metrics.get("repeated_reads", 0)
+        ) + int(getattr(self.tools, "repeated_reads", 0))
+        result.poc_writes = int(self.initial_metrics.get("poc_writes", 0)) + int(
+            getattr(self.tools, "poc_write_calls", 0)
+        )
+        result.exec_calls = int(self.initial_metrics.get("exec_calls", 0)) + len(
+            result.executions
+        )
+
+    def _checkpoint(self, result: HuntResult) -> None:
+        self.on_checkpoint(result)
+
+
+def _result_with_initial_metrics(raw: dict) -> HuntResult:
+    result = HuntResult()
+    integer_fields = (
+        "iterations",
+        "input_tokens",
+        "output_tokens",
+        "cache_read_tokens",
+        "cache_write_tokens",
+        "tool_calls",
+        "repeated_reads",
+        "poc_writes",
+        "exec_calls",
+        "tool_argument_errors",
+        "protocol_repairs",
+        "protocol_repair_successes",
+        "transient_retries",
+    )
+    for name in integer_fields:
+        value = raw.get(name, 0)
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+            setattr(result, name, value)
+    failures = raw.get("model_failures")
+    if isinstance(failures, dict):
+        result.model_failures = {
+            str(key): value
+            for key, value in failures.items()
+            if isinstance(value, int) and not isinstance(value, bool) and value >= 0
+        }
+    return result
+
+
+def _tool_repair_message(invalid_arguments: list[dict]) -> str:
+    contracts = [
+        {
+            "error_code": TOOL_ARGUMENTS_INVALID,
+            "tool": item.get("name") or "",
+            "reason": item.get("reason") or "contract",
+            "allowed_schema": item.get("allowedSchema") or {},
+        }
+        for item in invalid_arguments
+    ]
+    return (
+        "Host tool arguments were rejected and no tool was executed. Repair this "
+        "protocol error exactly once. Return the intended tool call with strict JSON "
+        "that matches its allowed schema; do not repeat or explain the invalid payload. "
+        + json.dumps(contracts, ensure_ascii=False, separators=(",", ":"))
+    )
 
 
 def _expected_target_ids(analysis_context: dict | None) -> tuple[str, ...]:

@@ -22,7 +22,7 @@ from ...core.events import EventBus
 from ...core.llm import LLMClient
 from ...core.run_store import RunStore
 from ...core.v2_run import advance_run, assert_source_snapshot_current
-from ...domain.schemas import BudgetPolicy
+from ...domain.schemas import BudgetPolicy, BudgetUsage
 from ...domain.states import RunState
 from ...infrastructure.sqlite_repository import (
     SqliteRepository,
@@ -177,6 +177,12 @@ async def run_hunt(store: RunStore, bus: EventBus) -> None:
         persisted_usage = repository.list_budget_usage(
             store.dir.name, scope="hunter"
         )
+    persisted_usage.extend(_checkpoint_budget_usage(
+        qstore,
+        queue.tasks,
+        run_id=store.dir.name,
+        persisted_work_ids={item.work_id for item in persisted_usage},
+    ))
     pending_ids = {
         task.work_id for task in queue.tasks if task.status == "pending"
     }
@@ -410,6 +416,12 @@ async def run_hunt(store: RunStore, bus: EventBus) -> None:
         persisted_usage = repository.list_budget_usage(
             store.dir.name, scope="hunter"
         )
+    persisted_usage.extend(_checkpoint_budget_usage(
+        qstore,
+        qstore.load().tasks,
+        run_id=store.dir.name,
+        persisted_work_ids={item.work_id for item in persisted_usage},
+    ))
     _save_summary(
         store,
         qstore,
@@ -541,6 +553,7 @@ def _save_summary(
         "tasks": [asdict(t) for t in final.tasks],
     }
     summary["target_completion"] = _target_completion(qstore, final.tasks)
+    summary["protocol_metrics"] = _protocol_metrics(qstore, final.tasks)
     store.save_step("hunt", summary)
     bus.emit("step_done", step="hunt", **{k: v for k, v in summary.items() if k != "tasks"})
 
@@ -589,6 +602,88 @@ def _target_completion(qstore, tasks: list[HuntTask]) -> dict:
         "complete": not incomplete,
         "incomplete": incomplete,
     }
+
+
+def _checkpoint_budget_usage(
+    qstore,
+    tasks: list[HuntTask],
+    *,
+    run_id: str,
+    persisted_work_ids: set[str],
+) -> list[BudgetUsage]:
+    usage: list[BudgetUsage] = []
+    for task in tasks:
+        if task.work_id in persisted_work_ids or not task.hunters:
+            continue
+        path = qstore.hunt_dir(task, task.hunters[0].name) / "usage-checkpoint.json"
+        try:
+            payload = json.loads(path.read_text()) if path.is_file() else {}
+        except (OSError, json.JSONDecodeError):
+            continue
+        iterations = payload.get("iterations", 0)
+        if not isinstance(iterations, int) or isinstance(iterations, bool) or iterations < 1:
+            continue
+        usage.append(BudgetUsage(
+            run_id=run_id,
+            work_id=task.work_id,
+            scope="hunter",
+            model_id=str(payload.get("model_id") or "unknown"),
+            transport=str(payload.get("transport") or "unknown"),
+            sessions=1,
+            calls=iterations,
+            iterations=iterations,
+            input_tokens=_nonnegative_int(payload.get("input_tokens")),
+            output_tokens=_nonnegative_int(payload.get("output_tokens")),
+            cache_read_tokens=_nonnegative_int(payload.get("cache_read_tokens")),
+            cache_write_tokens=_nonnegative_int(payload.get("cache_write_tokens")),
+            tool_calls=_nonnegative_int(payload.get("tool_calls")),
+            repeated_reads=_nonnegative_int(payload.get("repeated_reads")),
+            poc_writes=_nonnegative_int(payload.get("poc_writes")),
+            exec_calls=_nonnegative_int(payload.get("exec_calls")),
+            wall_time_ms=_nonnegative_int(payload.get("wall_time_ms")),
+        ))
+    return usage
+
+
+def _protocol_metrics(qstore, tasks: list[HuntTask]) -> dict:
+    tool_arguments_invalid = 0
+    protocol_repairs = 0
+    protocol_repair_successes = 0
+    transient_retries = 0
+    failures: dict[str, int] = {}
+    for task in tasks:
+        if not task.hunters:
+            continue
+        path = qstore.hunt_dir(task, task.hunters[0].name) / "usage-checkpoint.json"
+        try:
+            payload = json.loads(path.read_text()) if path.is_file() else {}
+        except (OSError, json.JSONDecodeError):
+            continue
+        tool_arguments_invalid += _nonnegative_int(
+            payload.get("tool_argument_errors")
+        )
+        protocol_repairs += _nonnegative_int(payload.get("protocol_repairs"))
+        protocol_repair_successes += _nonnegative_int(
+            payload.get("protocol_repair_successes")
+        )
+        transient_retries += _nonnegative_int(payload.get("transient_retries"))
+        raw_failures = payload.get("model_failures")
+        if isinstance(raw_failures, dict):
+            for category, count in raw_failures.items():
+                failures[str(category)] = failures.get(str(category), 0) + _nonnegative_int(
+                    count
+                )
+    return {
+        "tool_arguments_invalid": tool_arguments_invalid,
+        "protocol_repairs": protocol_repairs,
+        "protocol_repair_successes": protocol_repair_successes,
+        "transient_retries": transient_retries,
+        "model_failures": failures,
+    }
+
+
+def _nonnegative_int(value: object) -> int:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
 
 
 register(Step(
