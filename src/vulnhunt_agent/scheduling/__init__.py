@@ -1,10 +1,12 @@
 """Cost-aware Hunter scheduling contracts and metrics."""
 
 from .budget import (
+    AdmissionDecision,
     BudgetAllocation,
     BudgetController,
     BudgetedLLMClient,
     BudgetExceededError,
+    NATIVE_DIVERSE_POLICY,
     adaptive_iteration_limit,
     adaptive_output_token_limit,
     allocate_work_items,
@@ -20,10 +22,12 @@ from .slices import (
 )
 
 __all__ = [
+    "AdmissionDecision",
     "BudgetAllocation",
     "BudgetController",
     "BudgetedLLMClient",
     "BudgetExceededError",
+    "NATIVE_DIVERSE_POLICY",
     "ROUTER_POLICY",
     "MAX_CONTEXT_FILES",
     "SLICE_WORK_POLICY",
