@@ -15,6 +15,7 @@ from dataclasses import asdict
 from pathlib import Path
 
 from ...analysis import SharedContextCache
+from ...agents.hunter import TARGET_COMPLETION_POLICY
 from ...agents.durable_queue import DurableHuntQueueStore
 from ...agents.queue import HuntTask
 from ...core.events import EventBus
@@ -33,6 +34,7 @@ from ...scheduling import (
     BudgetController,
     BudgetedLLMClient,
     adaptive_iteration_limit,
+    adaptive_output_token_limit,
     allocate_work_items,
     build_routing_plan,
     build_slice_work_items,
@@ -117,6 +119,9 @@ async def run_hunt(store: RunStore, bus: EventBus) -> None:
             if work_items else "c-slice-work-v1"
         ),
         "execution_changed": True,
+        "target_completion_policy": TARGET_COMPLETION_POLICY,
+        "completion_repair_limit": 1,
+        "iteration_tiers": [6, 18, 40],
         "scan_mode": incremental.get("mode", "full"),
         "scan_base_ref": incremental.get("base_ref", ""),
         "scan_head_ref": incremental.get("head_ref", ""),
@@ -301,6 +306,10 @@ async def run_hunt(store: RunStore, bus: EventBus) -> None:
                 attempt=lease.attempt,
                 has_evidence=_has_evidence(qstore, task),
             )
+            output_token_limit = adaptive_output_token_limit(
+                item,
+                configured_cap=int(cfg.get("hunter_max_output_tokens_per_call", 4_000)),
+            )
             findings_by_cat, usage_items, deferred = await run_hunters(
                 task, qstore, repo, budgeted_hunter_client, hunter_image,
                 arch, analysis_context, sandbox_info, iteration_limit, hunter_sem, bus,
@@ -310,6 +319,7 @@ async def run_hunt(store: RunStore, bus: EventBus) -> None:
                     lease,
                     lease_seconds=lease_seconds,
                 ),
+                max_tokens_per_call=output_token_limit,
             )
             if usage_items:
                 with SqliteRepository(store.dir / "state.db") as repository:
@@ -511,8 +521,55 @@ def _save_summary(
         ),
         "tasks": [asdict(t) for t in final.tasks],
     }
+    summary["target_completion"] = _target_completion(qstore, final.tasks)
     store.save_step("hunt", summary)
     bus.emit("step_done", step="hunt", **{k: v for k, v in summary.items() if k != "tasks"})
+
+
+def _target_completion(qstore, tasks: list[HuntTask]) -> dict:
+    counts = {
+        "finding": 0,
+        "no_finding": 0,
+        "deferred": 0,
+        "missing": 0,
+    }
+    incomplete: list[dict[str, str]] = []
+    for task in tasks:
+        expected = task.target_signal_ids or task.target_node_ids
+        if not expected:
+            continue
+        dispositions: dict[str, str] = {}
+        if task.hunters:
+            path = qstore.hunt_dir(task, task.hunters[0].name) / "findings.json"
+            try:
+                payload = json.loads(path.read_text()) if path.is_file() else {}
+            except (OSError, json.JSONDecodeError):
+                payload = {}
+            dispositions = {
+                item["target_id"]: item["status"]
+                for item in payload.get("target_dispositions", [])
+                if isinstance(item, dict)
+                and isinstance(item.get("target_id"), str)
+                and item.get("status") in counts
+            }
+        for target_id in expected:
+            status = dispositions.get(target_id)
+            if status is None:
+                status = "deferred" if task.status == "budget_deferred" else "missing"
+            counts[status] += 1
+            if status in {"deferred", "missing"}:
+                incomplete.append({
+                    "work_id": task.work_id,
+                    "target_id": target_id,
+                    "status": status,
+                })
+    total = sum(counts.values())
+    return {
+        "total": total,
+        **counts,
+        "complete": not incomplete,
+        "incomplete": incomplete,
+    }
 
 
 register(Step(

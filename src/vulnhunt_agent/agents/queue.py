@@ -45,6 +45,8 @@ class HuntTask:
     work_id: str = ""                 # M8 stable slice-work identity
     files: list[str] = field(default_factory=list)
     slice_ids: list[str] = field(default_factory=list)
+    target_node_ids: list[str] = field(default_factory=list)
+    target_signal_ids: list[str] = field(default_factory=list)
     risk: int = 1
     required: bool = False
     status: str = "pending"           # includes done | failed | budget_deferred
@@ -238,6 +240,8 @@ def _task_from(d: dict) -> HuntTask:
         work_id=d.get("work_id", ""),
         files=list(d.get("files", [])),
         slice_ids=list(d.get("slice_ids", [])),
+        target_node_ids=list(d.get("target_node_ids", [])),
+        target_signal_ids=list(d.get("target_signal_ids", [])),
         risk=int(d.get("risk", 1)),
         required=bool(d.get("required", False)),
         status=d.get("status", "pending"),

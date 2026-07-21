@@ -105,6 +105,102 @@ async def test_hunter_tool_loop_and_final_json_contract() -> None:
     assert "slice-1" in first_prompt
 
 
+class TargetCompletionClient:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def chat(self, **kwargs) -> LLMResponse:
+        self.calls += 1
+        payload = (
+            {"findings": []}
+            if self.calls == 1
+            else {
+                "target_dispositions": [{
+                    "target_id": "sig-alloc",
+                    "status": "no_finding",
+                    "finding_indices": [],
+                    "rationale": "The allocation size is capped before ALLOC.",
+                }],
+                "findings": [],
+            }
+        )
+        text = json.dumps(payload)
+        return _response(
+            text=text,
+            blocks=[{"text": text}],
+            in_tokens=10,
+            out_tokens=5,
+        )
+
+
+async def test_hunter_requires_one_disposition_per_target_with_one_repair() -> None:
+    client = TargetCompletionClient()
+    agent = HunterAgent(
+        client=cast(Any, client),
+        tools=cast(Any, FakeHunterTools()),
+        arch={"language": "c", "environment": "c:gcc-13"},
+        hunter_prompt="Review the allocation target.",
+        max_iterations=5,
+    )
+
+    result = await agent.hunt(
+        "zip.c",
+        {
+            "change_focus": {
+                "target_signal_ids": ["sig-alloc"],
+                "target_node_ids": ["node-zip"],
+            },
+            "slices": [],
+        },
+    )
+
+    assert client.calls == 2
+    assert result.stopped == "final_json"
+    assert result.incomplete_target_ids == []
+    assert result.target_dispositions == [{
+        "target_id": "sig-alloc",
+        "status": "no_finding",
+        "finding_indices": [],
+        "rationale": "The allocation size is capped before ALLOC.",
+    }]
+
+
+class MissingTargetClient:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def chat(self, **kwargs) -> LLMResponse:
+        self.calls += 1
+        text = '{"findings": []}'
+        return _response(
+            text=text,
+            blocks=[{"text": text}],
+            in_tokens=10,
+            out_tokens=5,
+        )
+
+
+async def test_missing_target_contract_stops_after_one_repair_and_defers() -> None:
+    client = MissingTargetClient()
+    agent = HunterAgent(
+        client=cast(Any, client),
+        tools=cast(Any, FakeHunterTools()),
+        arch={"language": "c", "environment": "c:gcc-13"},
+        hunter_prompt="Review the target.",
+        max_iterations=20,
+    )
+
+    result = await agent.hunt(
+        "zip.c",
+        {"change_focus": {"target_signal_ids": ["sig-alloc"]}},
+    )
+
+    assert client.calls == 2
+    assert result.stopped == "target_incomplete"
+    assert result.incomplete_target_ids == ["sig-alloc"]
+    assert result.target_dispositions[0]["status"] == "deferred"
+
+
 class FakeContainer:
     def __init__(self) -> None:
         self.writes: list[tuple[str, str]] = []

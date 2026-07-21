@@ -21,6 +21,7 @@ async def run_hunters(
     sandbox_enabled: bool,
     work_items: dict[str, HunterWorkItem] | None = None,
     before_commit=None,
+    max_tokens_per_call: int = 4_000,
 ) -> tuple[dict[str, list[dict]], list[BudgetUsage], dict[str, str]]:
     """Run all hunters for one file in parallel; return {hunter_name: findings}."""
     out: dict[str, list[dict]] = {}
@@ -64,7 +65,9 @@ async def run_hunters(
                     client=client, tools=tools, arch=arch,
                     hunter_prompt=hunter_def.system_prompt,
                     sandbox_info=sandbox_info,
-                    max_iterations=max_iter, on_event=on_event,
+                    max_iterations=max_iter,
+                    max_tokens_per_call=max_tokens_per_call,
+                    on_event=on_event,
                 )
                 result = await agent.hunt(task.file, analysis_context)
                 if result.findings:
@@ -74,7 +77,7 @@ async def run_hunters(
                 (hunt_dir / "findings.json").write_text(
                     json.dumps(asdict(result), indent=2, ensure_ascii=False)
                 )
-                if result.stopped == "budget_exhausted":
+                if result.stopped == "budget_exhausted" or result.incomplete_target_ids:
                     reason = result.budget_reason or "budget_exhausted"
                     deferred[name] = reason
                     qstore.mark_hunt_deferred(task, name, reason)
@@ -107,7 +110,7 @@ async def run_hunters(
                     )))
                 bus.emit(
                     "hunter_deferred"
-                    if result.stopped == "budget_exhausted"
+                    if result.stopped == "budget_exhausted" or result.incomplete_target_ids
                     else "hunter_done",
                     file=task.file,
                     hunter=name,

@@ -8,7 +8,7 @@ from ..analysis.models import AnalysisSlice, CoveragePlan
 from ..domain.schemas import HunterRoutingPlan, HunterWorkItem
 from .shadow import work_id_for
 
-SLICE_WORK_POLICY = "c-slice-work-v2"
+SLICE_WORK_POLICY = "c-slice-work-v3"
 MAX_CONTEXT_FILES = 8
 MAX_SLICES_PER_WORK = 6
 MAX_TARGET_NODES_PER_WORK = 4

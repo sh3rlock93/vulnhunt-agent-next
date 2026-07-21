@@ -13,6 +13,8 @@ from ..core.llm import LLMClient
 from ..scheduling.budget import BudgetExceededError
 from .tools import HunterTools, tool_specs
 
+TARGET_COMPLETION_POLICY = "c-target-completion-v1"
+
 
 FINAL_REPORT_INSTRUCTIONS = """VERIFY WITH A PoC.
 For every concrete hypothesis, try to produce a Proof-of-Concept that exercises it.
@@ -49,6 +51,14 @@ Before stopping, self-check: did you read the *callers* of suspicious functions,
 
 When done, STOP calling tools and output ONLY this JSON:
 {
+  "target_dispositions": [
+    {
+      "target_id": "<exact target signal/node id from change_focus>",
+      "status": "finding|no_finding|deferred",
+      "finding_indices": [<zero-based indexes into findings>],
+      "rationale": "<concise evidence-based reason>"
+    }
+  ],
   "findings": [
     {
       "title": "<concise>",
@@ -80,7 +90,15 @@ When done, STOP calling tools and output ONLY this JSON:
   ]
 }
 
-If nothing significant, return an empty findings array."""
+For every ID in `change_focus.target_signal_ids`, return exactly one target
+disposition. If that list is empty, use `change_focus.target_node_ids` instead.
+`finding` requires at least one valid finding index. `no_finding` requires no
+finding indexes and a concrete reason the target is safe. Use `deferred` only
+when evidence is insufficient; the work will remain incomplete. Do not return
+unknown or duplicate target IDs.
+
+If nothing significant, return an empty findings array and explicit
+`no_finding` dispositions for every target."""
 
 
 USER_TEMPLATE = """# Target file
@@ -104,6 +122,8 @@ Investigate this file and anything it touches. Produce the final JSON report whe
 @dataclass
 class HuntResult:
     findings: list[dict] = field(default_factory=list)
+    target_dispositions: list[dict] = field(default_factory=list)
+    incomplete_target_ids: list[str] = field(default_factory=list)
     executions: list[dict] = field(default_factory=list)
     written_pocs: list[str] = field(default_factory=list)
     iterations: int = 0
@@ -146,6 +166,8 @@ class HunterAgent:
         analysis_context: dict | None = None,
     ) -> HuntResult:
         result = HuntResult()
+        expected_targets = _expected_target_ids(analysis_context)
+        completion_repairs = 0
         with_sandbox = self.tools.sandbox is not None
         specs = tool_specs(with_sandbox)
 
@@ -178,6 +200,11 @@ class HunterAgent:
             except BudgetExceededError as exc:
                 result.stopped = "budget_exhausted"
                 result.budget_reason = exc.reason
+                result.incomplete_target_ids = list(expected_targets)
+                result.target_dispositions = _deferred_dispositions(
+                    expected_targets,
+                    f"budget exhausted: {exc.reason}",
+                )
                 self._attach_tool_ledger(result)
                 return result
             result.iterations = i + 1
@@ -195,10 +222,57 @@ class HunterAgent:
             if not tool_uses:
                 parsed = try_extract_object(resp.text)
                 if parsed is not None:
-                    result.findings = parsed.get("findings", [])
-                    result.stopped = "final_json"
+                    findings = parsed.get("findings", [])
+                    findings = findings if isinstance(findings, list) else []
+                    dispositions, incomplete, error = _validate_dispositions(
+                        parsed.get("target_dispositions"),
+                        expected_targets=expected_targets,
+                        findings=findings,
+                    )
+                    if error and expected_targets:
+                        if completion_repairs < 1 and i + 1 < self.max_iterations:
+                            completion_repairs += 1
+                            messages.append({
+                                "role": "user",
+                                "content": [{"text": (
+                                    "Target completion contract invalid: " + error + ". "
+                                    "Return ONLY the complete final JSON once, with exactly "
+                                    "one disposition for each expected target: "
+                                    + json.dumps(expected_targets)
+                                )}],
+                            })
+                            continue
+                        result.findings = findings
+                        result.target_dispositions = _deferred_dispositions(
+                            expected_targets,
+                            "target completion contract missing or invalid",
+                        )
+                        result.incomplete_target_ids = list(expected_targets)
+                        result.stopped = "target_incomplete"
+                        result.budget_reason = "target_completion_missing"
+                        self._attach_tool_ledger(result)
+                        return result
+                    result.findings = findings
+                    result.target_dispositions = dispositions
+                    result.incomplete_target_ids = incomplete
+                    result.stopped = (
+                        "target_deferred" if incomplete else "final_json"
+                    )
+                    if incomplete:
+                        result.budget_reason = "target_deferred"
                     self._attach_tool_ledger(result)
                     return result
+                if expected_targets and completion_repairs >= 1:
+                    result.target_dispositions = _deferred_dispositions(
+                        expected_targets,
+                        "final JSON was missing or invalid",
+                    )
+                    result.incomplete_target_ids = list(expected_targets)
+                    result.stopped = "target_incomplete"
+                    result.budget_reason = "target_completion_missing"
+                    self._attach_tool_ledger(result)
+                    return result
+                completion_repairs += 1
                 messages.append({
                     "role": "user",
                     "content": [{"text": "Please output ONLY the final JSON report as specified."}],
@@ -223,6 +297,13 @@ class HunterAgent:
             messages.append({"role": "user", "content": tool_results})
 
         result.stopped = "max_iter"
+        result.incomplete_target_ids = list(expected_targets)
+        result.target_dispositions = _deferred_dispositions(
+            expected_targets,
+            "maximum Hunter iterations reached",
+        )
+        if expected_targets:
+            result.budget_reason = "target_completion_missing"
         self._attach_tool_ledger(result)
         return result
 
@@ -237,3 +318,91 @@ class HunterAgent:
         result.repeated_reads = int(getattr(self.tools, "repeated_reads", 0))
         result.poc_writes = int(getattr(self.tools, "poc_write_calls", 0))
         result.exec_calls = len(result.executions)
+
+
+def _expected_target_ids(analysis_context: dict | None) -> tuple[str, ...]:
+    focus = (analysis_context or {}).get("change_focus") or {}
+    signal_ids = tuple(dict.fromkeys(focus.get("target_signal_ids") or ()))
+    if signal_ids:
+        return signal_ids
+    return tuple(dict.fromkeys(focus.get("target_node_ids") or ()))
+
+
+def _validate_dispositions(
+    raw: object,
+    *,
+    expected_targets: tuple[str, ...],
+    findings: list[dict],
+) -> tuple[list[dict], list[str], str]:
+    if not expected_targets:
+        return [], [], ""
+    if not isinstance(raw, list):
+        return [], list(expected_targets), "target_dispositions must be an array"
+
+    expected = set(expected_targets)
+    seen: set[str] = set()
+    valid: list[dict] = []
+    errors: list[str] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            errors.append("every disposition must be an object")
+            continue
+        target_id = item.get("target_id")
+        status = item.get("status")
+        indexes = item.get("finding_indices", [])
+        rationale = item.get("rationale")
+        if not isinstance(target_id, str) or target_id not in expected:
+            errors.append(f"unknown target {target_id!r}")
+            continue
+        if target_id in seen:
+            errors.append(f"duplicate target {target_id}")
+            continue
+        if status not in {"finding", "no_finding", "deferred"}:
+            errors.append(f"invalid status for {target_id}")
+            continue
+        if not isinstance(indexes, list) or any(
+            not isinstance(index, int) or isinstance(index, bool)
+            or index < 0 or index >= len(findings)
+            for index in indexes
+        ):
+            errors.append(f"invalid finding_indices for {target_id}")
+            continue
+        if status == "finding" and not indexes:
+            errors.append(f"finding disposition lacks finding index for {target_id}")
+            continue
+        if status != "finding" and indexes:
+            errors.append(f"non-finding disposition has finding index for {target_id}")
+            continue
+        if not isinstance(rationale, str) or not rationale.strip():
+            errors.append(f"missing rationale for {target_id}")
+            continue
+        valid.append({
+            "target_id": target_id,
+            "status": status,
+            "finding_indices": list(dict.fromkeys(indexes)),
+            "rationale": rationale.strip(),
+        })
+        seen.add(target_id)
+
+    missing = [target_id for target_id in expected_targets if target_id not in seen]
+    deferred = [
+        item["target_id"] for item in valid if item["status"] == "deferred"
+    ]
+    if missing:
+        errors.append("missing targets: " + ", ".join(missing))
+    return valid, [*missing, *deferred], "; ".join(errors)
+
+
+def _deferred_dispositions(
+    target_ids: tuple[str, ...] | list[str],
+    rationale: str,
+) -> list[dict]:
+    return [
+        {
+            "target_id": target_id,
+            "status": "deferred",
+            "finding_indices": [],
+            "rationale": rationale,
+        }
+        for target_id in target_ids
+    ]

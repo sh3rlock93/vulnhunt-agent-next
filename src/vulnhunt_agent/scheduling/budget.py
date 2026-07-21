@@ -116,14 +116,25 @@ def adaptive_iteration_limit(
     attempt: int = 1,
     has_evidence: bool = False,
 ) -> int:
-    """Return the 8/30/100 iteration tier, bounded by the operator's cap."""
+    """Return the 6/18/40 iteration tier, bounded by the operator's cap."""
     if has_evidence or attempt > 1:
-        tier = 100
+        tier = 40
     elif item.required or item.risk >= 4:
-        tier = 30
+        tier = 18
     else:
-        tier = 8
+        tier = 6
     return max(1, min(configured_cap, tier))
+
+
+def adaptive_output_token_limit(
+    item: HunterWorkItem,
+    *,
+    configured_cap: int = 4_000,
+) -> int:
+    """Size one response for its bounded target contract instead of the repo."""
+    targets = max(len(item.target_signal_ids), len(item.target_node_ids), 1)
+    tier = 1_600 + min(targets, 6) * 300 + (600 if item.required else 0)
+    return max(800, min(configured_cap, tier))
 
 
 class BudgetController:

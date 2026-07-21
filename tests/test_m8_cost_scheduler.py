@@ -53,6 +53,7 @@ from vulnhunt_agent.scheduling import (
     BudgetedLLMClient,
     BudgetExceededError,
     adaptive_iteration_limit,
+    adaptive_output_token_limit,
     allocate_work_items,
     build_routing_plan,
     build_slice_work_items,
@@ -163,7 +164,7 @@ def test_budget_allocation_prioritizes_critical_high_and_retry_capacity() -> Non
     assert all(reason == "max_hunter_sessions" for reason in allocation.deferred.values())
 
 
-def test_adaptive_iteration_limits_use_8_30_100_tiers() -> None:
+def test_adaptive_iteration_and_output_limits_are_bounded_by_work() -> None:
     item = build_shadow_plan(
         run_id="run-1",
         source_snapshot=HASH_A,
@@ -171,21 +172,28 @@ def test_adaptive_iteration_limits_use_8_30_100_tiers() -> None:
         hunters=["c-bounds-integers"],
         analysis={},
     )[0]
-    assert adaptive_iteration_limit(item, configured_cap=100) == 8
+    assert adaptive_iteration_limit(item, configured_cap=100) == 6
     assert adaptive_iteration_limit(
         item.model_copy(update={"risk": 4}),
         configured_cap=100,
-    ) == 30
+    ) == 18
     assert adaptive_iteration_limit(
         item,
         configured_cap=100,
         attempt=2,
-    ) == 100
+    ) == 40
     assert adaptive_iteration_limit(
         item,
         configured_cap=20,
         has_evidence=True,
     ) == 20
+    assert adaptive_output_token_limit(item) == 1_900
+    focused = item.model_copy(update={
+        "required": True,
+        "target_signal_ids": ("sig-1", "sig-2"),
+    })
+    assert adaptive_output_token_limit(focused) == 2_800
+    assert adaptive_output_token_limit(focused, configured_cap=2_000) == 2_000
 
 
 def test_v2_database_migrates_usage_metrics_without_losing_tasks(
@@ -256,14 +264,40 @@ class _FinalJsonClient:
     transport = "codex_subscription"
 
     async def chat(self, **kwargs) -> LLMResponse:
+        messages = kwargs.get("messages") or []
+        prompt = messages[0]["content"][0]["text"] if messages else ""
+        context_json = (
+            prompt.split("# Shared immutable analysis context\n", 1)[1]
+            .split("\n\n# Stack", 1)[0]
+            if "# Shared immutable analysis context\n" in prompt
+            else "{}"
+        )
+        focus = json.loads(context_json).get("change_focus") or {}
+        targets = (
+            focus.get("target_signal_ids")
+            or focus.get("target_node_ids")
+            or []
+        )
+        payload = json.dumps({
+            "target_dispositions": [
+                {
+                    "target_id": target_id,
+                    "status": "no_finding",
+                    "finding_indices": [],
+                    "rationale": "Fixture reviewed the bounded target.",
+                }
+                for target_id in targets
+            ],
+            "findings": [],
+        })
         return LLMResponse(
-            text='{"findings":[]}',
+            text=payload,
             input_tokens=30,
             output_tokens=5,
             cache_read_tokens=10,
             cache_write_tokens=0,
             stop_reason="end_turn",
-            content_blocks=[{"text": '{"findings":[]}'}],
+            content_blocks=[{"text": payload}],
         )
 
 
@@ -1279,6 +1313,9 @@ async def test_hunt_pipeline_executes_slice_queue_without_legacy_json(
     assert summary["done"] == 2
     assert summary["failed"] == 0
     assert summary["context_cache"] == plan["context_cache"]
+    assert summary["target_completion"]["total"] > 0
+    assert summary["target_completion"]["complete"] is True
+    assert summary["target_completion"]["missing"] == 0
     assert not (store.dir / "hunters" / "_queue.json").exists()
     assert len(list((store.dir / "cache" / "context").glob("*.json"))) == 1
     with SqliteRepository(store.dir / "state.db", read_only=True) as repository:
@@ -1338,6 +1375,8 @@ async def test_hunt_pipeline_reports_work_deferred_by_session_budget(
     assert summary["done"] == 1
     assert summary["failed"] == 0
     assert summary["budget_deferred"] == 1
+    assert summary["target_completion"]["complete"] is False
+    assert summary["target_completion"]["deferred"] > 0
     assert len(summary["unanalysed_work_ids"]) == 1
     with SqliteRepository(store.dir / "state.db", read_only=True) as repository:
         deferred_rows = [

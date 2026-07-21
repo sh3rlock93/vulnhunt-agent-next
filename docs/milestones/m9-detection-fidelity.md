@@ -1,6 +1,6 @@
 # M9 — Detection fidelity and closed-loop verification
 
-Status: In progress (3 of 6 increments)
+Status: In progress (4 of 6 increments)
 
 ## Goal
 
@@ -72,8 +72,30 @@ sharing across Hunters only when they actually receive identical evidence.
 - [x] Real zlib collapses 7 routed sessions into 3 bounded Hunter sessions.
 - [x] Existing M8 scheduling, cache reuse, and native-analysis tests remain green.
 
+## PR 4 — Per-target completion and lower amplification
+
+Every bounded Hunter session now has a versioned target-completion contract.
+The final response must assign each target signal (or target node when no signal
+exists) exactly one `finding`, `no_finding`, or `deferred` disposition with a
+reason and valid finding references. Missing, duplicate, unknown, and invalid
+dispositions cannot silently complete a durable task.
+
+The agent makes at most one format-repair call. A second invalid response or an
+explicitly deferred target persists a deferred disposition and leaves the work
+budget-deferred. The former 8/30/100 iteration tiers are reduced to 6/18/40,
+and output tokens are sized from the bounded target count rather than repository
+size. Run summaries expose finding/no-finding/deferred/missing target counts.
+
+## PR 4 acceptance gates
+
+- [x] Every explicit target has exactly one validated disposition.
+- [x] `finding` dispositions reference existing findings; safe targets explain why.
+- [x] Missing completion stops after one repair instead of consuming the full loop.
+- [x] Deferred and budget-exhausted targets remain visible and resumable.
+- [x] Durable summaries fail the completion flag for missing/deferred targets.
+- [x] Vulnerable and fixed libcue gates retain 72.22% session reduction.
+
 ## Remaining increments
 
-4. Per-target Hunter completion with lower token amplification.
 5. Leased reproduction-variant execution and automatic re-review.
 6. Pinned zlib vulnerable/fixed benchmark and final operational gates.
