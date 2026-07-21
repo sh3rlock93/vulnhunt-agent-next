@@ -17,6 +17,9 @@ def work_id_for(
     files: tuple[str, ...],
     hunter: str,
     pass_index: int = 1,
+    target_node_ids: tuple[str, ...] = (),
+    target_signal_ids: tuple[str, ...] = (),
+    changed_line_ranges: dict[str, tuple[tuple[int, int], ...]] | None = None,
 ) -> str:
     identity = {
         "source_snapshot": source_snapshot,
@@ -25,6 +28,12 @@ def work_id_for(
         "files": sorted(files),
         "hunter": hunter,
         "pass_index": pass_index,
+        "target_node_ids": sorted(target_node_ids),
+        "target_signal_ids": sorted(target_signal_ids),
+        "changed_line_ranges": {
+            path: sorted(ranges)
+            for path, ranges in sorted((changed_line_ranges or {}).items())
+        },
     }
     canonical = json.dumps(identity, sort_keys=True, separators=(",", ":"))
     return "work_" + hashlib.sha256(canonical.encode()).hexdigest()

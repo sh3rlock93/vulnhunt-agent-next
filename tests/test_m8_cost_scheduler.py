@@ -586,6 +586,80 @@ def test_deletion_only_diff_anchors_macro_recovered_function(
     assert scope.critical_sink_ids
 
 
+def test_changed_function_is_the_bounded_primary_work_and_context(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "macro-focus"
+    repo.mkdir()
+    subprocess.run(["git", "-C", str(repo), "init", "-b", "main"], check=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "user.email", "tests@example.com"],
+        check=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "user.name", "Tests"],
+        check=True,
+    )
+    (repo / "zip.c").write_text(_macro_diff_source(include_guard=True))
+    base = _commit_all(repo, "guarded")
+    (repo / "zip.c").write_text(_macro_diff_source(include_guard=False))
+    head = _commit_all(repo, "remove length guard")
+
+    graph = build_c_analysis_graph(repo, ["zip.c"])
+    coverage = build_coverage_plan(graph)
+    scope = build_incremental_scope(
+        repo,
+        base_ref=base,
+        head_ref=head,
+        graph=graph,
+        coverage=coverage,
+    )
+    analysis = {
+        "language": "c",
+        "graph": graph.model_dump(mode="json"),
+        "coverage_plan": coverage.model_dump(mode="json"),
+        "incremental_scope": scope.model_dump(mode="json"),
+    }
+    target = next(
+        item for item in graph.nodes
+        if item.symbol == "zipOpenNewFileInZip4_64"
+    )
+    allocation = next(
+        item for item in graph.signals
+        if item.node_id == target.node_id and item.operation == "ALLOC"
+    )
+    routing = build_routing_plan(
+        run_id="run-focus",
+        source_snapshot=HASH_A,
+        selected_files=list(scope.selected_files),
+        enabled_hunters=["c-bounds-integers", "c-memory-lifetime"],
+        analysis=analysis,
+    )
+    work = build_slice_work_items(routing, analysis)
+
+    primary = work[0]
+    assert primary.seed_file == "zip.c"
+    assert target.node_id in primary.target_node_ids
+    assert allocation.signal_id in primary.target_signal_ids
+    assert primary.changed_line_ranges == scope.changed_line_ranges
+    assert all(len(item.slice_ids) <= 6 for item in work)
+    assert all(len(item.target_node_ids) <= 4 for item in work)
+    assert all(len(item.target_signal_ids) <= 6 for item in work)
+
+    cache_root = tmp_path / "cache"
+    packet = SharedContextCache(
+        cache_root,
+        repo,
+        source_snapshot=HASH_A,
+        analysis=analysis,
+    ).get(primary)
+    assert packet["change_focus"]["target_node_ids"] == [target.node_id]
+    assert packet["source_excerpts"][0]["path"] == "zip.c"
+    assert "ALLOC" in packet["source_excerpts"][0]["content"]
+    cache_file = next(cache_root.glob("context_*.json"))
+    assert cache_file.stat().st_size <= 24_000
+
+
 def test_git_diff_scope_expands_header_consumers_and_falls_back_safely(
     tmp_path: Path,
 ) -> None:
@@ -997,7 +1071,7 @@ def test_shared_context_cache_reuses_cross_hunter_packet_and_snapshot_keys(
 
     assert first == second
     stats = cache.stats()
-    assert stats["policy_version"] == "c-shared-context-v1"
+    assert stats["policy_version"] == "c-shared-context-v2"
     assert stats["entries"] == 1
     assert stats["hits"] == 1
     assert stats["misses"] == 1

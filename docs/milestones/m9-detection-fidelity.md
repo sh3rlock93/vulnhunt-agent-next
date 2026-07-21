@@ -1,6 +1,6 @@
 # M9 — Detection fidelity and closed-loop verification
 
-Status: In progress (2 of 6 increments)
+Status: In progress (3 of 6 increments)
 
 ## Goal
 
@@ -50,9 +50,30 @@ set.
 - [x] Real zlib maps the changed function and its `ALLOC` signal.
 - [x] Existing ordinary C and parser graph contracts remain green.
 
+## PR 3 — Change-focused bounded scheduling and context
+
+Incremental routing now carries the exact changed nodes, directly affected
+critical signals, and changed line ranges into the durable Hunter work
+contract. Slice work prioritizes a directly changed function before expanded
+callers or ordinary entrypoints and keeps at most six high-value slices, four
+target nodes, and six target signals in one prompt.
+
+Shared context packets use a versioned 24 KB hard limit. Changed ranges are
+selected before surrounding graph ranges, the seed file is emitted first, and
+the packet cache key includes all change-focus metadata. This preserves cache
+sharing across Hunters only when they actually receive identical evidence.
+
+## PR 3 acceptance gates
+
+- [x] A deletion-only MiniZip diff schedules `zipOpenNewFileInZip4_64` first.
+- [x] The recovered function's `ALLOC` signal is an explicit Hunter target.
+- [x] Work never contains more than 6 slices, 4 target nodes, or 6 target signals.
+- [x] Persisted context packets never exceed 24,000 bytes.
+- [x] Real zlib collapses 7 routed sessions into 3 bounded Hunter sessions.
+- [x] Existing M8 scheduling, cache reuse, and native-analysis tests remain green.
+
 ## Remaining increments
 
-3. Change-focused bounded scheduling and context packets.
 4. Per-target Hunter completion with lower token amplification.
 5. Leased reproduction-variant execution and automatic re-review.
 6. Pinned zlib vulnerable/fixed benchmark and final operational gates.
