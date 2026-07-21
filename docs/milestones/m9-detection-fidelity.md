@@ -1,6 +1,6 @@
 # M9 — Detection fidelity and closed-loop verification
 
-Status: In progress (5 of 6 increments)
+Status: Complete
 
 ## Goal
 
@@ -121,6 +121,34 @@ evidence packet and re-runs the requesting Reviewer, with a two-variant ceiling.
 - [x] New evidence triggers automatic re-review and can close strict reporting.
 - [x] Compiler failure and unsupported fixed revisions finish fail-closed.
 
-## Remaining increments
+## PR 6 — Pinned zlib benchmark and operational gates
 
-6. Pinned zlib vulnerable/fixed benchmark and final operational gates.
+The final regression pins upstream zlib's vulnerable tree at
+`726e18943df8c3bd75e6fa91f2ff24ba956a4f95` and the fixing commit at
+`73331a6a0481067628f065ffe87bb1d8f787d10c`. CI checks the complete Git tree
+identity, not a moving branch or line-number-only fixture. The vulnerable
+incremental case is materialized by reverting the pinned fix so the deletion
+diff itself is also exercised.
+
+Allocation signals now recognize a deliberately narrow ZIP-style pattern: a
+local `0xffff` reject guard before a size allocation. The signal remains in the
+graph as `allocation_size_guarded` risk 2 instead of disappearing, which keeps
+the evidence auditable while removing it from critical-sink routing.
+
+## PR 6 acceptance gates
+
+- [x] Vulnerable and fixed source trees match their pinned upstream Git trees.
+- [x] Vulnerable MiniZip exposes `ALLOC` as an unguarded risk-4 critical sink.
+- [x] The deletion diff selects `zipOpenNewFileInZip4_64` as the changed node.
+- [x] The target function and `ALLOC` signal are first-class Hunter targets.
+- [x] Seven file routes collapse to three work sessions of six slices each.
+- [x] The primary zlib context is 23,697 bytes and starts with `zip.c`.
+- [x] Fixed MiniZip records three reject guards and lowers `ALLOC` to risk 2.
+- [x] GitHub Actions runs the pinned zlib gates alongside Python, Docker, and libcue.
+
+## Final outcome
+
+M9 closes the original zlib miss end to end: macro-decorated functions survive
+parsing, deletion-only changes map to the correct function, scheduling starts
+from that change, every target receives an explicit disposition, and Reviewer
+follow-up experiments execute and re-enter consensus under durable leases.

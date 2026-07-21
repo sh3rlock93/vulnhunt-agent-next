@@ -27,6 +27,11 @@ evidence-only **Reviewer** can confirm, reject, or request a declarative
 reproduction variant, but cannot execute commands itself. Slice bounding gives
 deterministic coverage and clean parallelism.
 
+Incremental native scans carry exact changed nodes and critical signals into a
+24 KB bounded context. Every target must end as `finding`, `no_finding`, or
+`deferred`; declarative Reviewer variants run under a separate SQLite lease and
+automatically return to evidence review.
+
 These three pieces (Hunter · Clusterer · Reviewer) **adapt the Mythos
 building blocks (Ranker · Hunters · Reviewer)** for public-model access.
 

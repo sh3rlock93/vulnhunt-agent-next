@@ -98,3 +98,47 @@ jobs:
           python benchmarks/run_c_graph_benchmark.py
           --repo .benchmark/libcue-fixed
           --expect fixed
+
+  m9-zlib-regression:
+    name: M9 zlib CVE-2023-45853 gates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install project
+        run: python -m pip install -e .
+      - name: Checkout pinned fixed zlib revision
+        uses: actions/checkout@v6
+        with:
+          repository: madler/zlib
+          ref: 73331a6a0481067628f065ffe87bb1d8f787d10c
+          fetch-depth: 0
+          path: .benchmark/zlib-fixed
+      - name: Require the 16-bit guards to lower the target allocation risk
+        run: >-
+          python benchmarks/run_zlib_cve_benchmark.py
+          --repo .benchmark/zlib-fixed
+          --expect fixed
+      - name: Checkout a second pinned zlib worktree
+        uses: actions/checkout@v6
+        with:
+          repository: madler/zlib
+          ref: 73331a6a0481067628f065ffe87bb1d8f787d10c
+          fetch-depth: 0
+          path: .benchmark/zlib-vulnerable
+      - name: Materialize the vulnerable source as a revert of the pinned fix
+        run: >-
+          git -C .benchmark/zlib-vulnerable
+          -c user.name=VulnHunt-CI
+          -c user.email=vulnhunt-ci@example.invalid
+          revert --no-edit 73331a6a0481067628f065ffe87bb1d8f787d10c
+      - name: Require change-focused target coverage and bounded context
+        run: >-
+          python benchmarks/run_zlib_cve_benchmark.py
+          --repo .benchmark/zlib-vulnerable
+          --expect vulnerable
+          --base-ref 73331a6a0481067628f065ffe87bb1d8f787d10c
+          --head-ref HEAD
