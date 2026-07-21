@@ -242,7 +242,13 @@ def _route_file(
         if grammar_context and PARSER not in selected:
             selected.append(PARSER)
         else:
-            selected.extend(ranked[1:2])
+            secondary = next(
+                (hunter for hunter in ranked if hunter not in selected),
+                "",
+            )
+            if secondary:
+                selected.append(secondary)
+    selected = list(dict.fromkeys(selected))
     return [
         (hunter, sorted(reasons[hunter] or {"fallback:deterministic"}))
         for hunter in selected

@@ -747,6 +747,101 @@ def test_critical_specialist_is_forced_even_when_not_manually_enabled() -> None:
     assert routed.covered_critical_sink_ids == ("sig-format",)
 
 
+def test_cross_file_secondary_never_duplicates_preferred_specialist() -> None:
+    target = GraphNode(
+        node_id="target.c::process@1",
+        path="target.c",
+        symbol="process",
+        line=1,
+        end_line=20,
+        kind=NodeKind.FUNCTION,
+        visibility="external",
+    )
+    helper = GraphNode(
+        node_id="helper.c::release@1",
+        path="helper.c",
+        symbol="release",
+        line=1,
+        end_line=5,
+        kind=NodeKind.FUNCTION,
+        visibility="internal",
+    )
+    signals = (
+        SecuritySignal(
+            signal_id="sig-allocation",
+            node_id=target.node_id,
+            path=target.path,
+            line=5,
+            role=SignalRole.SINK,
+            category="allocation_size",
+            operation="malloc",
+            risk=4,
+        ),
+        SecuritySignal(
+            signal_id="sig-release-a",
+            node_id=target.node_id,
+            path=target.path,
+            line=10,
+            role=SignalRole.SINK,
+            category="lifetime_release",
+            operation="free",
+            risk=3,
+        ),
+        SecuritySignal(
+            signal_id="sig-release-b",
+            node_id=target.node_id,
+            path=target.path,
+            line=11,
+            role=SignalRole.SINK,
+            category="lifetime_release",
+            operation="free",
+            risk=3,
+        ),
+    )
+    graph = CAnalysisGraph(
+        nodes=(target, helper),
+        signals=signals,
+        entrypoint_ids=(target.node_id,),
+        critical_sink_ids=("sig-allocation",),
+    )
+    coverage = CoveragePlan(
+        slices=(AnalysisSlice(
+            slice_id="slice-cross-file",
+            entrypoint_id=target.node_id,
+            sink_signal_id="sig-allocation",
+            node_ids=(target.node_id, helper.node_id),
+            files=(target.path, helper.path),
+            categories=("allocation_size", "lifetime_release"),
+            risk=5,
+            rationale="cross-file allocation and release",
+        ),),
+        selected_files=(target.path,),
+        covered_entrypoint_ids=(target.node_id,),
+        covered_sink_ids=("sig-allocation",),
+    )
+
+    routed = build_routing_plan(
+        run_id="run-1",
+        source_snapshot=HASH_A,
+        selected_files=[target.path],
+        enabled_hunters=[
+            "c-bounds-integers",
+            "c-memory-lifetime",
+        ],
+        analysis={
+            "language": "c",
+            "graph": graph.model_dump(mode="json"),
+            "coverage_plan": coverage.model_dump(mode="json"),
+        },
+    )
+
+    assert [item.hunter for item in routed.work_items] == [
+        "c-bounds-integers",
+        "c-memory-lifetime",
+    ]
+    assert len({item.work_id for item in routed.work_items}) == 2
+
+
 def test_overlapping_routes_collapse_to_bounded_slice_work(
     tmp_path: Path,
 ) -> None:
