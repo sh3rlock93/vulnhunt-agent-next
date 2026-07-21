@@ -1,6 +1,7 @@
 """Tree-sitter based indexer. Currently supports Python; extend by adding languages."""
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
@@ -30,6 +31,19 @@ _LANGUAGES = {
     "tsx":  ("typescript", _TSX_LANG),
     "java": ("java",       Language(tree_sitter_java.language())),
 }
+
+
+@dataclass(frozen=True)
+class CFunctionRegion:
+    """A normal or conservatively recovered C function definition."""
+
+    container: Node
+    declarator: Node
+    body_nodes: tuple[Node, ...]
+    line: int
+    end_line: int
+    start_byte: int
+    recovered: bool = False
 
 
 class TreeSitterIndexer:
@@ -86,6 +100,88 @@ class TreeSitterIndexer:
 
 def _text(node: Node, source: bytes) -> str:
     return source[node.start_byte:node.end_byte].decode("utf-8", errors="replace")
+
+
+def c_function_regions(root: Node, source: bytes) -> tuple[CFunctionRegion, ...]:
+    """Return function regions, including strict recovery from parse errors.
+
+    Some macro-decorated declarations are represented as a top-level ERROR
+    whose direct children still contain a function declarator, body statements,
+    and an isolated closing brace. Recovery requires all three structural
+    anchors so an arbitrary expression or prototype cannot become a function.
+    """
+    regions: list[CFunctionRegion] = []
+    normal_ranges: list[tuple[int, int]] = []
+    for node in _walk_nodes(root):
+        if node.type != "function_definition":
+            continue
+        declarator = node.child_by_field_name("declarator")
+        body = node.child_by_field_name("body")
+        if declarator is None or body is None:
+            continue
+        regions.append(CFunctionRegion(
+            container=node,
+            declarator=declarator,
+            body_nodes=(body,),
+            line=node.start_point[0] + 1,
+            end_line=node.end_point[0] + 1,
+            start_byte=node.start_byte,
+        ))
+        normal_ranges.append((node.start_byte, node.end_byte))
+
+    for node in _walk_nodes(root):
+        if node.type != "ERROR" or any(
+            start <= node.start_byte and node.end_byte <= end
+            for start, end in normal_ranges
+        ):
+            continue
+        children = tuple(node.named_children)
+        for index, declarator in enumerate(children):
+            if declarator.type != "function_declarator":
+                continue
+            closing = next(
+                (
+                    position
+                    for position in range(index + 1, len(children))
+                    if children[position].type == "ERROR"
+                    and _text(children[position], source).strip() == "}"
+                ),
+                None,
+            )
+            if closing is None:
+                continue
+            body_nodes = children[index + 1 : closing]
+            next_start = (
+                body_nodes[0].start_byte
+                if body_nodes else children[closing].start_byte
+            )
+            if b"{" not in source[declarator.end_byte:next_start]:
+                continue
+            regions.append(CFunctionRegion(
+                container=node,
+                declarator=declarator,
+                body_nodes=body_nodes,
+                line=node.start_point[0] + 1,
+                end_line=children[closing].end_point[0] + 1,
+                start_byte=node.start_byte,
+                recovered=True,
+            ))
+            break
+
+    unique = {
+        (region.declarator.start_byte, region.declarator.end_byte): region
+        for region in regions
+    }
+    return tuple(sorted(
+        unique.values(),
+        key=lambda item: (item.line, item.declarator.start_byte),
+    ))
+
+
+def _walk_nodes(root: Node):
+    yield root
+    for child in root.children:
+        yield from _walk_nodes(child)
 
 
 def _walk_python(node: Node, source: bytes, imports: list[str], symbols: list[Symbol],
@@ -187,6 +283,22 @@ def _walk_c(node: Node, source: bytes, imports: list[str], symbols: list[Symbol]
                 ))
 
         # Don't recurse into function bodies (keep symbol list focused on top level).
+
+    existing = {
+        (item.name, item.line)
+        for item in symbols
+        if item.kind == "function"
+    }
+    for region in c_function_regions(node, source):
+        name = _c_function_name(region.declarator, source)
+        if not name or (name, region.line) in existing:
+            continue
+        symbols.append(Symbol(
+            name=name,
+            kind="function",
+            line=region.line,
+            signature=_text(region.declarator, source).splitlines()[0][:200],
+        ))
 
 
 def _walk_js_ts(node: Node, source: bytes, imports: list[str], symbols: list[Symbol],

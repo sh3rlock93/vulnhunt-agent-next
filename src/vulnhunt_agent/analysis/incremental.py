@@ -18,7 +18,9 @@ _BUILD_FILES = frozenset({
     "Makefile",
     "GNUmakefile",
 })
-_HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
+_HUNK = re.compile(
+    r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@"
+)
 _LOCAL_INCLUDE = re.compile(r'^\s*#\s*include\s*"([^"]+)"', re.MULTILINE)
 _MAX_CHANGED_FILES = 20_000
 
@@ -353,9 +355,12 @@ def _changed_line_ranges(
         match = _HUNK.match(line)
         if not match:
             continue
-        start = max(1, int(match.group(1)))
-        count = int(match.group(2) or "1")
-        end = start if count == 0 else start + count - 1
+        start = max(1, int(match.group(3)))
+        count = int(match.group(4) or "1")
+        # A deletion-only hunk has no line in the new tree. Anchor both sides
+        # of the deletion boundary so adjacent or macro-recovered functions are
+        # conservatively included.
+        end = start + 1 if count == 0 else start + count - 1
         ranges.append((start, end))
     return tuple(ranges)
 

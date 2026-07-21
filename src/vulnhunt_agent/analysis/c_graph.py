@@ -9,7 +9,11 @@ from pathlib import Path
 import tree_sitter_c
 from tree_sitter import Language, Node, Parser
 
-from ..indexer.tree_sitter_indexer import _c_function_name
+from ..indexer.tree_sitter_indexer import (
+    CFunctionRegion,
+    _c_function_name,
+    c_function_regions,
+)
 from .models import (
     CAnalysisGraph,
     EdgeKind,
@@ -68,6 +72,7 @@ _SINK_CALLS: dict[str, tuple[str, int]] = {
     "calloc": ("allocation_size", 4),
     "realloc": ("allocation_size", 4),
     "alloca": ("allocation_size", 4),
+    "ALLOC": ("allocation_size", 4),
     "system": ("command_execution", 5),
     "popen": ("command_execution", 5),
     "execl": ("command_execution", 5),
@@ -220,23 +225,33 @@ def build_c_analysis_graph(repo: Path, source_files: list[str]) -> CAnalysisGrap
 def _extract_c_file(parser: Parser, repo: Path, relative: str) -> list[_Extracted]:
     source = (repo / relative).read_bytes()
     root = parser.parse(source).root_node
-    out: list[_Extracted] = []
-    for definition in _nodes_of_type(root, "function_definition"):
-        declarator = definition.child_by_field_name("declarator")
-        name = _c_function_name(declarator, source)
-        body = definition.child_by_field_name("body")
-        if not name or declarator is None or body is None:
-            continue
-        line = definition.start_point[0] + 1
-        node_id = _node_id(relative, name, line)
-        prefix = source[definition.start_byte:declarator.start_byte].decode(
-            errors="replace"
-        )
-        visibility = "internal" if re.search(r"\bstatic\b", prefix) else "external"
-        call_sites: list[_CallSite] = []
-        signals: list[SecuritySignal] = []
-        call_names: list[str] = []
-        for descendant in _walk(body):
+    return [
+        extracted
+        for region in c_function_regions(root, source)
+        if (extracted := _extract_c_function(relative, source, region)) is not None
+    ]
+
+
+def _extract_c_function(
+    relative: str,
+    source: bytes,
+    region: CFunctionRegion,
+) -> _Extracted | None:
+    declarator = region.declarator
+    name = _c_function_name(declarator, source)
+    if not name:
+        return None
+    line = region.line
+    node_id = _node_id(relative, name, line)
+    prefix = source[region.start_byte:declarator.start_byte].decode(
+        errors="replace"
+    )
+    visibility = "internal" if re.search(r"\bstatic\b", prefix) else "external"
+    call_sites: list[_CallSite] = []
+    signals: list[SecuritySignal] = []
+    call_names: list[str] = []
+    for body_node in region.body_nodes:
+        for descendant in (body_node, *_walk(body_node)):
             if descendant.type == "call_expression":
                 callee = _call_name(descendant, source)
                 if not callee:
@@ -273,7 +288,7 @@ def _extract_c_file(parser: Parser, repo: Path, relative: str) -> list[_Extracte
                     index = subscript.child_by_field_name("index")
                     index_text = _text(index, source) if index is not None else ""
                     guard_detail = _index_guard_detail(
-                        definition, descendant, index_text, source
+                        region.start_byte, descendant, index_text, source
                     )
                     guarded = "lower_guard=yes" in guard_detail and (
                         "upper_guard=yes" in guard_detail
@@ -294,21 +309,20 @@ def _extract_c_file(parser: Parser, repo: Path, relative: str) -> list[_Extracte
                             f"expression={_text(descendant, source)[:180]}"
                         ),
                     ))
-        out.append(_Extracted(
-            node=GraphNode(
-                node_id=node_id,
-                path=relative,
-                symbol=name,
-                line=line,
-                end_line=definition.end_point[0] + 1,
-                kind=NodeKind.FUNCTION,
-                visibility=visibility,
-                calls=tuple(sorted(set(call_names))),
-            ),
-            calls=tuple(call_sites),
-            signals=tuple({item.signal_id: item for item in signals}.values()),
-        ))
-    return out
+    return _Extracted(
+        node=GraphNode(
+            node_id=node_id,
+            path=relative,
+            symbol=name,
+            line=line,
+            end_line=region.end_line,
+            kind=NodeKind.FUNCTION,
+            visibility=visibility,
+            calls=tuple(sorted(set(call_names))),
+        ),
+        calls=tuple(call_sites),
+        signals=tuple({item.signal_id: item for item in signals}.values()),
+    )
 
 
 def _extract_grammar_file(repo: Path, relative: str) -> _Extracted:
@@ -492,7 +506,7 @@ def _first_node_of_type(root: Node, node_type: str) -> Node | None:
 
 
 def _index_guard_detail(
-    definition: Node,
+    function_start_byte: int,
     assignment: Node,
     index_text: str,
     source: bytes,
@@ -501,7 +515,7 @@ def _index_guard_detail(
     identifier = index_text.strip()
     if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", identifier):
         return f"index={identifier or '<complex>'}; lower_guard=no; upper_guard=no"
-    prefix = source[definition.start_byte:assignment.start_byte].decode(
+    prefix = source[function_start_byte:assignment.start_byte].decode(
         errors="replace"
     )
     escaped = re.escape(identifier)
