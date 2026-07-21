@@ -70,6 +70,7 @@ class HardenedDockerBackend:
                 image_digest=image_digest,
                 result=result,
                 setup_results=setup_results,
+                environment_id=name,
             )
         finally:
             if started:

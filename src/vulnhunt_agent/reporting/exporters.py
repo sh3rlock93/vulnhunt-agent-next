@@ -40,6 +40,16 @@ def build_canonical_report(
             "stdout_artifact": item.stdout_artifact,
             "stderr_artifact": item.stderr_artifact,
             "captured_artifacts": item.captured_artifacts,
+            "execution_subject": item.execution_subject.value,
+            "provenance_policy": item.provenance_policy,
+            "clean_environment_id": item.clean_environment_id,
+            "target_binary": item.target_binary,
+            "linked_target_artifacts": list(item.linked_target_artifacts),
+            "sanitizer_failure_class": item.sanitizer_failure_class,
+            "sanitizer_frames": [
+                frame.model_dump(mode="json") for frame in item.sanitizer_frames
+            ],
+            "target_source_reached": item.target_source_reached,
         }
         for item in evidence
         if (
@@ -48,7 +58,7 @@ def build_canonical_report(
         )
     ]
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "run": {
             "run_id": run.run_id,
             "repository_url": run.source_url,
@@ -144,6 +154,9 @@ def render_markdown(report: dict[str, Any]) -> str:
             lines.append(f"- Setup: `{' '.join(command)}`")
         lines.extend([
             f"- Trigger: `{' '.join(item['command'])}`",
+            f"- Execution subject: `{item['execution_subject']}`; "
+            f"target source reached: `{item['target_source_reached']}`",
+            f"- Sanitizer failure: `{item['sanitizer_failure_class'] or 'none'}`",
             f"- Exit: `{item['exit_code']}`; timed out: `{item['timed_out']}`",
             (
                 f"- Oracle: `{oracle.get('expression') or oracle.get('type', '')}` "

@@ -23,6 +23,12 @@ from ..infrastructure.sqlite_repository import (
 )
 from ..sandbox.base import SandboxBackend, SandboxJob
 from .oracles import evaluate_oracle
+from .provenance import (
+    NATIVE_EVIDENCE_POLICY,
+    actual_target_group_agrees,
+    derive_execution_provenance,
+    requires_actual_target,
+)
 
 
 class ReproductionStatus(StrEnum):
@@ -30,6 +36,7 @@ class ReproductionStatus(StrEnum):
     REPRODUCED = "reproduced"
     FAILED = "failed"
     FLAKY = "flaky"
+    UNVERIFIED = "unverified"
     ENVIRONMENT_BLOCKED = "environment_blocked"
 
 
@@ -77,6 +84,7 @@ class ReproducerService:
             or finding.poc.cwd != spec.cwd
         ):
             raise ValueError("reproduction PoC does not match the candidate")
+        require_target = requires_actual_target(finding)
 
         task_payload = spec.model_dump(mode="json")
         task_created = self.repository.ensure_task(
@@ -98,7 +106,11 @@ class ReproducerService:
             if stored_task is None or stored_task["payload"] != task_payload:
                 raise ValueError("reproduction_id is already bound to another job")
         existing = self._group_evidence(spec)
-        if finding.state is FindingState.REPRODUCED and _is_deterministic(existing, spec):
+        if finding.state is FindingState.REPRODUCED and _is_deterministic(
+            existing,
+            spec,
+            require_actual_target=require_target,
+        ):
             return ReproductionOutcome(
                 reproduction_id=spec.reproduction_id,
                 status=ReproductionStatus.REPRODUCED,
@@ -207,9 +219,16 @@ class ReproducerService:
         self.repository.attach_candidate_evidence(
             spec.candidate_id, tuple(item.evidence_id for item in group_evidence)
         )
-        if _is_deterministic(list(group_evidence), spec):
+        if _is_deterministic(
+            list(group_evidence),
+            spec,
+            require_actual_target=require_target,
+        ):
             state = FindingState.REPRODUCED
             status = ReproductionStatus.REPRODUCED
+        elif require_target and _all_oracles_pass(group_evidence):
+            state = FindingState.UNCLEAR
+            status = ReproductionStatus.UNVERIFIED
         elif any(
             item.oracle and item.oracle.result == "passed"
             for item in group_evidence
@@ -265,6 +284,7 @@ class ReproducerService:
             or finding.poc.cwd != spec.cwd
         ):
             raise ValueError("variant does not preserve the candidate PoC")
+        require_target = requires_actual_target(finding)
         if finding.state not in {
             FindingState.REPRODUCED,
             FindingState.REVIEWER_VERIFIED,
@@ -298,8 +318,14 @@ class ReproducerService:
                 spec.candidate_id,
                 tuple(item.evidence_id for item in group),
             )
-            if _is_deterministic(list(group), spec):
+            if _is_deterministic(
+                list(group),
+                spec,
+                require_actual_target=require_target,
+            ):
                 status = ReproductionStatus.REPRODUCED
+            elif require_target and _all_oracles_pass(group):
+                status = ReproductionStatus.UNVERIFIED
             elif any(
                 item.oracle and item.oracle.result == "passed"
                 for item in group
@@ -363,6 +389,12 @@ class ReproducerService:
             if setup_succeeded
             else _failed_oracle(spec)
         )
+        provenance = derive_execution_provenance(
+            argv=spec.argv,
+            setup_argvs=spec.setup_argvs,
+            stdout=execution.result.stdout,
+            stderr=execution.result.stderr,
+        )
         return Evidence(
             evidence_id=_evidence_id(spec, attempt),
             run_id=spec.run_id,
@@ -385,6 +417,14 @@ class ReproducerService:
             captured_artifacts={
                 path: artifact.digest for path, artifact in captured.items()
             },
+            execution_subject=provenance.execution_subject,
+            provenance_policy=NATIVE_EVIDENCE_POLICY,
+            clean_environment_id=execution.environment_id or None,
+            target_binary=provenance.target_binary,
+            linked_target_artifacts=provenance.linked_target_artifacts,
+            sanitizer_failure_class=provenance.sanitizer_failure_class,
+            sanitizer_frames=provenance.sanitizer_frames,
+            target_source_reached=provenance.target_source_reached,
         )
 
     def _group_evidence(self, spec: ReproductionSpec) -> list[Evidence]:
@@ -407,13 +447,16 @@ def _evidence_id(spec: ReproductionSpec, attempt: int) -> str:
 
 
 def _is_deterministic(
-    evidence: list[Evidence], spec: ReproductionSpec
+    evidence: list[Evidence],
+    spec: ReproductionSpec,
+    *,
+    require_actual_target: bool = False,
 ) -> bool:
     if len(evidence) != spec.attempts:
         return False
     attempt_ids = {item.attempt for item in evidence}
     image_digests = {item.image_digest for item in evidence}
-    return (
+    deterministic = (
         attempt_ids == set(range(1, spec.attempts + 1))
         and len(image_digests) == 1
         and all(
@@ -428,6 +471,16 @@ def _is_deterministic(
             and item.oracle.result == "passed"
             for item in evidence
         )
+    )
+    if not deterministic:
+        return False
+    return not require_actual_target or actual_target_group_agrees(evidence)
+
+
+def _all_oracles_pass(evidence: tuple[Evidence, ...]) -> bool:
+    return bool(evidence) and all(
+        item.oracle is not None and item.oracle.result == "passed"
+        for item in evidence
     )
 
 

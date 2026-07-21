@@ -34,6 +34,7 @@ class SandboxExecution:
     image_digest: str
     result: ExecResult
     setup_results: tuple[ExecResult, ...] = ()
+    environment_id: str = ""
 
 
 class SandboxBackend(Protocol):

@@ -1,6 +1,6 @@
 # M10 — Blind native vulnerability discovery at repository scale
 
-Status: In progress — PR 4 complete
+Status: In progress — PR 5 complete
 
 ## Goal
 
@@ -303,13 +303,13 @@ Expected changes:
 
 ### PR 5 acceptance gates
 
-- [ ] Standalone reimplementation evidence cannot confirm a target finding.
-- [ ] A prepared binary or linked target harness records verifiable target provenance.
-- [ ] Sanitizer frames are normalized and matched to the pinned source root.
-- [ ] Both clean attempts must agree on subject, snapshot, and failure class.
-- [ ] Legacy `unknown` evidence remains readable but cannot gain confirmation.
-- [ ] The prior archive snippet result is downgraded to unverified by policy.
-- [ ] The LibTIFF target binary reproduction is confirmable when executed twice.
+- [x] Standalone reimplementation evidence cannot confirm a target finding.
+- [x] A prepared binary or linked target harness records verifiable target provenance.
+- [x] Sanitizer frames are normalized and matched to the pinned source root.
+- [x] Both clean attempts must agree on subject, snapshot, and failure class.
+- [x] Legacy `unknown` evidence remains readable but cannot gain confirmation.
+- [x] The prior archive snippet result is downgraded to unverified by policy.
+- [x] The LibTIFF target binary reproduction is confirmable when executed twice.
 
 ## PR 6 — Codex protocol repair and durable retries
 

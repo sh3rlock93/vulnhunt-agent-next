@@ -13,6 +13,7 @@ from vulnhunt_agent.domain.schemas import OracleSpec, OracleType
 from vulnhunt_agent.infrastructure.artifacts import ArtifactStore
 from vulnhunt_agent.intake.snapshot import SnapshotBuilder
 from vulnhunt_agent.reproduction.oracles import evaluate_oracle
+from vulnhunt_agent.reproduction.provenance import derive_execution_provenance
 from vulnhunt_agent.sandbox.base import SandboxJob
 from vulnhunt_agent.sandbox.container import ContainerExecutor
 from vulnhunt_agent.sandbox.hardened import HardenedDockerBackend
@@ -383,6 +384,19 @@ async def test_real_reproducer_runs_native_setup_before_trigger(tmp_path) -> Non
     assert execution.setup_results[0].exit_code == 0, execution.setup_results[0].stderr
     assert execution.result.exit_code != 0
     assert "AddressSanitizer" in execution.result.stderr
+    assert execution.environment_id
+    provenance = derive_execution_provenance(
+        argv=job.argv,
+        setup_argvs=job.setup_argvs,
+        stdout=execution.result.stdout,
+        stderr=execution.result.stderr,
+    )
+    assert provenance.execution_subject.value == "linked_target_harness"
+    assert provenance.target_source_reached
+    assert any(
+        frame.path == "/workspace/source/target.c"
+        for frame in provenance.sanitizer_frames
+    )
 
 
 def _require_docker(image: str = IMAGE) -> None:
