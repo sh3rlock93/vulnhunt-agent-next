@@ -16,7 +16,9 @@ from typing import Any
 
 from . import settings as _settings
 from .llm import LLMResponse
+from .model_errors import ModelClientError, ModelFailureCategory
 from .openai_client import _to_openai_tools
+from .tool_protocol import tool_schema_map, validated_tool_block
 
 _MAX_PROCESS_OUTPUT = 2 * 1024 * 1024
 _DISABLED_CODEX_FEATURES = (
@@ -65,9 +67,11 @@ class CodexSubscriptionClient:
         _, provider = _settings.resolve(model_id)
         command = shutil.which(provider.codex_command)
         if not command:
-            raise RuntimeError(
+            raise ModelClientError(
+                ModelFailureCategory.CONFIGURATION,
                 f"Codex CLI {provider.codex_command!r} was not found. "
-                "Install Codex CLI and run `codex login`."
+                "Install Codex CLI and run `codex login`.",
+                retryable=False,
             )
         self.command = command
         self.max_tokens = max_tokens or _settings.MAX_TOKENS
@@ -93,12 +97,12 @@ class CodexSubscriptionClient:
             tools=openai_tools,
             max_tokens=max_tokens or self.max_tokens,
         )
-        allowed_tool_names = {tool["name"] for tool in openai_tools}
+        tool_schemas = tool_schema_map(openai_tools)
 
         async with self._semaphore:
-            return await self._run(prompt, allowed_tool_names)
+            return await self._run(prompt, tool_schemas)
 
-    async def _run(self, prompt: str, allowed_tool_names: set[str]) -> LLMResponse:
+    async def _run(self, prompt: str, tool_schemas: dict[str, dict]) -> LLMResponse:
         with tempfile.TemporaryDirectory(prefix="vulnhunt-codex-") as temp_dir:
             temp = Path(temp_dir)
             schema_path = temp / "response-schema.json"
@@ -149,29 +153,47 @@ class CodexSubscriptionClient:
             except TimeoutError as exc:
                 process.kill()
                 await process.communicate()
-                raise RuntimeError(
-                    f"Codex subscription request timed out after {self.timeout_seconds}s."
+                raise ModelClientError(
+                    ModelFailureCategory.TIMEOUT,
+                    f"Codex subscription request timed out after {self.timeout_seconds}s.",
+                    retryable=True,
                 ) from exc
 
             if len(stdout) > _MAX_PROCESS_OUTPUT or len(stderr) > _MAX_PROCESS_OUTPUT:
-                raise RuntimeError("Codex CLI produced more output than the adapter permits.")
+                raise ModelClientError(
+                    ModelFailureCategory.PROTOCOL,
+                    "Codex CLI produced more output than the adapter permits.",
+                    retryable=True,
+                )
             if process.returncode != 0:
-                hint = _failure_hint(stderr.decode(errors="replace"))
-                raise RuntimeError(
+                category, retryable, hint = _classify_failure(
+                    stderr.decode(errors="replace")
+                )
+                raise ModelClientError(
+                    category,
                     f"Codex subscription request failed (exit {process.returncode})."
-                    f" {hint}"
+                    f" {hint}",
+                    retryable=retryable,
                 )
             if not output_path.exists():
-                raise RuntimeError("Codex CLI completed without a structured final response.")
+                raise ModelClientError(
+                    ModelFailureCategory.PROTOCOL,
+                    "Codex CLI completed without a structured final response.",
+                    retryable=True,
+                )
 
             try:
                 payload = json.loads(output_path.read_text(encoding="utf-8"))
             except json.JSONDecodeError as exc:
-                raise RuntimeError("Codex CLI returned invalid structured JSON.") from exc
+                raise ModelClientError(
+                    ModelFailureCategory.PROTOCOL,
+                    "Codex CLI returned invalid structured JSON.",
+                    retryable=True,
+                ) from exc
             return _parse_codex_response(
                 payload,
                 stdout.decode(errors="replace"),
-                allowed_tool_names=allowed_tool_names,
+                tool_schemas=tool_schemas,
             )
 
 
@@ -218,75 +240,96 @@ def _failure_hint(stderr: str) -> str:
     return "Run `codex login status` and inspect the local Codex CLI diagnostics."
 
 
+def _classify_failure(
+    stderr: str,
+) -> tuple[ModelFailureCategory, bool, str]:
+    lowered = stderr.casefold()
+    hint = _failure_hint(stderr)
+    if any(term in lowered for term in ("unauthorized", "authentication", "401", "login")):
+        return ModelFailureCategory.AUTHENTICATION, False, hint
+    if any(term in lowered for term in ("forbidden", "authorization", "permission", "403")):
+        return ModelFailureCategory.AUTHORIZATION, False, hint
+    if "model" in lowered and any(
+        term in lowered for term in ("not found", "unsupported", "unavailable")
+    ):
+        return ModelFailureCategory.MODEL_UNAVAILABLE, False, hint
+    if any(term in lowered for term in ("quota", "usage limit", "credit")):
+        return ModelFailureCategory.BUDGET, False, hint
+    if "rate limit" in lowered or "429" in lowered:
+        return ModelFailureCategory.RATE_LIMIT, True, hint
+    if any(
+        term in lowered
+        for term in ("timed out", "timeout", "connection", "network", "transport")
+    ):
+        return ModelFailureCategory.TRANSPORT, True, hint
+    return ModelFailureCategory.INTERNAL, False, hint
+
+
 def _parse_codex_response(
     payload: Any,
     jsonl_output: str,
     *,
-    allowed_tool_names: set[str],
+    allowed_tool_names: set[str] | None = None,
+    tool_schemas: dict[str, dict] | None = None,
 ) -> LLMResponse:
     if not isinstance(payload, dict):
-        raise RuntimeError("Codex structured response must be a JSON object.")
+        raise ModelClientError(
+            ModelFailureCategory.PROTOCOL,
+            "Codex structured response must be a JSON object.",
+            retryable=True,
+        )
     text = payload.get("text")
     tool_calls = payload.get("tool_calls")
     if not isinstance(text, str) or not isinstance(tool_calls, list):
-        raise RuntimeError("Codex structured response has an invalid shape.")
+        raise ModelClientError(
+            ModelFailureCategory.PROTOCOL,
+            "Codex structured response has an invalid shape.",
+            retryable=True,
+        )
 
+    schemas = tool_schemas or {
+        name: {"type": "object"} for name in (allowed_tool_names or set())
+    }
     blocks: list[dict] = []
     if text:
         blocks.append({"text": text})
     for call in tool_calls:
         if not isinstance(call, dict):
-            raise RuntimeError("Codex returned a malformed tool call.")
-        name = call.get("name")
-        if not isinstance(name, str) or name not in allowed_tool_names:
-            raise RuntimeError(f"Codex requested an unavailable host tool: {name!r}.")
-        arguments_text = call.get("arguments")
-        if not isinstance(arguments_text, str):
-            raise RuntimeError("Codex tool arguments must be encoded as a JSON string.")
-        arguments = _decode_tool_arguments(arguments_text)
-        if not isinstance(arguments, dict):
-            raise RuntimeError("Codex tool arguments must decode to a JSON object.")
-        call_id = call.get("id")
-        if not isinstance(call_id, str) or not call_id:
-            call_id = f"call_{uuid.uuid4().hex[:8]}"
-        blocks.append({
-            "toolUse": {
-                "toolUseId": call_id,
-                "name": name,
-                "input": arguments,
-            }
-        })
+            blocks.append(validated_tool_block(
+                call_id=None,
+                name=None,
+                arguments_text=None,
+                schemas=schemas,
+            ))
+            continue
+        blocks.append(validated_tool_block(
+            call_id=call.get("id"),
+            name=call.get("name"),
+            arguments_text=call.get("arguments"),
+            schemas=schemas,
+        ))
 
     if not blocks:
-        raise RuntimeError("Codex returned neither text nor a host tool call.")
+        raise ModelClientError(
+            ModelFailureCategory.PROTOCOL,
+            "Codex returned neither text nor a host tool call.",
+            retryable=True,
+        )
     usage = _parse_usage(jsonl_output)
+    invalid_arguments = any("toolArgumentsInvalid" in block for block in blocks)
     return LLMResponse(
         text=text,
         input_tokens=max(usage["input_tokens"] - usage["cached_input_tokens"], 0),
         output_tokens=usage["output_tokens"],
         cache_read_tokens=usage["cached_input_tokens"],
         cache_write_tokens=0,
-        stop_reason="tool_use" if tool_calls else "end_turn",
+        stop_reason=(
+            "tool_arguments_invalid"
+            if invalid_arguments
+            else "tool_use" if tool_calls else "end_turn"
+        ),
         content_blocks=blocks,
     )
-
-
-def _decode_tool_arguments(arguments_text: str) -> Any:
-    """Decode one tool argument object.
-
-    Structured output occasionally appends a second JSON value to the string
-    despite the schema. The host executes one declared tool call at a time, so
-    accept the first complete value and discard only trailing data. Inputs still
-    pass the normal tool name, path, and argv validation boundary.
-    """
-    try:
-        return json.loads(arguments_text)
-    except json.JSONDecodeError:
-        try:
-            value, _ = json.JSONDecoder().raw_decode(arguments_text.lstrip())
-            return value
-        except json.JSONDecodeError as exc:
-            raise RuntimeError("Codex returned invalid JSON tool arguments.") from exc
 
 
 def _parse_usage(jsonl_output: str) -> dict[str, int]:

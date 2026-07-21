@@ -1,6 +1,6 @@
 # M10 — Blind native vulnerability discovery at repository scale
 
-Status: In progress — PR 5 complete
+Status: In progress — PR 6 complete
 
 ## Goal
 
@@ -338,13 +338,13 @@ Expected changes:
 
 ### PR 6 acceptance gates
 
-- [ ] Invalid JSON escapes never reach tool execution.
-- [ ] One valid model repair can resume the original logical work item.
-- [ ] A second malformed payload terminates as an explicit deferred disposition.
-- [ ] Retry count, token cost, and elapsed time are charged to the original budget.
-- [ ] Completed calls and target dispositions are not replayed after retry.
-- [ ] Auth and configuration failures fail immediately with actionable categories.
-- [ ] The previously observed invalid-escape scenario is covered by a deterministic test.
+- [x] Invalid JSON escapes never reach tool execution.
+- [x] One valid model repair can resume the original logical work item.
+- [x] A second malformed payload terminates as an explicit deferred disposition.
+- [x] Retry count, token cost, and elapsed time are charged to the original budget.
+- [x] Completed calls and target dispositions are not replayed after retry.
+- [x] Auth and configuration failures fail immediately with actionable categories.
+- [x] The previously observed invalid-escape scenario is covered by a deterministic test.
 
 ## PR 7 — Withheld-oracle LibTIFF benchmark
 

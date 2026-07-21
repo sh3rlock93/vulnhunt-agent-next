@@ -3,9 +3,12 @@ from __future__ import annotations
 import json
 from typing import Any, cast
 
+import pytest
+
 from vulnhunt_agent.agents.hunter import HunterAgent
 from vulnhunt_agent.agents.tools.executor import HunterTools
 from vulnhunt_agent.core.llm import LLMResponse
+from vulnhunt_agent.core.model_errors import ModelClientError, ModelFailureCategory
 from vulnhunt_agent.sandbox.base import ExecResult
 
 
@@ -199,6 +202,191 @@ async def test_missing_target_contract_stops_after_one_repair_and_defers() -> No
     assert result.stopped == "target_incomplete"
     assert result.incomplete_target_ids == ["sig-alloc"]
     assert result.target_dispositions[0]["status"] == "deferred"
+
+
+def _invalid_tool_response(*, reason: str = "invalid_json") -> LLMResponse:
+    return _response(
+        blocks=[{
+            "toolArgumentsInvalid": {
+                "toolUseId": "call-invalid",
+                "name": "grep",
+                "errorCode": "tool_arguments_invalid",
+                "reason": reason,
+                "allowedSchema": {
+                    "type": "object",
+                    "properties": {"pattern": {"type": "string"}},
+                    "required": ["pattern"],
+                    "additionalProperties": False,
+                },
+            }
+        }],
+        in_tokens=7,
+        out_tokens=3,
+    )
+
+
+def _completed_target_response() -> LLMResponse:
+    payload = json.dumps({
+        "target_dispositions": [{
+            "target_id": "sig-alloc",
+            "status": "no_finding",
+            "finding_indices": [],
+            "rationale": "The checked allocation is bounded.",
+        }],
+        "findings": [],
+    })
+    return _response(
+        text=payload,
+        blocks=[{"text": payload}],
+        in_tokens=11,
+        out_tokens=5,
+    )
+
+
+class ProtocolRepairClient:
+    def __init__(self) -> None:
+        self.responses = [
+            _invalid_tool_response(),
+            _response(
+                blocks=[{"toolUse": {
+                    "toolUseId": "call-grep",
+                    "name": "grep",
+                    "input": {"pattern": "ALLOC"},
+                }}],
+                in_tokens=9,
+                out_tokens=4,
+            ),
+            _completed_target_response(),
+        ]
+        self.messages: list[list[dict]] = []
+
+    async def chat(self, **kwargs) -> LLMResponse:
+        self.messages.append(list(kwargs["messages"]))
+        return self.responses.pop(0)
+
+
+async def test_invalid_tool_json_repairs_once_without_executing_bad_payload() -> None:
+    client = ProtocolRepairClient()
+    tools = FakeHunterTools()
+    checkpoints = []
+    result = await HunterAgent(
+        client=cast(Any, client),
+        tools=cast(Any, tools),
+        arch={"language": "c", "environment": "c:gcc-13"},
+        hunter_prompt="Review the allocation.",
+        max_iterations=5,
+        on_checkpoint=lambda item: checkpoints.append(item.protocol_repairs),
+    ).hunt(
+        "target.c",
+        {"change_focus": {"target_signal_ids": ["sig-alloc"]}},
+    )
+
+    assert result.stopped == "final_json"
+    assert result.tool_argument_errors == 1
+    assert result.protocol_repairs == 1
+    assert result.protocol_repair_successes == 1
+    assert result.iterations == 3
+    assert result.input_tokens == 27
+    assert result.output_tokens == 12
+    assert tools.calls == [("grep", {"pattern": "ALLOC"})]
+    repair_prompt = client.messages[1][-1]["content"][0]["text"]
+    assert "tool_arguments_invalid" in repair_prompt
+    assert "allowed_schema" in repair_prompt
+    assert checkpoints
+
+
+class TwiceMalformedClient:
+    async def chat(self, **kwargs) -> LLMResponse:
+        return _invalid_tool_response()
+
+
+async def test_second_malformed_tool_payload_is_explicitly_deferred() -> None:
+    tools = FakeHunterTools()
+    result = await HunterAgent(
+        client=cast(Any, TwiceMalformedClient()),
+        tools=cast(Any, tools),
+        arch={"language": "c", "environment": "c:gcc-13"},
+        hunter_prompt="Review the allocation.",
+        max_iterations=5,
+    ).hunt(
+        "target.c",
+        {"change_focus": {"target_signal_ids": ["sig-alloc"]}},
+    )
+
+    assert result.stopped == "tool_arguments_invalid"
+    assert result.tool_argument_errors == 2
+    assert result.protocol_repairs == 1
+    assert result.target_dispositions[0]["status"] == "deferred"
+    assert tools.calls == []
+
+
+class TransientAfterToolClient:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def chat(self, **kwargs) -> LLMResponse:
+        self.calls += 1
+        if self.calls == 1:
+            return _response(
+                blocks=[{"toolUse": {
+                    "toolUseId": "call-read",
+                    "name": "read_file",
+                    "input": {"path": "target.c"},
+                }}],
+                in_tokens=8,
+                out_tokens=3,
+            )
+        if self.calls == 2:
+            raise ModelClientError(
+                ModelFailureCategory.TRANSPORT,
+                "temporary model transport failure",
+                retryable=True,
+            )
+        return _completed_target_response()
+
+
+async def test_transient_retry_keeps_session_and_does_not_replay_completed_tool() -> None:
+    client = TransientAfterToolClient()
+    tools = FakeHunterTools()
+    result = await HunterAgent(
+        client=cast(Any, client),
+        tools=cast(Any, tools),
+        arch={"language": "c", "environment": "c:gcc-13"},
+        hunter_prompt="Review the allocation.",
+        max_iterations=5,
+    ).hunt(
+        "target.c",
+        {"change_focus": {"target_signal_ids": ["sig-alloc"]}},
+    )
+
+    assert client.calls == 3
+    assert tools.calls == [("read_file", {"path": "target.c"})]
+    assert result.transient_retries == 1
+    assert result.model_failures == {"transport": 1}
+    assert result.iterations == 3
+    assert result.stopped == "final_json"
+
+
+class AuthenticationFailureClient:
+    async def chat(self, **kwargs) -> LLMResponse:
+        raise ModelClientError(
+            ModelFailureCategory.AUTHENTICATION,
+            "run codex login",
+            retryable=False,
+        )
+
+
+async def test_authentication_failure_is_terminal_without_retry() -> None:
+    with pytest.raises(ModelClientError) as raised:
+        await HunterAgent(
+            client=cast(Any, AuthenticationFailureClient()),
+            tools=cast(Any, FakeHunterTools()),
+            arch={"language": "c", "environment": "c:gcc-13"},
+            hunter_prompt="Review the allocation.",
+            max_iterations=5,
+        ).hunt("target.c")
+    assert raised.value.category is ModelFailureCategory.AUTHENTICATION
+    assert raised.value.partial_result is not None
 
 
 class FakeContainer:

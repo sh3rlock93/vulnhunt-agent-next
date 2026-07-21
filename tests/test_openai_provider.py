@@ -13,11 +13,14 @@ from vulnhunt_agent.core import openai_auto
 from vulnhunt_agent.core.codex_client import (
     CodexSubscriptionClient,
     _build_adapter_prompt,
+    _classify_failure,
     _failure_hint,
     _parse_codex_response,
 )
+from vulnhunt_agent.core.model_errors import ModelFailureCategory
 from vulnhunt_agent.core.openai_client import (
     OpenAIResponsesClient,
+    _classify_openai_failure,
     _to_anthropic_response,
     _to_openai_input,
 )
@@ -135,7 +138,7 @@ def test_codex_response_maps_host_tool_call_and_usage() -> None:
     }]
 
 
-def test_codex_response_uses_first_complete_tool_argument_object() -> None:
+def test_codex_response_rejects_trailing_or_invalid_tool_json_as_typed_event() -> None:
     payload = {
         "text": "",
         "tool_calls": [{
@@ -149,14 +152,15 @@ def test_codex_response_uses_first_complete_tool_argument_object() -> None:
         payload, "", allowed_tool_names={"read_file"}
     )
 
-    assert response.content_blocks[0]["toolUse"]["input"] == {
-        "path": "cd.c",
-        "start": 1,
-    }
+    invalid = response.content_blocks[0]["toolArgumentsInvalid"]
+    assert response.stop_reason == "tool_arguments_invalid"
+    assert invalid["errorCode"] == "tool_arguments_invalid"
+    assert invalid["reason"] == "invalid_json"
+    assert "arguments" not in invalid
 
 
 @pytest.mark.parametrize(
-    "payload, message",
+    "payload, reason",
     [
         (
             {
@@ -167,7 +171,7 @@ def test_codex_response_uses_first_complete_tool_argument_object() -> None:
                     "arguments": "{}",
                 }],
             },
-            "unavailable host tool",
+            "unavailable_tool",
         ),
         (
             {
@@ -178,16 +182,91 @@ def test_codex_response_uses_first_complete_tool_argument_object() -> None:
                     "arguments": "[]",
                 }],
             },
-            "JSON object",
+            "arguments_not_object",
         ),
-        ({"text": "", "tool_calls": []}, "neither text nor"),
     ],
 )
-def test_codex_response_rejects_contract_violations(payload, message) -> None:
-    with pytest.raises(RuntimeError, match=message):
+def test_codex_response_returns_typed_contract_violations(payload, reason) -> None:
+    response = _parse_codex_response(
+        payload, "", allowed_tool_names={"read_file"}
+    )
+    invalid = response.content_blocks[0]["toolArgumentsInvalid"]
+    assert invalid["reason"] == reason
+    assert invalid["errorCode"] == "tool_arguments_invalid"
+
+
+def test_codex_response_rejects_empty_output() -> None:
+    with pytest.raises(RuntimeError, match="neither text nor"):
         _parse_codex_response(
-            payload, "", allowed_tool_names={"read_file"}
+            {"text": "", "tool_calls": []},
+            "",
+            allowed_tool_names={"read_file"},
         )
+
+
+def test_codex_response_validates_arguments_against_exact_tool_schema() -> None:
+    response = _parse_codex_response(
+        {
+            "text": "",
+            "tool_calls": [{
+                "id": "call-read",
+                "name": "read_file",
+                "arguments": '{"start":1,"extra":true}',
+            }],
+        },
+        "",
+        tool_schemas={
+            "read_file": {
+                "type": "object",
+                "properties": {"path": {"type": "string"}},
+                "required": ["path"],
+                "additionalProperties": False,
+            }
+        },
+    )
+    invalid = response.content_blocks[0]["toolArgumentsInvalid"]
+    assert invalid["reason"] in {"schema_required", "schema_additionalProperties"}
+
+
+def test_previously_observed_invalid_regex_escape_never_becomes_a_tool_call() -> None:
+    response = _parse_codex_response(
+        {
+            "text": "",
+            "tool_calls": [{
+                "id": "call-grep",
+                "name": "grep",
+                "arguments": r'{"pattern":"raw2tiff\.c"}'.replace("\\\\", "\\"),
+            }],
+        },
+        "",
+        allowed_tool_names={"grep"},
+    )
+    block = response.content_blocks[0]
+    assert "toolUse" not in block
+    assert block["toolArgumentsInvalid"]["reason"] == "invalid_json"
+
+
+def test_openai_api_invalid_arguments_use_the_same_typed_protocol_event() -> None:
+    response = _to_anthropic_response(
+        SimpleNamespace(
+            output=[SimpleNamespace(
+                type="function_call",
+                call_id="call-grep",
+                name="grep",
+                arguments=r'{"pattern":"raw2tiff\.c"}'.replace("\\\\", "\\"),
+            )],
+            usage=None,
+        ),
+        tool_schemas={
+            "grep": {
+                "type": "object",
+                "properties": {"pattern": {"type": "string"}},
+                "required": ["pattern"],
+            }
+        },
+    )
+    assert response.stop_reason == "tool_arguments_invalid"
+    assert response.content_blocks[0]["toolArgumentsInvalid"]["reason"] == "invalid_json"
 
 
 def test_codex_prompt_marks_scanner_input_untrusted_and_disallows_codex_tools() -> None:
@@ -212,6 +291,26 @@ def test_codex_failure_hint_does_not_echo_diagnostics() -> None:
 
     assert secret_diagnostic not in hint
     assert "codex login status" in hint
+
+
+def test_model_failures_classify_transient_and_terminal_categories() -> None:
+    auth_category, auth_retryable, _ = _classify_failure("401 unauthorized")
+    rate_category, rate_retryable, _ = _classify_failure("429 rate limit")
+    assert auth_category is ModelFailureCategory.AUTHENTICATION
+    assert not auth_retryable
+    assert rate_category is ModelFailureCategory.RATE_LIMIT
+    assert rate_retryable
+
+    api_auth = _classify_openai_failure(
+        type("AuthenticationError", (Exception,), {"status_code": 401})()
+    )
+    api_server = _classify_openai_failure(
+        type("ServerError", (Exception,), {"status_code": 503})()
+    )
+    assert api_auth.category is ModelFailureCategory.AUTHENTICATION
+    assert not api_auth.retryable
+    assert api_server.category is ModelFailureCategory.TRANSPORT
+    assert api_server.retryable
 
 
 def test_openai_usage_separates_cached_input_tokens() -> None:
