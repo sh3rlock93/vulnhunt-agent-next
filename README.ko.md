@@ -27,6 +27,11 @@
 직접 명령을 실행할 수 없습니다. slice 단위 bound가 결정론적 coverage와
 깔끔한 병렬화를 만듭니다.
 
+증분 native scan은 정확한 변경 node와 critical signal을 24KB 이하 context로
+전달합니다. 모든 target은 `finding`, `no_finding`, `deferred` 중 하나로 끝나야
+하며, Reviewer의 선언형 variant는 별도 SQLite lease로 실행된 뒤 자동으로
+evidence review에 돌아갑니다.
+
 이 세 조각(Hunter · Clusterer · Reviewer) 은 **Mythos 의 빌딩 블록(Ranker ·
 Hunters · Reviewer) 을 공개 모델 환경에 맞춰 변형(adapt)** 한 것입니다.
 

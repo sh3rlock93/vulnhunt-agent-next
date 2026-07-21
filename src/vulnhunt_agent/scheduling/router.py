@@ -27,6 +27,7 @@ _CATEGORY_HUNTERS: dict[str, tuple[str, ...]] = {
     "unbounded_input": (BOUNDS,),
     "memory_copy": (BOUNDS, LIFETIME),
     "allocation_size": (BOUNDS, LIFETIME),
+    "allocation_size_guarded": (BOUNDS,),
     "lifetime_release": (LIFETIME,),
     "dynamic_format_string": (INJECTION, BOUNDS),
     "unbounded_format": (INJECTION, BOUNDS),

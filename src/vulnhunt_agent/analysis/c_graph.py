@@ -272,9 +272,17 @@ def _extract_c_function(
                     ))
                 sink_spec = _SINK_CALLS.get(callee)
                 if sink_spec:
+                    category, risk, detail = _allocation_guard_adjustment(
+                        callee=callee,
+                        category=sink_spec[0],
+                        risk=sink_spec[1],
+                        function_start_byte=region.start_byte,
+                        call=descendant,
+                        source=source,
+                    )
                     signals.append(_signal(
                         node_id, relative, call_line, SignalRole.SINK,
-                        sink_spec[0], callee, sink_spec[1],
+                        category, callee, risk, detail,
                     ))
                 format_signal = _dynamic_format_signal(
                     descendant, source, node_id, relative, callee
@@ -395,6 +403,47 @@ def _dynamic_format_signal(
         callee,
         5,
         _text(values[index], source)[:160],
+    )
+
+
+def _allocation_guard_adjustment(
+    *,
+    callee: str,
+    category: str,
+    risk: int,
+    function_start_byte: int,
+    call: Node,
+    source: bytes,
+) -> tuple[str, int, str]:
+    """Lower priority for a local 16-bit reject guard before a size allocation.
+
+    This deliberately narrow heuristic models ZIP-style length fields. It does
+    not claim proof of memory safety and leaves ordinary allocations unchanged.
+    """
+    if category != "allocation_size":
+        return category, risk, ""
+    expression = _text(call, source)[:180]
+    if "size" not in expression.casefold():
+        return category, risk, ""
+    prefix = _strip_c_comments(
+        source[function_start_byte:call.start_byte].decode(errors="replace")
+    )
+    lines = prefix.splitlines()[-120:]
+    guard_count = 0
+    for index, line in enumerate(lines):
+        window = " ".join(lines[index:index + 3])
+        if (
+            "0xffff" in line.casefold()
+            and "if" in line
+            and re.search(r"\breturn\b", window)
+        ):
+            guard_count += 1
+    if not guard_count:
+        return category, risk, ""
+    return (
+        "allocation_size_guarded",
+        2,
+        f"16-bit reject guards={guard_count}; operation={callee}; expression={expression}",
     )
 
 

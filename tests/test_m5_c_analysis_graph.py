@@ -169,6 +169,25 @@ def test_macro_decorated_long_function_is_recovered_with_security_signals(
     )
 
 
+def test_16_bit_reject_guard_lowers_allocation_signal_priority(tmp_path) -> None:
+    repo = tmp_path / "macro-guarded"
+    repo.mkdir()
+    source = _macro_decorated_source().replace(
+        "    header = (char *)ALLOC((unsigned)size + 32);\n",
+        "    if (global_size > 0xffff) return -1;\n"
+        "    header = (char *)ALLOC((unsigned)size + 32);\n",
+    )
+    (repo / "zip.c").write_text(source)
+
+    graph = build_c_analysis_graph(repo, ["zip.c"])
+    signal = next(item for item in graph.signals if item.operation == "ALLOC")
+
+    assert signal.category == "allocation_size_guarded"
+    assert signal.risk == 2
+    assert "16-bit reject guards=1" in signal.detail
+    assert signal.signal_id not in graph.critical_sink_ids
+
+
 class _NeverCalledClient:
     async def chat(self, **kwargs):
         raise AssertionError("exact deterministic duplicates must not call the LLM")
