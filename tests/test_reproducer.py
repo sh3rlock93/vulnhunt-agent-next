@@ -44,6 +44,7 @@ class FakeSandboxBackend:
         return SandboxExecution(
             image_digest=HASH_B,
             result=self.results[len(self.jobs) - 1],
+            environment_id=f"fake-clean-{len(self.jobs)}",
         )
 
 

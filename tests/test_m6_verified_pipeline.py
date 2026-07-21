@@ -47,9 +47,13 @@ class FakeNativeBackend:
             result=ExecResult(
                 exit_code=1,
                 stdout="",
-                stderr="ERROR: AddressSanitizer: heap-buffer-overflow",
+                stderr=(
+                    "ERROR: AddressSanitizer: heap-buffer-overflow\n"
+                    "#0 0x123 in target /code/target.c:1:28\n"
+                ),
                 duration_ms=30,
             ),
+            environment_id=f"fake-native-clean-{len(self.jobs)}",
         )
 
 

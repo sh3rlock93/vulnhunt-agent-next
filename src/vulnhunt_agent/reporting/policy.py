@@ -5,6 +5,10 @@ from dataclasses import dataclass
 
 from ..domain.schemas import CandidateFinding, Evidence, EvidenceKind, ReviewVerdict
 from ..domain.states import FindingState, require_finding_transition
+from ..reproduction.provenance import (
+    actual_target_group_agrees,
+    requires_actual_target,
+)
 from ..reviewing.consensus import decide_consensus
 
 
@@ -17,7 +21,7 @@ class PolicyDecision:
 class StrictReportPolicy:
     """Require independent, snapshot-matched reproduction before reporting."""
 
-    version = "strict-v2"
+    version = "strict-v3"
 
     def evaluate(
         self,
@@ -28,6 +32,7 @@ class StrictReportPolicy:
         verdicts: list[ReviewVerdict],
     ) -> PolicyDecision:
         reasons: list[str] = []
+        require_target = requires_actual_target(finding)
         if finding.state is not FindingState.REVIEWER_VERIFIED:
             reasons.append("finding is not reviewer_verified")
         if not run_snapshot:
@@ -64,12 +69,18 @@ class StrictReportPolicy:
                     run_id=finding.run_id,
                     candidate_id=finding.candidate_id,
                     run_snapshot=run_snapshot,
+                    require_actual_target=require_target,
                 )
                 for items in groups.values()
             ):
                 reasons.append(
                     "no deterministic two-attempt reproduction matches the run snapshot"
                 )
+                if require_target:
+                    reasons.append(
+                        "memory-safety reproduction did not execute the prepared target "
+                        "in two clean matching attempts"
+                    )
 
         return PolicyDecision(allowed=not reasons, reasons=tuple(reasons))
 
@@ -99,6 +110,7 @@ def _valid_reproduction_group(
     run_id: str,
     candidate_id: str,
     run_snapshot: str | None,
+    require_actual_target: bool = False,
 ) -> bool:
     if len(evidence) < 2:
         return False
@@ -106,7 +118,7 @@ def _valid_reproduction_group(
     images = {item.image_digest for item in evidence}
     setup_commands = {item.setup_commands for item in evidence}
     commands = {item.command for item in evidence}
-    return (
+    deterministic = (
         attempts == set(range(1, len(evidence) + 1))
         and len(images) == 1
         and len(setup_commands) == 1
@@ -122,3 +134,6 @@ def _valid_reproduction_group(
             for item in evidence
         )
     )
+    if not deterministic:
+        return False
+    return not require_actual_target or actual_target_group_agrees(evidence)

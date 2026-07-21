@@ -187,6 +187,7 @@ class ReproductionVariantExecutor:
                 ReproductionStatus.REPRODUCED,
                 ReproductionStatus.FAILED,
                 ReproductionStatus.FLAKY,
+                ReproductionStatus.UNVERIFIED,
                 ReproductionStatus.ENVIRONMENT_BLOCKED,
             )
         }

@@ -179,6 +179,28 @@ class EvidenceKind(StrEnum):
     LEGACY_ARTIFACT = "legacy_artifact"
 
 
+class ExecutionSubject(StrEnum):
+    PREPARED_BINARY = "prepared_binary"
+    LINKED_TARGET_HARNESS = "linked_target_harness"
+    STANDALONE_MODEL = "standalone_model"
+    UNKNOWN = "unknown"
+
+
+class SanitizerFrame(DomainModel):
+    index: int = Field(ge=0)
+    function: str = ""
+    path: str = Field(min_length=1)
+    line: int | None = Field(default=None, ge=1)
+    column: int | None = Field(default=None, ge=1)
+    in_target: bool = False
+
+    @model_validator(mode="after")
+    def validate_frame(self) -> "SanitizerFrame":
+        if "\0" in self.function or "\0" in self.path:
+            raise ValueError("sanitizer frame may not contain NUL")
+        return self
+
+
 class Evidence(DomainModel):
     evidence_id: str = Field(min_length=1)
     run_id: str = Field(min_length=1)
@@ -199,6 +221,14 @@ class Evidence(DomainModel):
     oracle: OracleResult | None = None
     artifact_ids: tuple[str, ...] = ()
     captured_artifacts: dict[str, str] = Field(default_factory=dict)
+    execution_subject: ExecutionSubject = ExecutionSubject.UNKNOWN
+    provenance_policy: str | None = None
+    clean_environment_id: str | None = None
+    target_binary: str | None = None
+    linked_target_artifacts: tuple[str, ...] = ()
+    sanitizer_failure_class: str | None = None
+    sanitizer_frames: tuple[SanitizerFrame, ...] = ()
+    target_source_reached: bool = False
     created_at: datetime = Field(default_factory=utc_now)
 
     @model_validator(mode="after")
@@ -240,6 +270,41 @@ class Evidence(DomainModel):
         ):
             raise ValueError(
                 "reproduction artifact_ids must exactly match captured artifacts"
+            )
+        provenance_strings = (
+            self.provenance_policy,
+            self.clean_environment_id,
+            self.target_binary,
+            self.sanitizer_failure_class,
+            *self.linked_target_artifacts,
+        )
+        if any(value is not None and "\0" in value for value in provenance_strings):
+            raise ValueError("execution provenance may not contain NUL")
+        if (
+            self.execution_subject is ExecutionSubject.PREPARED_BINARY
+            and not self.target_binary
+        ):
+            raise ValueError("prepared-binary evidence requires target_binary")
+        if (
+            self.execution_subject is ExecutionSubject.LINKED_TARGET_HARNESS
+            and not self.linked_target_artifacts
+        ):
+            raise ValueError(
+                "linked-target-harness evidence requires linked_target_artifacts"
+            )
+        if self.execution_subject is ExecutionSubject.STANDALONE_MODEL:
+            if self.target_source_reached:
+                raise ValueError("standalone model cannot claim target source execution")
+        if self.target_source_reached and (
+            self.execution_subject
+            not in {
+                ExecutionSubject.PREPARED_BINARY,
+                ExecutionSubject.LINKED_TARGET_HARNESS,
+            }
+            or not any(frame.in_target for frame in self.sanitizer_frames)
+        ):
+            raise ValueError(
+                "target source execution requires prepared target sanitizer frames"
             )
         return self
 
