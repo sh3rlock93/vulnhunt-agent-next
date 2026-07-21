@@ -15,12 +15,16 @@ from .models import (
     EdgeKind,
     GraphEdge,
     GraphNode,
+    GuardState,
     IncrementalScope,
     NodeKind,
+    RiskChain,
+    RiskTransform,
     SecuritySignal,
     SignalRole,
 )
 from .planner import build_coverage_plan
+from .risk_chains import RISK_CHAIN_POLICY
 
 __all__ = [
     "AnalysisSlice",
@@ -29,10 +33,14 @@ __all__ = [
     "EdgeKind",
     "GraphEdge",
     "GraphNode",
+    "GuardState",
     "IncrementalScope",
     "NodeKind",
+    "RiskChain",
+    "RiskTransform",
     "SecuritySignal",
     "SignalRole",
+    "RISK_CHAIN_POLICY",
     "build_c_analysis_graph",
     "build_coverage_plan",
     "context_for_file",

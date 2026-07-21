@@ -1,6 +1,6 @@
 # M10 — Blind native vulnerability discovery at repository scale
 
-Status: In progress — PR 1 complete
+Status: In progress — PR 2 complete
 
 ## Goal
 
@@ -180,13 +180,13 @@ Expected changes:
 
 ### PR 2 acceptance gates
 
-- [ ] A source-to-arithmetic-to-allocation-to-copy chain is emitted deterministically.
-- [ ] The chain records whether the later copy or loop uses a different bound.
-- [ ] A dominating overflow guard lowers or suppresses the dangerous-chain score.
-- [ ] Alias, cast, and nested multiplication fixtures retain ordered provenance.
-- [ ] IDs and scores are stable across runs and filesystem ordering.
-- [ ] The vulnerable LibTIFF tree produces a high-priority chain for the target path without oracle input.
-- [ ] The fixed tree records its new guard and lowers that chain after evaluation only.
+- [x] A source-to-arithmetic-to-allocation-to-copy chain is emitted deterministically.
+- [x] The chain records whether the later copy or loop uses a different bound.
+- [x] A dominating overflow guard lowers or suppresses the dangerous-chain score.
+- [x] Alias, cast, and nested multiplication fixtures retain ordered provenance.
+- [x] IDs and scores are stable across runs and filesystem ordering.
+- [x] The vulnerable LibTIFF tree produces a high-priority chain for the target path without oracle input.
+- [x] The fixed tree records its new guard and lowers that chain after evaluation only.
 
 ## PR 3 — Diverse, budget-aware admission
 

@@ -25,6 +25,13 @@ class SignalRole(StrEnum):
     SINK = "sink"
 
 
+class GuardState(StrEnum):
+    ABSENT = "absent"
+    PARTIAL = "partial"
+    DOMINATES = "dominates"
+    UNKNOWN = "unknown"
+
+
 class GraphNode(AnalysisModel):
     node_id: str = Field(min_length=1)
     path: str = Field(min_length=1)
@@ -64,14 +71,44 @@ class UnresolvedCall(AnalysisModel):
     callee: str = Field(min_length=1)
 
 
+class RiskTransform(AnalysisModel):
+    line: int = Field(ge=1)
+    target: str = Field(min_length=1)
+    expression: str = Field(min_length=1)
+    operations: tuple[str, ...] = ()
+    operand_types: tuple[str, ...] = ()
+    narrowing_or_wrap: bool = False
+
+
+class RiskChain(AnalysisModel):
+    chain_id: str = Field(pattern=r"^risk_[0-9a-f]{20}$")
+    policy_version: str = "c-risk-chain-v1"
+    node_id: str = Field(min_length=1)
+    path: str = Field(min_length=1)
+    function: str = Field(min_length=1)
+    source_signal_ids: tuple[str, ...] = ()
+    source_variables: tuple[str, ...] = Field(min_length=1)
+    source_lines: tuple[int, ...] = Field(min_length=1)
+    transform_steps: tuple[RiskTransform, ...] = Field(min_length=1)
+    guard_state: GuardState
+    guard_lines: tuple[int, ...] = ()
+    allocation_signal_ids: tuple[str, ...] = Field(min_length=1)
+    sink_signal_ids: tuple[str, ...] = ()
+    sink_lines: tuple[int, ...] = Field(min_length=1)
+    score: int = Field(ge=0, le=100)
+    confidence: str = Field(pattern=r"^(low|medium|high)$")
+    rationale: str = Field(min_length=1)
+
+
 class CAnalysisGraph(AnalysisModel):
-    schema_version: int = 1
+    schema_version: int = 2
     language: str = "c"
     nodes: tuple[GraphNode, ...] = ()
     edges: tuple[GraphEdge, ...] = ()
     signals: tuple[SecuritySignal, ...] = ()
     entrypoint_ids: tuple[str, ...] = ()
     critical_sink_ids: tuple[str, ...] = ()
+    risk_chains: tuple[RiskChain, ...] = ()
     unresolved_calls: tuple[UnresolvedCall, ...] = ()
 
 

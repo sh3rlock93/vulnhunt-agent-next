@@ -20,10 +20,12 @@ from .models import (
     GraphEdge,
     GraphNode,
     NodeKind,
+    RiskChain,
     SecuritySignal,
     SignalRole,
     UnresolvedCall,
 )
+from .risk_chains import build_function_risk_chains, is_allocator_name
 
 _C_LANGUAGE = Language(tree_sitter_c.language())
 _ENTRYPOINT_NAMES = re.compile(
@@ -115,6 +117,7 @@ class _Extracted:
     node: GraphNode
     calls: tuple[_CallSite, ...]
     signals: tuple[SecuritySignal, ...]
+    risk_chains: tuple[RiskChain, ...] = ()
 
 
 def build_c_analysis_graph(repo: Path, source_files: list[str]) -> CAnalysisGraph:
@@ -139,6 +142,10 @@ def build_c_analysis_graph(repo: Path, source_files: list[str]) -> CAnalysisGrap
         (signal for item in extracted for signal in item.signals),
         key=lambda item: item.signal_id,
     )
+    risk_chains = sorted(
+        (chain for item in extracted for chain in item.risk_chains),
+        key=lambda item: item.chain_id,
+    )
 
     by_symbol: dict[str, list[GraphNode]] = {}
     for node in nodes:
@@ -162,7 +169,7 @@ def build_c_analysis_graph(repo: Path, source_files: list[str]) -> CAnalysisGrap
             ))
         elif (
             call.callee not in _SOURCE_CALLS
-            and call.callee not in _SINK_CALLS
+            and _sink_spec(call.callee) is None
             and call.callee not in _FORMAT_ARGUMENT
         ):
             unresolved.append(UnresolvedCall(
@@ -215,6 +222,7 @@ def build_c_analysis_graph(repo: Path, source_files: list[str]) -> CAnalysisGrap
         signals=tuple(signals),
         entrypoint_ids=tuple(sorted(set(entrypoints))),
         critical_sink_ids=tuple(sorted(critical_sinks)),
+        risk_chains=tuple(risk_chains),
         unresolved_calls=tuple(sorted(
             unresolved,
             key=lambda item: (item.path, item.line, item.source, item.callee),
@@ -270,7 +278,7 @@ def _extract_c_function(
                         node_id, relative, call_line, SignalRole.SOURCE,
                         source_spec[0], callee, source_spec[1],
                     ))
-                sink_spec = _SINK_CALLS.get(callee)
+                sink_spec = _sink_spec(callee)
                 if sink_spec:
                     category, risk, detail = _allocation_guard_adjustment(
                         callee=callee,
@@ -317,19 +325,32 @@ def _extract_c_function(
                             f"expression={_text(descendant, source)[:180]}"
                         ),
                     ))
+    node = GraphNode(
+        node_id=node_id,
+        path=relative,
+        symbol=name,
+        line=line,
+        end_line=region.end_line,
+        kind=NodeKind.FUNCTION,
+        visibility=visibility,
+        calls=tuple(sorted(set(call_names))),
+    )
+    unique_signals = tuple({item.signal_id: item for item in signals}.values())
+    risk_chains = build_function_risk_chains(
+        path=relative,
+        node_id=node_id,
+        function=name,
+        source=source,
+        function_node=region.container,
+        declarator=region.declarator,
+        body_nodes=region.body_nodes,
+        signals=unique_signals,
+    )
     return _Extracted(
-        node=GraphNode(
-            node_id=node_id,
-            path=relative,
-            symbol=name,
-            line=line,
-            end_line=region.end_line,
-            kind=NodeKind.FUNCTION,
-            visibility=visibility,
-            calls=tuple(sorted(set(call_names))),
-        ),
+        node=node,
         calls=tuple(call_sites),
-        signals=tuple({item.signal_id: item for item in signals}.values()),
+        signals=unique_signals,
+        risk_chains=risk_chains,
     )
 
 
@@ -352,8 +373,8 @@ def _extract_grammar_file(repo: Path, relative: str) -> _Extracted:
             signals.append(_signal(
                 node_id, relative, line, SignalRole.SOURCE, category, callee, risk
             ))
-        if callee in _SINK_CALLS:
-            category, risk = _SINK_CALLS[callee]
+        if (sink_spec := _sink_spec(callee)) is not None:
+            category, risk = sink_spec
             signals.append(_signal(
                 node_id, relative, line, SignalRole.SINK, category, callee, risk
             ))
@@ -371,6 +392,15 @@ def _extract_grammar_file(repo: Path, relative: str) -> _Extracted:
         calls=tuple(calls),
         signals=tuple({item.signal_id: item for item in signals}.values()),
     )
+
+
+def _sink_spec(callee: str) -> tuple[str, int] | None:
+    exact = _SINK_CALLS.get(callee)
+    if exact is not None:
+        return exact
+    if is_allocator_name(callee):
+        return "allocation_size", 4
+    return None
 
 
 def _dynamic_format_signal(
