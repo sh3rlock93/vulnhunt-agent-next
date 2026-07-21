@@ -14,7 +14,7 @@ import uuid
 from dataclasses import asdict
 from pathlib import Path
 
-from ...analysis import SharedContextCache
+from ...analysis import CAnalysisGraph, SharedContextCache
 from ...agents.hunter import TARGET_COMPLETION_POLICY
 from ...agents.durable_queue import DurableHuntQueueStore
 from ...agents.queue import HuntTask
@@ -180,6 +180,16 @@ async def run_hunt(store: RunStore, bus: EventBus) -> None:
         tuple(item for item in work_items if item.work_id in pending_ids),
         budget_policy,
         consumed_sessions=sum(item.sessions for item in persisted_usage),
+        risk_chains=CAnalysisGraph.model_validate(
+            analysis.get("graph") or {}
+        ).risk_chains,
+        entrypoint_ids=tuple(
+            (analysis.get("graph") or {}).get("entrypoint_ids", ())
+        ),
+        native_full_scan=(
+            language_of(env) == "c"
+            and incremental.get("mode", "full") == "full"
+        ),
     )
     admitted_ids = set(allocation.admitted_work_ids)
     task_by_id = {task.work_id: task for task in queue.tasks}
@@ -188,12 +198,17 @@ async def run_hunt(store: RunStore, bus: EventBus) -> None:
         bus.emit("hunter_budget_deferred", work_id=work_id, reason=reason)
     hunt_plan["budget"] = budget_policy.model_dump(mode="json")
     hunt_plan["budget_allocation"] = {
+        "policy_version": allocation.policy_version,
         "admitted_sessions": len(allocation.admitted_work_ids),
+        "chain_critical_slots": allocation.chain_critical_slots,
+        "component_diverse_slots": allocation.component_diverse_slots,
+        "high_risk_non_chain_slots": allocation.high_risk_non_chain_slots,
         "critical_slots": allocation.critical_slots,
         "high_risk_slots": allocation.high_risk_slots,
         "general_slots": allocation.general_slots,
         "retry_slots": allocation.retry_slots,
         "deferred_sessions": len(allocation.deferred),
+        "decisions": [asdict(item) for item in allocation.decisions],
     }
     hunt_plan["budget_deferred_work_ids"] = sorted(allocation.deferred)
     hunt_plan["budget_deferred_critical_work_ids"] = sorted(

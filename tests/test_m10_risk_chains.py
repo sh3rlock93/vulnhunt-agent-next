@@ -1,6 +1,14 @@
 from __future__ import annotations
 
-from vulnhunt_agent.analysis import build_c_analysis_graph
+from tests.factories import HASH_A
+from vulnhunt_agent.analysis import (
+    GuardState,
+    RiskChain,
+    RiskTransform,
+    build_c_analysis_graph,
+)
+from vulnhunt_agent.domain.schemas import BudgetPolicy, HunterWorkItem
+from vulnhunt_agent.scheduling import allocate_work_items, work_id_for
 
 
 def _size_chain_source(*, guarded: bool) -> str:
@@ -101,3 +109,96 @@ def test_parameter_derived_size_is_tracked_without_a_source_call(tmp_path) -> No
     assert {"count", "width", "bytes"}.issubset(chain.source_variables)
     assert chain.transform_steps[0].target == "bytes"
     assert chain.allocation_signal_ids
+
+
+def test_full_native_admission_prioritizes_chain_and_component_diversity() -> None:
+    paths = ["tools/dense.c"] * 20 + [
+        "libtiff/codec.c",
+        "archive/decoder.c",
+        "contrib/import.c",
+        "port/compat.c",
+        "test/fuzzer.c",
+        "root.c",
+        "libtiff/image.c",
+        "archive/reader.c",
+        "contrib/parser.c",
+        "port/io.c",
+    ]
+    items = []
+    for index, path in enumerate(paths):
+        signal_id = f"sig-work-{index:03d}"
+        work_id = work_id_for(
+            source_snapshot=HASH_A,
+            planning_policy="c-slice-work-v4",
+            slice_ids=(),
+            files=(path,),
+            hunter="c-bounds-integers",
+            target_signal_ids=(signal_id,),
+        )
+        items.append(HunterWorkItem(
+            work_id=work_id,
+            run_id="run-diverse",
+            source_snapshot=HASH_A,
+            planning_policy="c-slice-work-v4",
+            target_signal_ids=(signal_id,),
+            seed_file=path,
+            files=(path,),
+            hunter="c-bounds-integers",
+            risk=5,
+            required=True,
+            routing_reasons=("test",),
+        ))
+    target = items[19]
+    chain = RiskChain(
+        chain_id="risk_" + "a" * 20,
+        node_id="tools/dense.c::convert@1",
+        path="tools/dense.c",
+        function="convert",
+        source_signal_ids=("sig-source",),
+        source_variables=("width", "size"),
+        source_lines=(2,),
+        transform_steps=(RiskTransform(
+            line=3,
+            target="size",
+            expression="width * unit",
+            operations=("*",),
+            operand_types=("uint32_t",),
+            narrowing_or_wrap=True,
+        ),),
+        guard_state=GuardState.ABSENT,
+        allocation_signal_ids=(target.target_signal_ids[0],),
+        sink_lines=(4,),
+        score=95,
+        confidence="high",
+        rationale="test chain",
+    )
+    policy = BudgetPolicy(max_hunter_sessions=24, max_retries_per_work_item=1)
+
+    first = allocate_work_items(
+        tuple(items),
+        policy,
+        risk_chains=(chain,),
+        entrypoint_ids=(chain.node_id,),
+        native_full_scan=True,
+    )
+    second = allocate_work_items(
+        tuple(reversed(items)),
+        policy,
+        risk_chains=(chain,),
+        entrypoint_ids=(chain.node_id,),
+        native_full_scan=True,
+    )
+
+    assert first == second
+    assert first.policy_version == "c-diverse-admission-v1"
+    assert len(first.admitted_work_ids) == 22
+    assert first.retry_slots == 2
+    assert first.chain_critical_slots == 1
+    assert first.component_diverse_slots == 5
+    assert first.high_risk_non_chain_slots == 3
+    assert first.admitted_work_ids[0] == target.work_id
+    assert first.decisions[0].quota == "chain_critical"
+    assert first.decisions[0].score_components["risk_chain"] == 95
+    assert [item.rank for item in first.decisions] == list(range(1, 23))
+    assert len({item.component for item in first.decisions}) >= 6
+    assert len(first.deferred) == 8

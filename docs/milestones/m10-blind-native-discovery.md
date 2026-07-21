@@ -1,6 +1,6 @@
 # M10 — Blind native vulnerability discovery at repository scale
 
-Status: In progress — PR 2 complete
+Status: In progress — PR 3 complete
 
 ## Goal
 
@@ -221,12 +221,12 @@ Expected changes:
 
 ### PR 3 acceptance gates
 
-- [ ] The vulnerable target chain is admitted within the first 24 sessions without oracle data.
-- [ ] No single dense file consumes the benchmark before component coverage occurs.
-- [ ] Every admission exposes rank, quota, score breakdown, and policy version.
-- [ ] Deferred critical work remains countable and resumable.
-- [ ] Repeated runs produce identical admission order from identical artifacts.
-- [ ] Existing M8 60/30/10 operational behavior remains compatible outside M10 full native scans.
+- [x] The vulnerable target chain is admitted within the first 24 sessions without oracle data.
+- [x] No single dense file consumes the benchmark before component coverage occurs.
+- [x] Every admission exposes rank, quota, score breakdown, and policy version.
+- [x] Deferred critical work remains countable and resumable.
+- [x] Repeated runs produce identical admission order from identical artifacts.
+- [x] Existing M8 60/30/10 operational behavior remains compatible outside M10 full native scans.
 
 ## PR 4 — Chain-first Hunter context and target completion
 

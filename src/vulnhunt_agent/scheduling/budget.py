@@ -11,7 +11,11 @@ from dataclasses import dataclass
 from typing import Callable
 
 from ..core.llm import LLMResponse
+from ..analysis.models import RiskChain
 from ..domain.schemas import BudgetPolicy, BudgetUsage, HunterWorkItem
+
+LEGACY_BUDGET_POLICY = "hunter-budget-allocation-v1"
+NATIVE_DIVERSE_POLICY = "c-diverse-admission-v1"
 
 
 class BudgetExceededError(RuntimeError):
@@ -30,6 +34,31 @@ class BudgetAllocation:
     high_risk_slots: int
     retry_slots: int
     general_slots: int
+    policy_version: str = LEGACY_BUDGET_POLICY
+    chain_critical_slots: int = 0
+    component_diverse_slots: int = 0
+    high_risk_non_chain_slots: int = 0
+    decisions: tuple["AdmissionDecision", ...] = ()
+
+
+@dataclass(frozen=True)
+class AdmissionDecision:
+    work_id: str
+    rank: int
+    quota: str
+    component: str
+    seed_file: str
+    score: int
+    score_components: dict[str, int]
+    reason: str
+
+
+@dataclass(frozen=True)
+class _AdmissionCandidate:
+    item: HunterWorkItem
+    component: str
+    chain_score: int
+    entrypoint_reachable: bool
 
 
 @dataclass(frozen=True)
@@ -44,6 +73,9 @@ def allocate_work_items(
     policy: BudgetPolicy,
     *,
     consumed_sessions: int = 0,
+    risk_chains: tuple[RiskChain, ...] = (),
+    entrypoint_ids: tuple[str, ...] = (),
+    native_full_scan: bool = False,
 ) -> BudgetAllocation:
     """Admit work deterministically with 60/30/10 critical/high/retry intent.
 
@@ -51,6 +83,15 @@ def allocate_work_items(
     is held only when the initial backlog would otherwise fill the remaining
     session budget; small scans are never deferred merely to keep empty slots.
     """
+    if native_full_scan:
+        return _allocate_native_diverse(
+            work_items,
+            policy,
+            consumed_sessions=consumed_sessions,
+            risk_chains=risk_chains,
+            entrypoint_ids=entrypoint_ids,
+        )
+
     remaining = max(0, policy.max_hunter_sessions - consumed_sessions)
     ordered = sorted(
         work_items,
@@ -106,7 +147,205 @@ def allocate_work_items(
         high_risk_slots=high_slots,
         retry_slots=retry_slots,
         general_slots=len(picked) - critical_slots - high_slots,
+        decisions=tuple(
+            AdmissionDecision(
+                work_id=item.work_id,
+                rank=index,
+                quota="legacy_priority",
+                component=_component_for(item.seed_file),
+                seed_file=item.seed_file,
+                score=int(item.required) * 20 + item.risk * 10,
+                score_components={
+                    "required": int(item.required) * 20,
+                    "sink_severity": item.risk * 10,
+                    "risk_chain": 0,
+                    "entrypoint_reachability": 0,
+                    "component_novelty": 0,
+                },
+                reason="legacy 60/30/10 deterministic priority",
+            )
+            for index, item in enumerate(picked, start=1)
+        ),
     )
+
+
+def _allocate_native_diverse(
+    work_items: tuple[HunterWorkItem, ...],
+    policy: BudgetPolicy,
+    *,
+    consumed_sessions: int,
+    risk_chains: tuple[RiskChain, ...],
+    entrypoint_ids: tuple[str, ...],
+) -> BudgetAllocation:
+    """Admit full native work with chain, component, and retry reservations."""
+    remaining = max(0, policy.max_hunter_sessions - consumed_sessions)
+    chain_by_signal: dict[str, list[RiskChain]] = {}
+    chain_by_node: dict[str, list[RiskChain]] = {}
+    for chain in risk_chains:
+        for signal_id in (*chain.allocation_signal_ids, *chain.sink_signal_ids):
+            chain_by_signal.setdefault(signal_id, []).append(chain)
+        chain_by_node.setdefault(chain.node_id, []).append(chain)
+    entrypoints = set(entrypoint_ids)
+
+    candidates = []
+    for item in work_items:
+        matching = {
+            chain.chain_id: chain
+            for signal_id in item.target_signal_ids
+            for chain in chain_by_signal.get(signal_id, ())
+        }
+        for node_id in item.target_node_ids:
+            for chain in chain_by_node.get(node_id, ()):
+                matching[chain.chain_id] = chain
+        candidates.append(_AdmissionCandidate(
+            item=item,
+            component=_component_for(item.seed_file),
+            chain_score=max((chain.score for chain in matching.values()), default=0),
+            entrypoint_reachable=any(
+                chain.node_id in entrypoints for chain in matching.values()
+            ),
+        ))
+    ordered = sorted(candidates, key=_candidate_order)
+
+    nominal_retry = 2 if policy.max_retries_per_work_item else 0
+    retry_slots = (
+        min(nominal_retry, max(0, remaining - 1))
+        if len(ordered) > remaining else 0
+    )
+    capacity = max(0, remaining - retry_slots)
+    selected: list[_AdmissionCandidate] = []
+    selected_ids: set[str] = set()
+    selected_components: set[str] = set()
+    seed_counts: dict[str, int] = {}
+    decisions: list[AdmissionDecision] = []
+
+    def admit(candidate: _AdmissionCandidate, *, quota: str, reason: str) -> bool:
+        if len(selected) >= capacity or candidate.item.work_id in selected_ids:
+            return False
+        novelty = 10 if candidate.component not in selected_components else 0
+        score_components = {
+            "risk_chain": candidate.chain_score,
+            "required": int(candidate.item.required) * 20,
+            "sink_severity": candidate.item.risk * 10,
+            "entrypoint_reachability": int(candidate.entrypoint_reachable) * 10,
+            "component_novelty": novelty,
+        }
+        selected.append(candidate)
+        selected_ids.add(candidate.item.work_id)
+        selected_components.add(candidate.component)
+        seed_counts[candidate.item.seed_file] = (
+            seed_counts.get(candidate.item.seed_file, 0) + 1
+        )
+        decisions.append(AdmissionDecision(
+            work_id=candidate.item.work_id,
+            rank=len(selected),
+            quota=quota,
+            component=candidate.component,
+            seed_file=candidate.item.seed_file,
+            score=sum(score_components.values()),
+            score_components=score_components,
+            reason=reason,
+        ))
+        return True
+
+    chain_slots = 0
+    for candidate in ordered:
+        if chain_slots >= min(14, capacity):
+            break
+        if candidate.chain_score < 80:
+            continue
+        if seed_counts.get(candidate.item.seed_file, 0) >= 4:
+            continue
+        if admit(
+            candidate,
+            quota="chain_critical",
+            reason="risk chain score is at least 80 without a dominating guard",
+        ):
+            chain_slots += 1
+
+    component_slots = 0
+    component_target = min(5, max(0, capacity - len(selected)))
+    diversity_seen: set[str] = set()
+    for candidate in ordered:
+        if component_slots >= component_target:
+            break
+        if not candidate.item.required:
+            continue
+        if candidate.component in selected_components or candidate.component in diversity_seen:
+            continue
+        if seed_counts.get(candidate.item.seed_file, 0) >= 4:
+            continue
+        if admit(
+            candidate,
+            quota="component_diverse",
+            reason="first admitted critical work from an uncovered top-level component",
+        ):
+            diversity_seen.add(candidate.component)
+            component_slots += 1
+
+    high_slots = 0
+    high_target = min(3, max(0, capacity - len(selected)))
+    for candidate in ordered:
+        if high_slots >= high_target:
+            break
+        if candidate.chain_score >= 80 or candidate.item.risk < 4:
+            continue
+        if seed_counts.get(candidate.item.seed_file, 0) >= 4:
+            continue
+        if admit(
+            candidate,
+            quota="high_risk_non_chain",
+            reason="high-risk work retained outside a critical risk chain",
+        ):
+            high_slots += 1
+
+    for candidate in ordered:
+        if len(selected) >= capacity:
+            break
+        admit(
+            candidate,
+            quota="borrowed",
+            reason="unused native quota borrowed in deterministic risk order",
+        )
+
+    deferred = {
+        candidate.item.work_id: "max_hunter_sessions"
+        for candidate in ordered
+        if candidate.item.work_id not in selected_ids
+    }
+    critical_slots = sum(candidate.item.required for candidate in selected)
+    total_high = sum(
+        not candidate.item.required and candidate.item.risk >= 4
+        for candidate in selected
+    )
+    return BudgetAllocation(
+        admitted_work_ids=tuple(candidate.item.work_id for candidate in selected),
+        deferred=deferred,
+        critical_slots=critical_slots,
+        high_risk_slots=total_high,
+        retry_slots=retry_slots,
+        general_slots=len(selected) - critical_slots - total_high,
+        policy_version=NATIVE_DIVERSE_POLICY,
+        chain_critical_slots=chain_slots,
+        component_diverse_slots=component_slots,
+        high_risk_non_chain_slots=high_slots,
+        decisions=tuple(decisions),
+    )
+
+
+def _candidate_order(candidate: _AdmissionCandidate) -> tuple[int, int, int, int, str, str]:
+    return (
+        -candidate.chain_score,
+        -int(candidate.item.required),
+        -candidate.item.risk,
+        -int(candidate.entrypoint_reachable),
+        candidate.component,
+        candidate.item.work_id,
+    )
+
+
+def _component_for(path: str) -> str:
+    return path.split("/", 1)[0] if "/" in path else "(root)"
 
 
 def adaptive_iteration_limit(

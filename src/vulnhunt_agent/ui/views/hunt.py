@@ -40,7 +40,11 @@ def render_hunt_view(store: RunStore) -> None:
         if allocation:
             st.caption(
                 "Budget allocation: "
+                f"{allocation.get('policy_version', 'legacy')} · "
                 f"{allocation.get('admitted_sessions', 0)} admitted · "
+                f"{allocation.get('chain_critical_slots', 0)} chain · "
+                f"{allocation.get('component_diverse_slots', 0)} diverse · "
+                f"{allocation.get('high_risk_non_chain_slots', 0)} non-chain · "
                 f"{allocation.get('critical_slots', 0)} critical · "
                 f"{allocation.get('high_risk_slots', 0)} high-risk · "
                 f"{allocation.get('retry_slots', 0)} retry slots"
