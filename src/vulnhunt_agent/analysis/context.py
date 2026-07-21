@@ -53,7 +53,7 @@ def context_for_work_item(
     analysis: dict | None,
     work_item: HunterWorkItem,
     *,
-    max_slices: int = 16,
+    max_slices: int = 6,
 ) -> dict:
     """Exact multi-file slice context for one stable Hunter work item."""
     if not analysis or analysis.get("language") != "c":
@@ -100,5 +100,13 @@ def context_for_work_item(
         "risk": work_item.risk,
         "required": work_item.required,
         "routing_reasons": list(work_item.routing_reasons),
+        "change_focus": {
+            "target_node_ids": list(work_item.target_node_ids),
+            "target_signal_ids": list(work_item.target_signal_ids),
+            "changed_line_ranges": {
+                path: [list(pair) for pair in ranges]
+                for path, ranges in work_item.changed_line_ranges.items()
+            },
+        },
         "slices": compact,
     }

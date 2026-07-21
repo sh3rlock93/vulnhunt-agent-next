@@ -9,9 +9,9 @@ from pathlib import Path
 from ..domain.schemas import HunterWorkItem
 from .context import context_for_work_item
 
-CONTEXT_CACHE_POLICY = "c-shared-context-v1"
-MAX_CONTEXT_BYTES = 48_000
-MAX_LINES_PER_FILE = 100
+CONTEXT_CACHE_POLICY = "c-shared-context-v2"
+MAX_CONTEXT_BYTES = 24_000
+MAX_LINES_PER_FILE = 80
 CONTEXT_LINE_RADIUS = 6
 MAX_RELATED_HEADERS = 4
 MAX_BUILD_FILES = 2
@@ -63,6 +63,7 @@ class SharedContextCache:
             return cached
 
         packet = self._build(work_item, cache_key)
+        packet = _fit_packet(packet)
         packet["packet_digest"] = _packet_digest(packet)
         encoded = (
             json.dumps(packet, indent=2, ensure_ascii=False, sort_keys=True)
@@ -129,6 +130,7 @@ class SharedContextCache:
             self.analysis,
             slice_ids=set(work_item.slice_ids),
             files=set(work_item.files),
+            changed_line_ranges=work_item.changed_line_ranges,
         )
         excerpts = self._excerpts(
             ordered_files,
@@ -259,6 +261,12 @@ def context_cache_key(
         "coverage_policy_version": str(plan.get("policy_version", "")),
         "slice_ids": sorted(work_item.slice_ids),
         "context_files": sorted(work_item.files),
+        "target_node_ids": sorted(work_item.target_node_ids),
+        "target_signal_ids": sorted(work_item.target_signal_ids),
+        "changed_line_ranges": {
+            path: sorted(ranges)
+            for path, ranges in sorted(work_item.changed_line_ranges.items())
+        },
         "context_policy": CONTEXT_CACHE_POLICY,
         "max_context_bytes": MAX_CONTEXT_BYTES,
         "max_lines_per_file": MAX_LINES_PER_FILE,
@@ -275,6 +283,7 @@ def _relevant_ranges(
     *,
     slice_ids: set[str],
     files: set[str],
+    changed_line_ranges: dict[str, tuple[tuple[int, int], ...]],
 ) -> dict[str, list[tuple[int, int]]]:
     graph = analysis.get("graph") or {}
     plan = analysis.get("coverage_plan") or {}
@@ -288,7 +297,11 @@ def _relevant_ranges(
         if item.get("slice_id") in slice_ids
         for node_id in item.get("node_ids", [])
     }
-    out: dict[str, list[tuple[int, int]]] = {}
+    out: dict[str, list[tuple[int, int]]] = {
+        path: list(ranges)
+        for path, ranges in changed_line_ranges.items()
+        if path in files
+    }
     for signal in graph.get("signals", []):
         if (
             signal.get("node_id") in selected_nodes
@@ -339,3 +352,38 @@ def _packet_digest(packet: dict) -> str:
         separators=(",", ":"),
     )
     return "sha256:" + hashlib.sha256(canonical.encode()).hexdigest()
+
+
+def _fit_packet(packet: dict) -> dict:
+    """Trim lowest-priority payload until the persisted packet is <= 24 KB."""
+    placeholder = "sha256:" + "0" * 64
+
+    def encoded_size() -> int:
+        measured = {**packet, "packet_digest": placeholder}
+        return len((
+            json.dumps(measured, indent=2, ensure_ascii=False, sort_keys=True)
+            + "\n"
+        ).encode("utf-8"))
+
+    while encoded_size() > MAX_CONTEXT_BYTES:
+        excerpts = packet.get("source_excerpts") or []
+        content_entry = next(
+            (item for item in reversed(excerpts) if item.get("content")),
+            None,
+        )
+        if content_entry is not None:
+            excess = encoded_size() - MAX_CONTEXT_BYTES
+            content = str(content_entry["content"])
+            encoded = content.encode("utf-8")
+            keep = max(0, len(encoded) - excess - 256)
+            content_entry["content"] = encoded[:keep].decode(
+                "utf-8", errors="ignore"
+            )
+            content_entry["truncated"] = True
+            continue
+        slices = packet.get("slices") or []
+        if slices:
+            slices.pop()
+            continue
+        raise ValueError("context packet metadata exceeds the hard byte limit")
+    return packet

@@ -368,6 +368,12 @@ class HunterWorkItem(DomainModel):
     source_snapshot: str = Field(pattern=SHA256_PATTERN)
     planning_policy: str = Field(min_length=1)
     slice_ids: tuple[str, ...] = ()
+    target_node_ids: tuple[str, ...] = Field(default=(), max_length=128)
+    target_signal_ids: tuple[str, ...] = Field(default=(), max_length=128)
+    changed_line_ranges: dict[str, tuple[tuple[int, int], ...]] = Field(
+        default_factory=dict,
+        max_length=32,
+    )
     seed_file: str = Field(min_length=1)
     files: tuple[str, ...] = Field(min_length=1, max_length=32)
     hunter: str = Field(min_length=1)
@@ -387,6 +393,15 @@ class HunterWorkItem(DomainModel):
             raise ValueError("Hunter context files must be unique")
         if len(set(self.slice_ids)) != len(self.slice_ids):
             raise ValueError("Hunter slice IDs must be unique")
+        if len(set(self.target_node_ids)) != len(self.target_node_ids):
+            raise ValueError("Hunter target node IDs must be unique")
+        if len(set(self.target_signal_ids)) != len(self.target_signal_ids):
+            raise ValueError("Hunter target signal IDs must be unique")
+        for path, ranges in self.changed_line_ranges.items():
+            _validate_relative_path(path, label="Hunter changed-range file")
+            for start, end in ranges:
+                if start < 1 or end < start:
+                    raise ValueError("Hunter changed line ranges must be positive and ordered")
         return self
 
 

@@ -8,7 +8,7 @@ from ..analysis.models import CAnalysisGraph, CoveragePlan, SecuritySignal
 from ..domain.schemas import HunterRoutingPlan, HunterWorkItem
 from .shadow import work_id_for
 
-ROUTER_POLICY = "c-signal-router-v1"
+ROUTER_POLICY = "c-signal-router-v2"
 
 BOUNDS = "c-bounds-integers"
 LIFETIME = "c-memory-lifetime"
@@ -69,6 +69,10 @@ def build_routing_plan(
     )
     signals = {item.signal_id: item for item in graph.signals}
     active_critical_ids = _active_critical_ids(analysis, graph)
+    incremental = (analysis or {}).get("incremental_scope") or {}
+    is_incremental = incremental.get("mode") == "incremental"
+    changed_node_ids = set(incremental.get("changed_node_ids", ()))
+    changed_line_ranges = incremental.get("changed_line_ranges") or {}
     critical = [
         signals[signal_id]
         for signal_id in active_critical_ids
@@ -95,8 +99,25 @@ def build_routing_plan(
         ]
         critical_local = [
             item for item in local_signals
-            if item.signal_id in graph.critical_sink_ids
+            if item.signal_id in active_critical_ids
         ]
+        local_node_ids = {
+            item.node_id for item in graph.nodes if item.path == path
+        }
+        target_node_ids = tuple(sorted(changed_node_ids & local_node_ids))
+        direct_signal_ids = {
+            item.signal_id
+            for item in critical_local
+            if item.node_id in target_node_ids
+        }
+        target_signal_ids = tuple(sorted(
+            direct_signal_ids
+            if is_incremental
+            else {item.signal_id for item in critical_local}
+        ))
+        local_changed_ranges = {
+            path: tuple(tuple(pair) for pair in changed_line_ranges[path])
+        } if path in changed_line_ranges else {}
         routed = _route_file(
             path=path,
             local_signals=local_signals,
@@ -114,6 +135,11 @@ def build_routing_plan(
             )
         )
         for hunter, reasons in routed:
+            focus_reasons = list(reasons)
+            if target_node_ids:
+                focus_reasons.append("change-focus:direct-node")
+            elif target_signal_ids:
+                focus_reasons.append("change-focus:critical-sink")
             items.append(HunterWorkItem(
                 work_id=work_id_for(
                     source_snapshot=source_snapshot,
@@ -121,17 +147,23 @@ def build_routing_plan(
                     slice_ids=slice_ids,
                     files=(path,),
                     hunter=hunter,
+                    target_node_ids=target_node_ids,
+                    target_signal_ids=target_signal_ids,
+                    changed_line_ranges=local_changed_ranges,
                 ),
                 run_id=run_id,
                 source_snapshot=source_snapshot,
                 planning_policy=ROUTER_POLICY,
                 slice_ids=slice_ids,
+                target_node_ids=target_node_ids,
+                target_signal_ids=target_signal_ids,
+                changed_line_ranges=local_changed_ranges,
                 seed_file=path,
                 files=(path,),
                 hunter=hunter,
                 risk=risk,
                 required=bool(critical_local),
-                routing_reasons=tuple(reasons),
+                routing_reasons=tuple(sorted(set(focus_reasons))),
             ))
 
     covered = {
