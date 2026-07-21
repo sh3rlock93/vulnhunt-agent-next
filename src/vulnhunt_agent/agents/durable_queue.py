@@ -174,10 +174,14 @@ class DurableHuntQueueStore(HuntQueueStore):
                 work_id=item.work_id,
                 files=list(item.files),
                 slice_ids=list(item.slice_ids),
+                target_node_ids=list(item.target_node_ids),
+                target_signal_ids=list(item.target_signal_ids),
                 risk=item.risk,
                 required=item.required,
                 hunters=[HuntSubTask(name=item.hunter)],
             )
+        task.target_node_ids = list(item.target_node_ids)
+        task.target_signal_ids = list(item.target_signal_ids)
         task.status = _task_phase(str(row["status"]), task.status)
         if row["status"] in {"done", "failed", "budget_deferred"}:
             task.finished_at = str(row.get("completed_at") or task.finished_at)

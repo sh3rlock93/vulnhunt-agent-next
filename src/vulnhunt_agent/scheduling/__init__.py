@@ -6,6 +6,7 @@ from .budget import (
     BudgetedLLMClient,
     BudgetExceededError,
     adaptive_iteration_limit,
+    adaptive_output_token_limit,
     allocate_work_items,
 )
 from .metrics import estimate_cost_usd, total_usage
@@ -27,6 +28,7 @@ __all__ = [
     "MAX_CONTEXT_FILES",
     "SLICE_WORK_POLICY",
     "adaptive_iteration_limit",
+    "adaptive_output_token_limit",
     "allocate_work_items",
     "build_slice_work_items",
     "build_routing_plan",
