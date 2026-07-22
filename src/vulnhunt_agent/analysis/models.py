@@ -56,6 +56,13 @@ class CapacityReturnKind(StrEnum):
     UNKNOWN = "unknown"
 
 
+class CapacityPriorityClass(StrEnum):
+    COMPLETE_UNCHECKED = "complete_unchecked_capacity_path"
+    COMPLETE_UNKNOWN_GUARD = "complete_unknown_guard_path"
+    PARTIAL = "partial_capacity_path"
+    ISOLATED = "isolated_allocation_or_write"
+
+
 class GraphNode(AnalysisModel):
     node_id: str = Field(min_length=1)
     path: str = Field(min_length=1)
@@ -195,6 +202,39 @@ class FunctionCapacitySummary(AnalysisModel):
     propagation_depth: int = Field(default=0, ge=0, le=5)
 
 
+class CapacityRiskChain(AnalysisModel):
+    chain_id: str = Field(pattern=r"^capacity_risk_[0-9a-f]{20}$")
+    policy_version: str = "c-capacity-risk-chain-v2"
+    root_cause_group: str = Field(pattern=r"^capacity_group_[0-9a-f]{20}$")
+    allocation_fact_id: str = Field(pattern=r"^capacity_[0-9a-f]{20}$")
+    root_node_id: str = Field(min_length=1)
+    root_path: str = Field(min_length=1)
+    root_function: str = Field(min_length=1)
+    base: str = Field(min_length=1)
+    element_count: str = Field(min_length=1)
+    element_size: str = Field(min_length=1)
+    node_ids: tuple[str, ...] = Field(min_length=1)
+    paths: tuple[str, ...] = Field(min_length=1)
+    fact_ids: tuple[str, ...] = Field(min_length=1)
+    call_ids: tuple[str, ...] = ()
+    summary_ids: tuple[str, ...] = ()
+    source_signal_ids: tuple[str, ...] = ()
+    allocation_signal_ids: tuple[str, ...] = ()
+    write_signal_ids: tuple[str, ...] = ()
+    return_consumption_call_ids: tuple[str, ...] = ()
+    pointer_advance_fact_ids: tuple[str, ...] = ()
+    write_fact_ids: tuple[str, ...] = ()
+    guard_fact_ids: tuple[str, ...] = ()
+    guard_state: GuardState
+    missing_elements: tuple[str, ...] = ()
+    evidence_lines: dict[str, tuple[int, ...]] = Field(default_factory=dict)
+    priority_class: CapacityPriorityClass
+    score: int = Field(ge=0, le=100)
+    confidence: str = Field(pattern=r"^(?:low|medium|high)$")
+    entrypoint_reachable: bool = False
+    rationale: str = Field(min_length=1)
+
+
 class CAnalysisGraph(AnalysisModel):
     schema_version: int = 2
     language: str = "c"
@@ -208,6 +248,7 @@ class CAnalysisGraph(AnalysisModel):
     capacity_facts: tuple[CapacityFact, ...] = ()
     capacity_calls: tuple[CapacityCallSite, ...] = ()
     capacity_summaries: tuple[FunctionCapacitySummary, ...] = ()
+    capacity_risk_chains: tuple[CapacityRiskChain, ...] = ()
     unresolved_calls: tuple[UnresolvedCall, ...] = ()
 
 

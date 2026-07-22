@@ -1,6 +1,6 @@
 # M11.2 — Capacity-aware buffer-overflow ranking
 
-Status: in progress; PR 3 of 7 implemented
+Status: in progress; PR 4 of 7 implemented
 
 ## Goal
 
@@ -53,6 +53,17 @@ input. Existing LibTIFF and synthetic ranking regressions must remain green.
 - [x] Parameter writes and return behavior propagate through at most five calls.
 - [x] External and function-pointer calls remain unresolved and do not propagate.
 - [x] The generic libwebp Huffman call path is linked end to end.
+
+## PR 4 acceptance gates
+
+- [x] Allocation, alias, call binding, returned consumption, advance, and write
+  evidence form one deterministic cross-file chain.
+- [x] Calls and aliases remain bounded by the PR 2/3 limits.
+- [x] Chains are classified as complete unchecked, complete unknown-guard,
+  partial, or isolated before their numeric score is considered.
+- [x] Allocation and write signals both map scheduling work to the same chain.
+- [x] Chain paths and exact evidence lines are included in bounded Hunter context.
+- [x] Existing M10 risk-chain ordering remains unchanged without capacity evidence.
 
 ## Non-goals
 

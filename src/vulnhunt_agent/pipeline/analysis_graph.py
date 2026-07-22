@@ -89,6 +89,7 @@ async def run_analysis_graph(store: RunStore, bus: EventBus) -> None:
             "capacity_facts": len(graph.capacity_facts),
             "capacity_calls": len(graph.capacity_calls),
             "capacity_summaries": len(graph.capacity_summaries),
+            "capacity_risk_chains": len(graph.capacity_risk_chains),
             "critical_risk_chains": sum(
                 item.score >= 80 and item.guard_state.value != "dominates"
                 for item in graph.risk_chains

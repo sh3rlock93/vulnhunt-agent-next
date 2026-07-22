@@ -17,6 +17,7 @@ from ..indexer.tree_sitter_indexer import (
 from .constraints import extract_constraint_facts
 from .capacity import build_local_capacity_summary, extract_capacity_facts
 from .capacity_summaries import propagate_capacity_summaries
+from .capacity_chains import build_capacity_risk_chains
 from .models import (
     CAnalysisGraph,
     CapacityCallSite,
@@ -260,6 +261,14 @@ def build_c_analysis_graph(repo: Path, source_files: list[str]) -> CAnalysisGrap
         local_capacity_summaries,
         tuple(capacity_calls),
     )
+    capacity_risk_chains = build_capacity_risk_chains(
+        facts=tuple(capacity_facts),
+        calls=tuple(capacity_calls),
+        summaries=capacity_summaries,
+        signals=tuple(signals),
+        edges=tuple(edges),
+        entrypoint_ids=tuple(sorted(set(entrypoints))),
+    )
     return CAnalysisGraph(
         nodes=tuple(nodes),
         edges=tuple(edges),
@@ -271,6 +280,7 @@ def build_c_analysis_graph(repo: Path, source_files: list[str]) -> CAnalysisGrap
         capacity_facts=tuple(capacity_facts),
         capacity_calls=tuple(capacity_calls),
         capacity_summaries=capacity_summaries,
+        capacity_risk_chains=capacity_risk_chains,
         unresolved_calls=tuple(sorted(
             unresolved,
             key=lambda item: (item.path, item.line, item.source, item.callee),

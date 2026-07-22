@@ -9,6 +9,7 @@ from pathlib import Path
 from ..domain.schemas import HunterWorkItem
 from .context import (
     context_for_work_item,
+    matching_capacity_risk_chains_for_targets,
     matching_risk_chains,
     matching_risk_chains_for_targets,
 )
@@ -22,6 +23,7 @@ MAX_BUILD_FILES = 2
 CONTEXT_KIND_LINE_LIMITS = {
     "target": 72,
     "constraint": 48,
+    "capacity_chain": 48,
     "caller": 48,
     "callee": 48,
     "related": 40,
@@ -135,12 +137,17 @@ class SharedContextCache:
             compact.pop(field, None)
         related_nodes = compact.get("related_nodes") or []
         constraint_facts = compact.get("constraint_facts") or []
+        capacity_chains = compact.get("capacity_risk_chains") or []
         constraint_files = tuple(dict.fromkeys(
             str(item.get("path", ""))
             for item in constraint_facts
             if item.get("path") and item.get("path") not in work_item.files
         ))
         relationship_by_file: dict[str, str] = {}
+        for chain in capacity_chains:
+            for path in chain.get("paths", ()):
+                if path and path not in work_item.files:
+                    relationship_by_file.setdefault(str(path), "capacity_chain")
         for item in related_nodes:
             path = str(item.get("path", ""))
             if path and path not in work_item.files:
@@ -384,6 +391,7 @@ class SharedContextCache:
             "packet_fit_applied": False,
             "removed_slices": 0,
             "removed_risk_chains": 0,
+            "removed_capacity_risk_chains": 0,
             "removed_related_nodes": 0,
             "removed_constraints": 0,
         }
@@ -411,11 +419,18 @@ def context_cache_key(
     compact = context_for_work_item(analysis, work_item)
     related_nodes = compact.get("related_nodes") or []
     constraint_facts = compact.get("constraint_facts") or []
+    capacity_chains = compact.get("capacity_risk_chains") or []
     context_files = set(work_item.files)
     context_files.update(
         str(item.get("path", ""))
         for item in (*related_nodes, *constraint_facts)
         if item.get("path")
+    )
+    context_files.update(
+        str(path)
+        for chain in capacity_chains
+        for path in chain.get("paths", ())
+        if path
     )
     selected_ranges = _relevant_ranges(
         analysis,
@@ -437,6 +452,7 @@ def context_cache_key(
         "target_node_ids": sorted(work_item.target_node_ids),
         "target_signal_ids": sorted(work_item.target_signal_ids),
         "risk_chains": matching_risk_chains(graph, work_item)[:6],
+        "capacity_risk_chains": capacity_chains[:3],
         "related_nodes": related_nodes,
         "constraint_policy_version": compact.get("constraint_policy_version", ""),
         "constraint_facts": constraint_facts,
@@ -505,6 +521,16 @@ def _relevant_ranges(
         out.setdefault(path, []).extend(
             (int(line), int(line)) for line in ordered_lines
         )
+    for chain in matching_capacity_risk_chains_for_targets(
+        graph,
+        target_signal_ids=target_signal_ids,
+        target_node_ids=target_node_ids,
+    )[:3]:
+        for path, lines in chain.get("evidence_lines", {}).items():
+            if path in files:
+                out.setdefault(path, []).extend(
+                    (int(line), int(line)) for line in lines
+                )
     for signal in graph.get("signals", []):
         if (
             signal.get("node_id") in selected_nodes
@@ -623,6 +649,12 @@ def _fit_packet(packet: dict) -> dict:
             chains.pop()
             packet["truncation"]["packet_fit_applied"] = True
             packet["truncation"]["removed_risk_chains"] += 1
+            continue
+        capacity_chains = packet.get("capacity_risk_chains") or []
+        if len(capacity_chains) > 1:
+            capacity_chains.pop()
+            packet["truncation"]["packet_fit_applied"] = True
+            packet["truncation"]["removed_capacity_risk_chains"] += 1
             continue
         related_nodes = packet.get("related_nodes") or []
         if len(related_nodes) > 1:
