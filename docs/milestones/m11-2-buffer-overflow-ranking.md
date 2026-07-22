@@ -1,6 +1,6 @@
 # M11.2 — Capacity-aware buffer-overflow ranking
 
-Status: in progress; PR 4 of 7 implemented
+Status: in progress; PR 5 of 7 implemented
 
 ## Goal
 
@@ -64,6 +64,16 @@ input. Existing LibTIFF and synthetic ranking regressions must remain green.
 - [x] Allocation and write signals both map scheduling work to the same chain.
 - [x] Chain paths and exact evidence lines are included in bounded Hunter context.
 - [x] Existing M10 risk-chain ordering remains unchanged without capacity evidence.
+
+## PR 5 acceptance gates
+
+- [x] Rejecting `required > remaining` and `used + required > capacity` guards
+  lower complete chains below critical admission.
+- [x] Checked realloc/grow followed by failure termination is a safe path end.
+- [x] Overflow-safe rejecting checks are recognized without target signatures.
+- [x] Non-dominating or directionally ambiguous comparisons remain unknown, not safe.
+- [x] Unrelated parser, metadata, and public-limit checks do not mask a capacity path.
+- [x] Relevant guard and safe-growth fact IDs remain auditable in chain artifacts.
 
 ## Non-goals
 
