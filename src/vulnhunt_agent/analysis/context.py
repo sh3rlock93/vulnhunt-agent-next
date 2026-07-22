@@ -71,13 +71,15 @@ def context_for_work_item(
     signals = {item["signal_id"]: item for item in graph.get("signals", [])}
     related_nodes = _related_nodes(graph, work_item)
     constraint_facts = _constraint_facts(graph, work_item, related_nodes)
-    risk_chains = _focus_first(
+    risk_chains = _select_focus_chains(
         _matching_risk_chains(graph, work_item),
         work_item.focus_chain_ids,
+        support_limit=6,
     )
-    capacity_chains = _focus_first(
+    capacity_chains = _select_focus_chains(
         matching_capacity_risk_chains(graph, work_item),
         work_item.focus_chain_ids,
+        support_limit=3,
     )
     selected_ids = set(work_item.slice_ids)
     matching = [
@@ -125,13 +127,11 @@ def context_for_work_item(
         "risk_chain_policy_version": (
             risk_chains[0].get("policy_version", "") if risk_chains else ""
         ),
-        "risk_chains": [
-            _compact_risk_chain(item) for item in risk_chains[:6]
-        ],
+        "risk_chains": [_compact_risk_chain(item) for item in risk_chains],
         "capacity_risk_chain_policy_version": (
             capacity_chains[0].get("policy_version", "") if capacity_chains else ""
         ),
-        "capacity_risk_chains": capacity_chains[:3],
+        "capacity_risk_chains": capacity_chains,
         "change_focus": {
             "target_node_ids": list(work_item.target_node_ids),
             "target_signal_ids": list(work_item.target_signal_ids),
@@ -209,6 +209,30 @@ def _focus_first(chains: list[dict], focus_chain_ids: tuple[str, ...]) -> list[d
             order.get(str(chain.get("chain_id", "")), len(order)),
         ),
     )
+
+
+def _select_focus_chains(
+    chains: list[dict],
+    focus_chain_ids: tuple[str, ...] | set[str],
+    *,
+    support_limit: int,
+) -> list[dict]:
+    ordered_focus_ids = (
+        focus_chain_ids
+        if isinstance(focus_chain_ids, tuple)
+        else tuple(sorted(focus_chain_ids))
+    )
+    ordered = _focus_first(chains, ordered_focus_ids)
+    focus = set(focus_chain_ids)
+    focused = [
+        chain for chain in ordered
+        if str(chain.get("chain_id", "")) in focus
+    ]
+    supporting = [
+        chain for chain in ordered
+        if str(chain.get("chain_id", "")) not in focus
+    ]
+    return [*focused, *supporting[:support_limit]]
 
 
 def matching_risk_chains_for_targets(

@@ -8,13 +8,14 @@ from pathlib import Path
 
 from ..domain.schemas import HunterWorkItem
 from .context import (
+    _select_focus_chains,
     context_for_work_item,
     matching_capacity_risk_chains_for_targets,
-    matching_risk_chains,
     matching_risk_chains_for_targets,
 )
 
 CONTEXT_CACHE_POLICY = "c-context-v6"
+CONTEXT_SHARD_POLICY = "c-focus-chain-shards-v1"
 MAX_CONTEXT_BYTES = 24_000
 MIN_EVIDENCE_EXCERPT_BYTES = 512
 MAX_LINES_PER_FILE = 80
@@ -64,6 +65,8 @@ class SharedContextCache:
         self.misses = 0
         self.bytes = 0
         self._seen_keys: set[str] = set()
+        self._sharded_work_ids: set[str] = set()
+        self._shard_keys: set[str] = set()
 
     def get(self, work_item: HunterWorkItem) -> dict:
         cache_key = context_cache_key(
@@ -96,13 +99,38 @@ class SharedContextCache:
         self._seen_keys.add(cache_key)
         return packet
 
+    def get_shards(self, work_item: HunterWorkItem) -> tuple[dict, ...]:
+        """Materialize per-chain packets only when fitting loses focus evidence."""
+        combined = self.get(work_item)
+        expected = set(work_item.focus_chain_ids)
+        if not expected or expected <= _packet_chain_ids(combined):
+            self._shard_keys.add(str(combined["cache_key"]))
+            return (combined,)
+
+        shards = []
+        for chain_id in work_item.focus_chain_ids:
+            shard_item = HunterWorkItem.model_validate({
+                **work_item.model_dump(mode="python"),
+                "focus_chain_ids": (chain_id,),
+            })
+            packet = self.get(shard_item)
+            if chain_id not in _packet_chain_ids(packet):
+                raise ValueError(f"focus chain missing from isolated context shard: {chain_id}")
+            shards.append(packet)
+            self._shard_keys.add(str(packet["cache_key"]))
+        self._sharded_work_ids.add(work_item.work_id)
+        return tuple(shards)
+
     def stats(self) -> dict[str, int | str]:
         return {
             "policy_version": CONTEXT_CACHE_POLICY,
+            "shard_policy_version": CONTEXT_SHARD_POLICY,
             "entries": len(self._seen_keys),
             "hits": self.hits,
             "misses": self.misses,
             "bytes": self.bytes,
+            "sharded_work_items": len(self._sharded_work_ids),
+            "shard_packets": len(self._shard_keys),
         }
 
     def _read_valid(self, path: Path, cache_key: str) -> dict | None:
@@ -194,6 +222,7 @@ class SharedContextCache:
             target_signal_ids=set(work_item.target_signal_ids),
             target_node_ids=set(work_item.target_node_ids),
             changed_line_ranges=work_item.changed_line_ranges,
+            focus_chain_ids=set(work_item.focus_chain_ids),
             related_nodes=related_nodes,
             constraint_facts=constraint_facts,
         )
@@ -448,6 +477,7 @@ def context_cache_key(
         target_signal_ids=set(work_item.target_signal_ids),
         target_node_ids=set(work_item.target_node_ids),
         changed_line_ranges=work_item.changed_line_ranges,
+        focus_chain_ids=set(work_item.focus_chain_ids),
         related_nodes=related_nodes,
         constraint_facts=constraint_facts,
     )
@@ -461,8 +491,8 @@ def context_cache_key(
         "target_node_ids": sorted(work_item.target_node_ids),
         "target_signal_ids": sorted(work_item.target_signal_ids),
         "focus_chain_ids": list(work_item.focus_chain_ids),
-        "risk_chains": matching_risk_chains(graph, work_item)[:6],
-        "capacity_risk_chains": capacity_chains[:3],
+        "risk_chains": compact.get("risk_chains", []),
+        "capacity_risk_chains": capacity_chains,
         "related_nodes": related_nodes,
         "constraint_policy_version": compact.get("constraint_policy_version", ""),
         "constraint_facts": constraint_facts,
@@ -494,6 +524,7 @@ def _relevant_ranges(
     target_signal_ids: set[str],
     target_node_ids: set[str],
     changed_line_ranges: dict[str, tuple[tuple[int, int], ...]],
+    focus_chain_ids: set[str] | None = None,
     related_nodes: list[dict] | tuple[dict, ...] = (),
     constraint_facts: list[dict] | tuple[dict, ...] = (),
 ) -> dict[str, list[tuple[int, int]]]:
@@ -514,11 +545,12 @@ def _relevant_ranges(
         for path, ranges in changed_line_ranges.items()
         if path in files
     }
-    for chain in matching_risk_chains_for_targets(
+    risk_chains = _select_focus_chains(matching_risk_chains_for_targets(
         graph,
         target_signal_ids=target_signal_ids,
         target_node_ids=target_node_ids,
-    )[:6]:
+    ), focus_chain_ids or set(), support_limit=6)
+    for chain in risk_chains:
         path = str(chain.get("path", ""))
         if path not in files:
             continue
@@ -531,11 +563,12 @@ def _relevant_ranges(
         out.setdefault(path, []).extend(
             (int(line), int(line)) for line in ordered_lines
         )
-    for chain in matching_capacity_risk_chains_for_targets(
+    capacity_chains = _select_focus_chains(matching_capacity_risk_chains_for_targets(
         graph,
         target_signal_ids=target_signal_ids,
         target_node_ids=target_node_ids,
-    )[:3]:
+    ), focus_chain_ids or set(), support_limit=3)
+    for chain in capacity_chains:
         for path, lines in chain.get("evidence_lines", {}).items():
             if path in files:
                 out.setdefault(path, []).extend(
@@ -797,3 +830,12 @@ def _focus_evidence_paths(packet: dict) -> set[str]:
                 if path:
                     paths.add(str(path))
     return paths
+
+
+def _packet_chain_ids(packet: dict) -> set[str]:
+    return {
+        str(chain.get("chain_id", ""))
+        for field in ("risk_chains", "capacity_risk_chains")
+        for chain in packet.get(field) or ()
+        if chain.get("chain_id")
+    }

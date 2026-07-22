@@ -19,6 +19,7 @@ from .capacity_chains import (
 from .context import context_for_file, context_for_work_item
 from .context_cache import (
     CONTEXT_CACHE_POLICY,
+    CONTEXT_SHARD_POLICY,
     SharedContextCache,
     context_cache_key,
 )
@@ -81,6 +82,7 @@ __all__ = [
     "context_for_file",
     "context_for_work_item",
     "CONTEXT_CACHE_POLICY",
+    "CONTEXT_SHARD_POLICY",
     "CONSTRAINT_POLICY",
     "SharedContextCache",
     "INCREMENTAL_POLICY",
