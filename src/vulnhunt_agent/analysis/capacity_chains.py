@@ -150,8 +150,23 @@ def _chain_for_allocation(
     advances = tuple(
         fact for fact in fact_values if fact.kind is CapacityFactKind.ADVANCE
     )
-    guards = tuple(
+    extracted_guards = tuple(
         fact for fact in fact_values if fact.kind is CapacityFactKind.GUARD
+    )
+    growth_facts = tuple(
+        fact for fact in fact_values if fact.kind is CapacityFactKind.GROWTH
+    )
+    guard_state, guards, safe_growth = _classify_capacity_guards(
+        allocation=allocation,
+        guards=extracted_guards,
+        growth_facts=growth_facts,
+        advances=advances,
+        writes=write_facts,
+        calls=tuple(selected_calls.values()),
+    )
+    chain_facts = tuple(
+        fact for fact in fact_values
+        if fact.kind is not CapacityFactKind.GUARD or fact in guards
     )
     signal_nodes = nodes
     source_signals = tuple(sorted(
@@ -171,24 +186,28 @@ def _chain_for_allocation(
         and signal.role is SignalRole.SINK
     ))
     complete = bool(write_facts and (return_calls or advances))
-    if complete and not guards:
+    if complete and guard_state is GuardState.ABSENT:
         priority = CapacityPriorityClass.COMPLETE_UNCHECKED
-        guard_state = GuardState.ABSENT
         score = 95
         confidence = "high"
+    elif complete and guard_state is GuardState.DOMINATES:
+        priority = CapacityPriorityClass.PARTIAL
+        score = 35
+        confidence = "high"
+    elif complete and guard_state is GuardState.PARTIAL:
+        priority = CapacityPriorityClass.COMPLETE_UNKNOWN_GUARD
+        score = 75
+        confidence = "medium"
     elif complete:
         priority = CapacityPriorityClass.COMPLETE_UNKNOWN_GUARD
-        guard_state = GuardState.UNKNOWN
         score = 85
         confidence = "medium"
     elif write_facts or return_calls or advances or selected_calls:
         priority = CapacityPriorityClass.PARTIAL
-        guard_state = GuardState.UNKNOWN if guards else GuardState.ABSENT
-        score = 60
+        score = 50 if guard_state in {GuardState.DOMINATES, GuardState.PARTIAL} else 60
         confidence = "medium"
     else:
         priority = CapacityPriorityClass.ISOLATED
-        guard_state = GuardState.UNKNOWN if guards else GuardState.ABSENT
         score = 30
         confidence = "low"
     score = min(100, score + (5 if entrypoint_reachable else 0))
@@ -208,7 +227,7 @@ def _chain_for_allocation(
         missing.add("write")
 
     evidence_lines: dict[str, set[int]] = {}
-    for fact in fact_values:
+    for fact in chain_facts:
         evidence_lines.setdefault(fact.path, set()).add(fact.line)
     for call in selected_calls.values():
         evidence_lines.setdefault(call.path, set()).add(call.line)
@@ -216,7 +235,7 @@ def _chain_for_allocation(
     identity = "\0".join((
         CAPACITY_RISK_CHAIN_POLICY,
         allocation.fact_id,
-        *sorted(selected_facts),
+        *(sorted(fact.fact_id for fact in chain_facts)),
         *sorted(selected_calls),
     ))
     root_identity = "\0".join((
@@ -239,7 +258,7 @@ def _chain_for_allocation(
         element_size=allocation.element_size or "1",
         node_ids=tuple(sorted(nodes)),
         paths=paths or (allocation.path,),
-        fact_ids=tuple(sorted(selected_facts)),
+        fact_ids=tuple(sorted(fact.fact_id for fact in chain_facts)),
         call_ids=tuple(sorted(selected_calls)),
         summary_ids=tuple(sorted(selected_summaries)),
         source_signal_ids=source_signals,
@@ -249,6 +268,7 @@ def _chain_for_allocation(
         pointer_advance_fact_ids=tuple(sorted(fact.fact_id for fact in advances)),
         write_fact_ids=tuple(sorted(fact.fact_id for fact in write_facts)),
         guard_fact_ids=tuple(sorted(fact.fact_id for fact in guards)),
+        safe_growth_fact_ids=tuple(sorted(fact.fact_id for fact in safe_growth)),
         guard_state=guard_state,
         missing_elements=tuple(sorted(missing)),
         evidence_lines={
@@ -265,6 +285,120 @@ def _chain_for_allocation(
             f"guard={guard_state.value}"
         ),
     )
+
+
+def _classify_capacity_guards(
+    *,
+    allocation: CapacityFact,
+    guards: tuple[CapacityFact, ...],
+    growth_facts: tuple[CapacityFact, ...],
+    advances: tuple[CapacityFact, ...],
+    writes: tuple[CapacityFact, ...],
+    calls: tuple[CapacityCallSite, ...],
+) -> tuple[GuardState, tuple[CapacityFact, ...], tuple[CapacityFact, ...]]:
+    capacity_terms = _tokens(
+        f"{allocation.base} {allocation.element_count} {allocation.remaining_capacity}"
+    )
+    activity_terms = _tokens(" ".join((
+        *(f"{fact.offset} {fact.evidence}" for fact in advances),
+        *(f"{fact.write_extent} {fact.evidence}" for fact in writes),
+        *(" ".join((*call.arguments, call.result_subject)) for call in calls),
+    )))
+    activity_terms -= capacity_terms
+    growth_by_subject = {fact.subject: fact for fact in growth_facts}
+    hazard_lines: dict[str, list[int]] = {}
+    for fact in (*advances, *writes):
+        hazard_lines.setdefault(fact.node_id, []).append(fact.line)
+    for call in calls:
+        hazard_lines.setdefault(call.caller_id, []).append(call.line)
+
+    relevant: list[CapacityFact] = []
+    safe: list[CapacityFact] = []
+    safe_growth: list[CapacityFact] = []
+    for guard in guards:
+        guard_tokens = _tokens(f"{guard.subject} {guard.relation}")
+        guarded_growth = sorted(set(growth_by_subject).intersection(guard_tokens))
+        null_growth_guard = (
+            guarded_growth
+            and "NULL" in guard.relation
+            and guard.guard_effect == "reject"
+        )
+        cap_overlap = bool(capacity_terms.intersection(guard_tokens)) or any(
+            _is_capacity_name(token) for token in guard_tokens
+        )
+        activity_overlap = bool(activity_terms.intersection(guard_tokens))
+        if not null_growth_guard and not (cap_overlap and activity_overlap):
+            continue
+        relevant.append(guard)
+        earliest_hazard = min(hazard_lines.get(guard.node_id, (10**9,)))
+        dominates = guard.dominates and guard.line <= earliest_hazard
+        if null_growth_guard and dominates:
+            safe.append(guard)
+            safe_growth.extend(growth_by_subject[name] for name in guarded_growth)
+        elif dominates and _reject_establishes_safe(guard, capacity_terms, activity_terms):
+            safe.append(guard)
+
+    if safe:
+        state = GuardState.DOMINATES
+    elif relevant and any(
+        _reject_establishes_safe(guard, capacity_terms, activity_terms)
+        for guard in relevant
+    ):
+        state = GuardState.PARTIAL
+    elif relevant:
+        state = GuardState.UNKNOWN
+    else:
+        state = GuardState.ABSENT
+    return (
+        state,
+        tuple(sorted(relevant, key=lambda item: item.fact_id)),
+        tuple(sorted({fact.fact_id: fact for fact in safe_growth}.values(),
+                     key=lambda item: item.fact_id)),
+    )
+
+
+def _reject_establishes_safe(
+    guard: CapacityFact,
+    capacity_terms: set[str],
+    activity_terms: set[str],
+) -> bool:
+    if guard.guard_effect != "reject":
+        return False
+    if re.search(r"overflow|safe|checked", guard.relation, re.IGNORECASE):
+        return True
+    match = re.search(r"(.+?)\s*(<=|<|>=|>)\s*(.+)", guard.relation)
+    if match is None:
+        return False
+    left, operator, right = match.groups()
+    left_tokens = _tokens(left)
+    right_tokens = _tokens(right)
+    left_capacity = bool(left_tokens & capacity_terms) or any(
+        _is_capacity_name(token) for token in left_tokens
+    )
+    right_capacity = bool(right_tokens & capacity_terms) or any(
+        _is_capacity_name(token) for token in right_tokens
+    )
+    left_activity = bool(left_tokens & activity_terms)
+    right_activity = bool(right_tokens & activity_terms)
+    return (
+        left_activity and right_capacity and operator in {">", ">="}
+    ) or (
+        left_capacity and right_activity and operator in {"<", "<="}
+    )
+
+
+def _tokens(value: str) -> set[str]:
+    return set(re.findall(r"\b[A-Za-z_]\w*\b", value)) - {
+        "if", "return", "sizeof", "NULL", "const", "int", "unsigned",
+    }
+
+
+def _is_capacity_name(value: str) -> bool:
+    return bool(re.search(
+        r"capacity|remaining|remain|available|limit|alloc(?:ated)?|(?:^|_)end$",
+        value,
+        re.IGNORECASE,
+    ))
 
 
 def _expand_local_aliases(

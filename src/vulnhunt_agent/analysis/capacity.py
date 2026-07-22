@@ -25,10 +25,21 @@ _CAPACITY_TERM = re.compile(
     r"table_size|buffer_size|buf_size|end)\w*\b",
     re.IGNORECASE,
 )
-_COMPARISON = re.compile(r"(.+?)\s*(<=|<|>=|>)\s*(.+)")
+_COMPARISON = re.compile(r"(.+?)\s*(<=|<|>=|>|==|!=)\s*(.+)")
 _MEMORY_WRITES = frozenset({"memcpy", "memmove", "memset"})
 _NON_POINTER_IDENTIFIERS = frozenset({"NULL", "true", "false"})
 _FAILURE_RETURN = re.compile(r"^(?:0|-1|NULL|false)$")
+_REJECT_ACTION = re.compile(r"\b(?:return|goto|break|continue)\b")
+_GROWTH_CALL = re.compile(r"(?:realloc|grow|reserve|resize)", re.IGNORECASE)
+_CALL_TOKEN = re.compile(r"\b([A-Za-z_]\w*)\s*\(")
+_OVERFLOW_GUARD = re.compile(
+    r"__builtin_(?:add|sub|mul)_overflow|(?:safe|checked)\w*(?:add|mul|size|capacity)",
+    re.IGNORECASE,
+)
+_NULL_GUARD = re.compile(
+    r"if\s*\(\s*!\s*(?P<subject>[A-Za-z_]\w*)\s*\)|"
+    r"if\s*\(\s*(?P<subject2>[A-Za-z_]\w*)\s*(?:==|!=)\s*NULL\s*\)",
+)
 
 
 @dataclass(frozen=True)
@@ -80,7 +91,47 @@ def extract_capacity_facts(
         expression = _compact(_text(right, source))
         call = _first_node(right, "call_expression")
         callee = _call_name(call, source) if call is not None else ""
-        if call is not None and is_allocator_name(callee):
+        if call is not None and (
+            is_allocator_name(callee) or _GROWTH_CALL.search(callee)
+        ):
+            if _GROWTH_CALL.search(callee):
+                arguments = _arguments(call, source)
+                base = _argument_root(arguments[0]) if arguments else subject
+                count = arguments[1] if len(arguments) > 1 else "unknown"
+                element_size = arguments[2] if len(arguments) > 2 else "1"
+                previous = pointers.get(base)
+                state = _PointerState(
+                    base=(previous.base if previous is not None else base),
+                    offset="0",
+                    element_count=count,
+                    element_size=element_size,
+                    alias_depth=min(
+                        MAX_ALIAS_HOPS,
+                        previous.alias_depth + 1 if previous is not None else 1,
+                    ),
+                    transform_depth=(
+                        min(
+                            MAX_CAPACITY_TRANSFORMS,
+                            previous.transform_depth + 1 if previous is not None else 1,
+                        )
+                    ),
+                )
+                pointers[subject] = state
+                facts.append(_fact(
+                    kind=CapacityFactKind.GROWTH,
+                    node_id=node_id,
+                    path=path,
+                    function=function,
+                    line=line,
+                    subject=subject,
+                    state=state,
+                    evidence=(
+                        f"{subject} receives grown storage from {callee}"
+                        f"({', '.join(arguments)})"
+                    ),
+                    confidence="high",
+                ))
+                continue
             count, element_size = _allocation_shape(call, callee, source)
             state = _PointerState(
                 base=subject,
@@ -190,35 +241,67 @@ def extract_capacity_facts(
 
     function_text = _text(function_node, source)
     start_line = function_node.start_point[0] + 1
+    function_lines = function_text.splitlines()
     allocation_terms = {
         identifier
         for state in pointers.values()
         for identifier in re.findall(r"\b[A-Za-z_]\w*\b", state.element_count)
         if identifier not in {"sizeof"}
     }
-    for offset, raw_line in enumerate(function_text.splitlines()):
+    growth_subjects = {
+        fact.subject for fact in facts if fact.kind is CapacityFactKind.GROWTH
+    }
+    for offset, raw_line in enumerate(function_lines):
         line = _compact(raw_line)
-        if "if" not in line or (
+        if "if" not in line:
+            continue
+        line_terms = set(re.findall(r"\b[A-Za-z_]\w*\b", line))
+        null_guard = _NULL_GUARD.search(line)
+        overflow_guard = _OVERFLOW_GUARD.search(line)
+        if (
             not _CAPACITY_TERM.search(line)
-            and not allocation_terms.intersection(re.findall(r"\b[A-Za-z_]\w*\b", line))
+            and not allocation_terms.intersection(line_terms)
+            and not growth_subjects.intersection(line_terms)
+            and null_guard is None
+            and overflow_guard is None
         ):
             continue
-        condition = line[line.find("if") + 2:].strip(" (){")
+        action_window = " ".join(function_lines[offset:offset + 4])
+        effect = "reject" if _REJECT_ACTION.search(action_window) else "unknown"
+        if any(
+            _GROWTH_CALL.search(name) for name in _CALL_TOKEN.findall(action_window)
+        ):
+            effect = "grow"
+        condition_match = re.search(r"\bif\s*\((.*?)\)", line)
+        condition = (
+            condition_match.group(1)
+            if condition_match is not None else line[line.find("if") + 2:].strip(" (){")
+        )
         comparison = _COMPARISON.search(condition)
-        if comparison is None:
+        if comparison is not None:
+            relation = _compact(comparison.group(0))
+            subject = _compact(comparison.group(1))
+        elif null_guard is not None:
+            subject = null_guard.group("subject") or null_guard.group("subject2") or "unknown"
+            relation = f"{subject} != NULL on continuing path"
+        elif overflow_guard is not None:
+            subject = _compact(overflow_guard.group(0))
+            relation = line
+        else:
             continue
-        relation = _compact(comparison.group(0))
         facts.append(_fact(
             kind=CapacityFactKind.GUARD,
             node_id=node_id,
             path=path,
             function=function,
             line=start_line + offset,
-            subject=_compact(comparison.group(1)),
+            subject=subject,
             state=_PointerState("", "", "", "", 0, 0),
             relation=relation,
             evidence=f"explicit capacity comparison: {relation}",
             confidence="medium",
+            guard_effect=effect,
+            dominates=effect == "reject",
         ))
 
     return tuple(sorted(
@@ -445,6 +528,8 @@ def _fact(
     confidence: str,
     write_extent: str = "",
     relation: str = "",
+    guard_effect: str = "unknown",
+    dominates: bool = False,
 ) -> CapacityFact:
     remaining = (
         _subtract(state.element_count, state.offset)
@@ -470,6 +555,8 @@ def _fact(
         remaining_capacity=remaining,
         write_extent=write_extent,
         relation=relation,
+        guard_effect=guard_effect,
+        dominates=dominates,
         evidence=evidence[:500],
         confidence=confidence,
         alias_depth=state.alias_depth,
@@ -521,6 +608,12 @@ def _walk(root: Node):
 
 def _strip_casts(expression: str) -> str:
     return re.sub(r"^(?:\([^()]*(?:\*|_t)\)\s*)+", "", expression).strip()
+
+
+def _argument_root(argument: str) -> str:
+    value = _strip_casts(argument)
+    match = re.match(r"(?:&\s*)?([A-Za-z_]\w*)", value)
+    return match.group(1) if match is not None else ""
 
 
 def _add(left: str, right: str) -> str:

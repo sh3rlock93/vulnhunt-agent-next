@@ -46,6 +46,7 @@ class CapacityFactKind(StrEnum):
     ADVANCE = "advance"
     WRITE = "write"
     GUARD = "guard"
+    GROWTH = "growth"
 
 
 class CapacityReturnKind(StrEnum):
@@ -164,6 +165,8 @@ class CapacityFact(AnalysisModel):
     remaining_capacity: str = ""
     write_extent: str = ""
     relation: str = ""
+    guard_effect: str = Field(default="unknown", pattern=r"^(?:unknown|reject|grow)$")
+    dominates: bool = False
     evidence: str = Field(min_length=1)
     confidence: str = Field(pattern=r"^(?:low|medium|high)$")
     alias_depth: int = Field(default=0, ge=0, le=8)
@@ -225,6 +228,7 @@ class CapacityRiskChain(AnalysisModel):
     pointer_advance_fact_ids: tuple[str, ...] = ()
     write_fact_ids: tuple[str, ...] = ()
     guard_fact_ids: tuple[str, ...] = ()
+    safe_growth_fact_ids: tuple[str, ...] = ()
     guard_state: GuardState
     missing_elements: tuple[str, ...] = ()
     evidence_lines: dict[str, tuple[int, ...]] = Field(default_factory=dict)

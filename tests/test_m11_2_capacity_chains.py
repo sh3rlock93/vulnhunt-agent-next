@@ -13,9 +13,10 @@ from vulnhunt_agent.domain.schemas import BudgetPolicy, HunterWorkItem
 from vulnhunt_agent.scheduling import allocate_work_items, work_id_for
 
 
-def _fixture_graph(tmp_path):
+def _fixture_graph(tmp_path, *, guarded: bool = True):
     repo = tmp_path / "capacity-chain"
     repo.mkdir()
+    guard = "  if (used + 1 > capacity) return 0;\n" if guarded else ""
     (repo / "decode.c").write_text(
         "#include <stdlib.h>\n"
         "typedef struct { int value; } Entry;\n"
@@ -23,7 +24,8 @@ def _fixture_graph(tmp_path):
         "int decode(int capacity, int used) {\n"
         "  Entry *base = malloc(capacity * sizeof(*base));\n"
         "  Entry *cursor = base;\n"
-        "  if (used + 1 > capacity) return 0;\n"
+        + guard
+        +
         "  int consumed = fill(cursor, capacity - used);\n"
         "  cursor += consumed;\n"
         "  return consumed;\n"
@@ -76,8 +78,9 @@ def test_cross_file_capacity_chain_is_complete_and_deterministic(tmp_path) -> No
 
     assert first == second
     assert chain.policy_version == "c-capacity-risk-chain-v2"
-    assert chain.priority_class is CapacityPriorityClass.COMPLETE_UNKNOWN_GUARD
-    assert chain.guard_state is GuardState.UNKNOWN
+    assert chain.priority_class is CapacityPriorityClass.PARTIAL
+    assert chain.guard_state is GuardState.DOMINATES
+    assert chain.score == 40
     assert chain.entrypoint_reachable is True
     assert chain.paths == ("decode.c", "table.c")
     assert len(chain.call_ids) == 2
@@ -92,7 +95,7 @@ def test_cross_file_capacity_chain_is_complete_and_deterministic(tmp_path) -> No
 
 
 def test_capacity_priority_class_precedes_legacy_raw_score(tmp_path) -> None:
-    _, graph = _fixture_graph(tmp_path)
+    _, graph = _fixture_graph(tmp_path, guarded=False)
     capacity_chain = next(
         item for item in graph.capacity_risk_chains if item.root_path == "decode.c"
     )
@@ -134,9 +137,9 @@ def test_capacity_priority_class_precedes_legacy_raw_score(tmp_path) -> None:
     assert allocation.policy_version == "c-budget-v4"
     assert allocation.admitted_work_ids == (capacity_work.work_id,)
     assert allocation.ranking[0].priority_class == (
-        "complete_unknown_guard_path"
+        "complete_unchecked_capacity_path"
     )
-    assert allocation.ranking[0].score_components["capacity_chain"] == 90
+    assert allocation.ranking[0].score_components["capacity_chain"] == 100
     assert allocation.ranking[1].score_components["risk_chain"] == 95
 
 
