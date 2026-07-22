@@ -14,7 +14,7 @@ import uuid
 from dataclasses import asdict
 from pathlib import Path
 
-from ...analysis import CAnalysisGraph, CONTEXT_SHARD_POLICY, SharedContextCache
+from ...analysis import CONTEXT_SHARD_POLICY, SharedContextCache
 from ...agents.hunter import (
     SOURCE_EVIDENCE_POLICY,
     SOURCE_EVIDENCE_RETRY_LIMIT,
@@ -44,10 +44,8 @@ from ...scheduling import (
     RecyclableAdmissionLedger,
     adaptive_iteration_limit,
     adaptive_output_token_limit,
-    allocate_work_items,
-    apply_admission_focus,
-    build_routing_plan,
-    build_slice_work_items,
+    allocate_native_work_plan,
+    build_native_work_plan,
     total_usage,
 )
 from .. import finalize
@@ -97,19 +95,20 @@ async def run_hunt(store: RunStore, bus: EventBus) -> None:
     hunters = _resolve_hunter_selection(
         store.dir / "steps", language_of(env)
     )
-    routing_plan = build_routing_plan(
+    native_work_plan = build_native_work_plan(
         run_id=store.dir.name,
         source_snapshot=source_snapshot,
         selected_files=files,
         enabled_hunters=hunters,
         analysis=analysis,
     )
+    routing_plan = native_work_plan.routing
     if routing_plan.uncovered_critical_sink_ids:
         raise RuntimeError(
             "signal router left critical sinks uncovered: "
             + ", ".join(routing_plan.uncovered_critical_sink_ids)
         )
-    work_items = build_slice_work_items(routing_plan, analysis)
+    work_items = native_work_plan.work_items
     incremental = analysis.get("incremental_scope") or {}
     if incremental.get("mode") == "incremental":
         full_analysis = {
@@ -122,14 +121,15 @@ async def run_hunt(store: RunStore, bus: EventBus) -> None:
         full_selected = list(
             (analysis.get("coverage_plan") or {}).get("selected_files", [])
         )
-        full_routing = build_routing_plan(
+        full_work_plan = build_native_work_plan(
             run_id=store.dir.name,
             source_snapshot=source_snapshot,
             selected_files=full_selected,
             enabled_hunters=hunters,
             analysis=full_analysis,
         )
-        full_work_items = build_slice_work_items(full_routing, full_analysis)
+        full_routing = full_work_plan.routing
+        full_work_items = full_work_plan.work_items
     else:
         full_routing = routing_plan
         full_work_items = work_items
@@ -249,26 +249,19 @@ async def run_hunt(store: RunStore, bus: EventBus) -> None:
     pending_ids = {
         task.work_id for task in queue.tasks if task.status == "pending"
     }
-    allocation = allocate_work_items(
-        tuple(item for item in work_items if item.work_id in pending_ids),
+    admission_plan = allocate_native_work_plan(
+        native_work_plan,
         budget_policy,
+        eligible_work_ids=pending_ids,
         consumed_sessions=sum(item.sessions for item in persisted_usage),
-        risk_chains=CAnalysisGraph.model_validate(
-            analysis.get("graph") or {}
-        ).risk_chains,
-        capacity_chains=CAnalysisGraph.model_validate(
-            analysis.get("graph") or {}
-        ).capacity_risk_chains,
-        entrypoint_ids=tuple(
-            (analysis.get("graph") or {}).get("entrypoint_ids", ())
-        ),
         native_full_scan=(
             language_of(env) == "c"
             and incremental.get("mode", "full") == "full"
             and scan_scope.get("mode", "full") == "full"
         ),
     )
-    work_items = apply_admission_focus(work_items, allocation)
+    allocation = admission_plan.allocation
+    work_items = admission_plan.work_items
     by_work_id = {item.work_id: item for item in work_items}
     hunt_plan["work_items"] = [
         item.model_dump(mode="json")
@@ -299,6 +292,7 @@ async def run_hunt(store: RunStore, bus: EventBus) -> None:
         "decisions": [asdict(item) for item in allocation.decisions],
         "ranking": [asdict(item) for item in allocation.ranking],
     }
+    hunt_plan["plan_contract"] = admission_plan.contract
     hunt_plan["budget_deferred_work_ids"] = sorted(allocation.deferred)
     hunt_plan["budget_deferred_critical_work_ids"] = sorted(
         work_id
