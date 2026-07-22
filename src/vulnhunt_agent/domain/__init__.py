@@ -24,6 +24,7 @@ from .schemas import (
     SourceFileEntry,
     SourceManifest,
     SourceSnapshot,
+    SourceSymlinkEntry,
     Verdict,
 )
 from .states import FindingState, RunState, StateTransitionError
@@ -54,6 +55,7 @@ __all__ = [
     "SourceFileEntry",
     "SourceManifest",
     "SourceSnapshot",
+    "SourceSymlinkEntry",
     "StateTransitionError",
     "Verdict",
 ]

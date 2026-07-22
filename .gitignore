@@ -164,6 +164,7 @@ docs/milestones/*
 !docs/milestones/m7-resumable-operations.md
 !docs/milestones/m8-cost-aware-scheduler.md
 !docs/milestones/m10-blind-native-discovery.md
+!docs/milestones/m11-real-world-scan-reliability.md
 notes/
 tools/
 docker/local/

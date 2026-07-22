@@ -9,7 +9,12 @@ import pytest
 from pydantic import ValidationError
 
 from tests.factories import HASH_A
-from vulnhunt_agent.domain.schemas import OracleSpec, OracleType, ReproductionSpec
+from vulnhunt_agent.domain.schemas import (
+    OracleSpec,
+    OracleType,
+    ReproductionSpec,
+    SourceManifest,
+)
 from vulnhunt_agent.infrastructure.artifacts import ArtifactStore
 from vulnhunt_agent.intake.snapshot import (
     SnapshotBuilder,
@@ -90,6 +95,119 @@ def test_snapshot_rejects_symlink_escape_and_size_exhaustion(tmp_path) -> None:
         archive.addfile(member, io.BytesIO(b"x"))
     with pytest.raises(SnapshotError, match="unsafe snapshot member"):
         validate_snapshot_archive(malicious)
+
+
+def test_snapshot_materializes_internal_file_symlink_with_provenance(tmp_path) -> None:
+    source = tmp_path / "source"
+    (source / "pkg").mkdir(parents=True)
+    (source / "pkg" / "README.md").write_text("same content\n")
+    (source / "README.md").symlink_to("pkg/README.md")
+
+    artifacts = ArtifactStore(tmp_path / "artifacts")
+    snapshot = SnapshotBuilder(artifacts).create(source)
+    manifest = SourceManifest.model_validate_json(
+        artifacts.read_text(snapshot.manifest_artifact)
+    )
+
+    assert manifest.schema_version == 2
+    assert manifest.normalization_policy == "source-snapshot-v3"
+    assert len(manifest.symlinks) == 1
+    assert manifest.symlinks[0].path == "README.md"
+    assert manifest.symlinks[0].target == "pkg/README.md"
+    assert manifest.symlinks[0].resolved_path == "pkg/README.md"
+
+    with tarfile.open(artifacts.path_for(snapshot.snapshot_artifact)) as archive:
+        member = archive.getmember("README.md")
+        assert member.isfile()
+        assert member.issym() is False
+        assert member.pax_headers == {
+            "VULNHUNT.symlink_target": "pkg/README.md",
+            "VULNHUNT.resolved_path": "pkg/README.md",
+        }
+        stream = archive.extractfile(member)
+        assert stream is not None
+        assert stream.read() == b"same content\n"
+
+
+def test_snapshot_symlink_mapping_affects_identity_and_is_root_independent(
+    tmp_path,
+) -> None:
+    snapshots = []
+    for root_name in ("first", "second"):
+        source = tmp_path / root_name
+        source.mkdir()
+        (source / "one.txt").write_text("identical\n")
+        (source / "two.txt").write_text("identical\n")
+        (source / "current.txt").symlink_to("one.txt")
+        snapshots.append(
+            SnapshotBuilder(ArtifactStore(tmp_path / f"artifacts-{root_name}"))
+            .create(source)
+        )
+
+    assert snapshots[0] == snapshots[1]
+
+    source = tmp_path / "first"
+    (source / "current.txt").unlink()
+    (source / "current.txt").symlink_to("two.txt")
+    changed = SnapshotBuilder(ArtifactStore(tmp_path / "artifacts-changed")).create(
+        source
+    )
+    assert changed.snapshot_artifact != snapshots[0].snapshot_artifact
+    assert changed.manifest_artifact != snapshots[0].manifest_artifact
+
+
+def test_snapshot_rejects_unsafe_internal_symlink_shapes(tmp_path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    artifacts = ArtifactStore(tmp_path / "artifacts")
+    builder = SnapshotBuilder(artifacts)
+
+    (source / "dangling").symlink_to("missing")
+    with pytest.raises(SnapshotError, match="dangling"):
+        builder.create(source)
+    (source / "dangling").unlink()
+
+    (source / "a").symlink_to("b")
+    (source / "b").symlink_to("a")
+    with pytest.raises(SnapshotError, match="cycle"):
+        builder.create(source)
+    (source / "a").unlink()
+    (source / "b").unlink()
+
+    (source / "directory").mkdir()
+    (source / "directory-link").symlink_to("directory", target_is_directory=True)
+    with pytest.raises(SnapshotError, match="symlink"):
+        builder.create(source)
+    (source / "directory-link").unlink()
+
+    (source / "absolute-target").write_text("inside\n")
+    (source / "absolute-link").symlink_to(source / "absolute-target")
+    with pytest.raises(SnapshotError, match="absolute"):
+        builder.create(source)
+    (source / "absolute-link").unlink()
+
+    (source / ".git").mkdir()
+    (source / ".git" / "config").write_text("secret\n")
+    (source / "excluded-link").symlink_to(".git/config")
+    with pytest.raises(SnapshotError, match="excluded"):
+        builder.create(source)
+    (source / "excluded-link").unlink()
+
+    fifo = source / "fifo"
+    os.mkfifo(fifo)
+    (source / "fifo-link").symlink_to("fifo")
+    with pytest.raises(SnapshotError, match="unsupported|regular file"):
+        builder.create(source)
+
+
+def test_legacy_source_manifest_defaults_remain_readable() -> None:
+    legacy = SourceManifest.model_validate({
+        "files": [],
+        "excluded_paths": [".git"],
+    })
+    assert legacy.schema_version == 1
+    assert legacy.normalization_policy == "source-snapshot-v1"
+    assert legacy.symlinks == ()
 
 
 def test_hardened_policies_forbid_mount_network_root_and_shell_bypass() -> None:
