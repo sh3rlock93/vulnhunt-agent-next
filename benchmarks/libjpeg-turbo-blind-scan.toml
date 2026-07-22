@@ -1,12 +1,12 @@
 [benchmark]
 schema_version = 1
-id = "libwebp-blind-capacity-v1"
+id = "libjpeg-turbo-capacity-alias-blind-v1"
 oracle_policy = "blind-oracle-v1"
 
 [source]
-repository = "https://github.com/webmproject/libwebp.git"
-commit = "7ba44f80f3b94fc0138db159afea770ef06532a0"
-tree = "5189aba17d0a7df8f385946a4d02dffe702b7224"
+repository = "https://github.com/libjpeg-turbo/libjpeg-turbo.git"
+commit = "c30b1e72dac76343ef9029833d1561de07d29bad"
+tree = "48074ffcebfb949fd22ded3281301259d4c9f265"
 
 [scan]
 environment = "c:gcc-13"

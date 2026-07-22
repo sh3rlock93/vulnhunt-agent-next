@@ -13,7 +13,7 @@ def _chain(index: int, *, rationale_bytes: int) -> dict:
     suffix = format(index, "020x")
     return {
         "chain_id": f"capacity_risk_{suffix}",
-        "policy_version": "c-capacity-risk-chain-v2",
+        "policy_version": "c-capacity-risk-chain-v3",
         "root_cause_group": f"capacity_group_{suffix}",
         "allocation_fact_id": f"capacity_{suffix}",
         "root_node_id": "decode.c::decode@1",

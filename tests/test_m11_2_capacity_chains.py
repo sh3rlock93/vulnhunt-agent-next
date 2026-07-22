@@ -77,7 +77,7 @@ def test_cross_file_capacity_chain_is_complete_and_deterministic(tmp_path) -> No
     )
 
     assert first == second
-    assert chain.policy_version == "c-capacity-risk-chain-v2"
+    assert chain.policy_version == "c-capacity-risk-chain-v3"
     assert chain.priority_class is CapacityPriorityClass.PARTIAL
     assert chain.guard_state is GuardState.DOMINATES
     assert chain.score == 40
@@ -155,6 +155,6 @@ def test_capacity_chain_is_present_in_exact_work_context(tmp_path) -> None:
 
     packet = context_for_work_item(analysis, work)
 
-    assert packet["capacity_risk_chain_policy_version"] == "c-capacity-risk-chain-v2"
+    assert packet["capacity_risk_chain_policy_version"] == "c-capacity-risk-chain-v3"
     assert packet["capacity_risk_chains"][0]["chain_id"] == chain.chain_id
     assert packet["capacity_risk_chains"][0]["paths"] == ["decode.c", "table.c"]

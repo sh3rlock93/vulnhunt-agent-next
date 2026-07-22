@@ -21,8 +21,13 @@ from .models import (
     SignalRole,
 )
 
-CAPACITY_RISK_CHAIN_POLICY = "c-capacity-risk-chain-v2"
+CAPACITY_RISK_CHAIN_POLICY = "c-capacity-risk-chain-v3"
 _RELEASE_CALLEE = re.compile(r"(?:free|dealloc|delete)$", re.IGNORECASE)
+_MEMORY_WRITE_EVIDENCE = re.compile(r"\b(?:memcpy|memmove|memset)\s+writes\b")
+_SIZING_HELPER = re.compile(
+    r"\b[A-Za-z_]\w*(?:size|width|height|capacity|extent)\w*\s*\(",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -143,6 +148,22 @@ def _chain_for_allocation(
                 state.depth + 1,
             ))
 
+    memory_extent_subjects = {
+        subject
+        for fact in selected_facts.values()
+        if fact.kind is CapacityFactKind.WRITE
+        and _MEMORY_WRITE_EVIDENCE.search(fact.evidence)
+        for subject in _tokens(fact.write_extent)
+    }
+    for node_id in tuple(nodes):
+        for fact in facts_by_node.get(node_id, ()):
+            if (
+                fact.kind is CapacityFactKind.WRITE
+                and fact.subject in memory_extent_subjects
+                and "=" in fact.evidence
+            ):
+                selected_facts[fact.fact_id] = fact
+
     fact_values = tuple(selected_facts.values())
     write_facts = tuple(
         fact for fact in fact_values if fact.kind is CapacityFactKind.WRITE
@@ -185,8 +206,17 @@ def _chain_for_allocation(
         if (signal.node_id, signal.line) in write_locations
         and signal.role is SignalRole.SINK
     ))
-    complete = bool(write_facts and (return_calls or advances))
-    if complete and guard_state is GuardState.ABSENT:
+    cross_call_write = bool(
+        selected_calls
+        and any(fact.node_id != allocation.node_id for fact in write_facts)
+    )
+    complete = bool(write_facts and (return_calls or advances or cross_call_write))
+    bounded_write_derivation = _has_bounded_write_derivation(write_facts)
+    if complete and guard_state is GuardState.ABSENT and bounded_write_derivation:
+        priority = CapacityPriorityClass.COMPLETE_UNKNOWN_GUARD
+        score = 75
+        confidence = "medium"
+    elif complete and guard_state is GuardState.ABSENT:
         priority = CapacityPriorityClass.COMPLETE_UNCHECKED
         score = 95
         confidence = "high"
@@ -282,9 +312,33 @@ def _chain_for_allocation(
             f"{priority.value}: allocation {allocation.subject} reaches "
             f"{len(write_facts)} writes through {len(selected_calls)} direct calls; "
             f"return_consumption={bool(return_calls)}; advances={len(advances)}; "
-            f"guard={guard_state.value}"
+            f"guard={guard_state.value}; "
+            f"bounded_write_derivation={bounded_write_derivation}"
         ),
     )
+
+
+def _has_bounded_write_derivation(
+    writes: tuple[CapacityFact, ...],
+) -> bool:
+    derivations: dict[tuple[str, str], list[CapacityFact]] = {}
+    for fact in writes:
+        if "=" in fact.evidence:
+            derivations.setdefault((fact.node_id, fact.subject), []).append(fact)
+    safe = False
+    unsafe = False
+    for fact in writes:
+        if not _MEMORY_WRITE_EVIDENCE.search(fact.evidence):
+            continue
+        for subject in _tokens(fact.write_extent):
+            candidates = derivations.get((fact.node_id, subject), ())
+            if not candidates:
+                continue
+            if any(_SIZING_HELPER.search(item.evidence) for item in candidates):
+                safe = True
+            else:
+                unsafe = True
+    return safe and not unsafe
 
 
 def _classify_capacity_guards(

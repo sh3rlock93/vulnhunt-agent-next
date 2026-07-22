@@ -151,7 +151,7 @@ class ConstraintFact(AnalysisModel):
 
 class CapacityFact(AnalysisModel):
     fact_id: str = Field(pattern=r"^capacity_[0-9a-f]{20}$")
-    policy_version: str = "c-capacity-fact-v1"
+    policy_version: str = "c-capacity-fact-v2"
     kind: CapacityFactKind
     node_id: str = Field(min_length=1)
     path: str = Field(min_length=1)
@@ -175,7 +175,7 @@ class CapacityFact(AnalysisModel):
 
 class CapacityCallSite(AnalysisModel):
     call_id: str = Field(pattern=r"^capacity_call_[0-9a-f]{20}$")
-    policy_version: str = "c-capacity-summary-v1"
+    policy_version: str = "c-capacity-summary-v2"
     caller_id: str = Field(min_length=1)
     target_node_id: str = ""
     path: str = Field(min_length=1)
@@ -188,12 +188,13 @@ class CapacityCallSite(AnalysisModel):
 
 class FunctionCapacitySummary(AnalysisModel):
     summary_id: str = Field(pattern=r"^capacity_summary_[0-9a-f]{20}$")
-    policy_version: str = "c-capacity-summary-v1"
+    policy_version: str = "c-capacity-summary-v2"
     node_id: str = Field(min_length=1)
     path: str = Field(min_length=1)
     function: str = Field(min_length=1)
     parameters: tuple[str, ...] = ()
     pointer_parameters: tuple[str, ...] = ()
+    pointer_aliases: dict[str, str] = Field(default_factory=dict)
     written_parameters: tuple[str, ...] = ()
     write_extents: dict[str, tuple[str, ...]] = Field(default_factory=dict)
     return_expressions: tuple[str, ...] = ()
@@ -207,7 +208,7 @@ class FunctionCapacitySummary(AnalysisModel):
 
 class CapacityRiskChain(AnalysisModel):
     chain_id: str = Field(pattern=r"^capacity_risk_[0-9a-f]{20}$")
-    policy_version: str = "c-capacity-risk-chain-v2"
+    policy_version: str = "c-capacity-risk-chain-v3"
     root_cause_group: str = Field(pattern=r"^capacity_group_[0-9a-f]{20}$")
     allocation_fact_id: str = Field(pattern=r"^capacity_[0-9a-f]{20}$")
     root_node_id: str = Field(min_length=1)

@@ -279,3 +279,50 @@ jobs:
           --vulnerable-repo .benchmark/libwebp-vulnerable
           --fixed-repo .benchmark/libwebp-fixed
           --output .benchmark/m11-2-evaluation
+
+  m11-3-libjpeg-alias-blind:
+    name: M11.3 libjpeg blind capacity-alias gates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install project
+        run: python -m pip install -e .
+      - name: Configure default model catalog
+        run: cp settings.example.toml settings.toml
+      - name: Checkout pinned vulnerable libjpeg-turbo tree
+        uses: actions/checkout@v6
+        with:
+          repository: libjpeg-turbo/libjpeg-turbo
+          ref: c30b1e72dac76343ef9029833d1561de07d29bad
+          path: .benchmark/libjpeg-vulnerable
+      - name: Checkout pinned fixed libjpeg-turbo tree
+        uses: actions/checkout@v6
+        with:
+          repository: libjpeg-turbo/libjpeg-turbo
+          ref: bd20344b0ae7d53e1e26e1c4339915032a8ea98f
+          path: .benchmark/libjpeg-fixed
+      - name: Discover without oracle input
+        run: >-
+          python benchmarks/run_libjpeg_capacity_benchmark.py discover
+          --repo .benchmark/libjpeg-vulnerable
+          --scan-manifest benchmarks/libjpeg-turbo-blind-scan.toml
+          --output .benchmark/m11-3-discovery
+          --mode deterministic
+      - name: Freeze discovery artifacts
+        run: >-
+          python benchmarks/run_libjpeg_capacity_benchmark.py freeze
+          --discovery .benchmark/m11-3-discovery
+          --frozen .benchmark/m11-3-frozen
+      - name: Require caller/callee alias recovery and fixed negative
+        run: >-
+          python benchmarks/run_libjpeg_capacity_benchmark.py evaluate
+          --frozen .benchmark/m11-3-frozen
+          --oracle benchmarks/oracles/libjpeg-turbo-issue-387.toml
+          --scan-manifest benchmarks/libjpeg-turbo-blind-scan.toml
+          --vulnerable-repo .benchmark/libjpeg-vulnerable
+          --fixed-repo .benchmark/libjpeg-fixed
+          --output .benchmark/m11-3-evaluation

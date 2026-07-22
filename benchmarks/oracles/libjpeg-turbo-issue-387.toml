@@ -1,0 +1,24 @@
+[oracle]
+schema_version = 1
+id = "libjpeg-turbo-issue-387"
+upstream_reference = "libjpeg-turbo/libjpeg-turbo#387"
+weakness = "out-of-bounds write and possible double free"
+
+[fixed_source]
+commit = "bd20344b0ae7d53e1e26e1c4339915032a8ea98f"
+tree = "dbc026619681e00e07101b1f0f0b2b24047d1ff5"
+
+[location]
+allocation_file = "tjbench.c"
+allocation_line_min = 175
+allocation_line_max = 190
+write_file = "turbojpeg.c"
+write_line_min = 1718
+write_line_max = 1732
+required_paths = ["tjbench.c", "turbojpeg.c"]
+leaf_function = "tjDecompressToYUVPlanes"
+wrapper_function = "tjDecompressToYUV2"
+
+[patch]
+unsafe_extent_expression = "PAD(dinfo->output_width"
+bounded_extent_helper = "tjPlaneWidth"

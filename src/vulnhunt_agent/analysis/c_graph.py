@@ -16,7 +16,7 @@ from ..indexer.tree_sitter_indexer import (
 )
 from .constraints import extract_constraint_facts
 from .capacity import build_local_capacity_summary, extract_capacity_facts
-from .capacity_summaries import propagate_capacity_summaries
+from .capacity_summaries import CAPACITY_SUMMARY_POLICY, propagate_capacity_summaries
 from .capacity_chains import build_capacity_risk_chains
 from .models import (
     CAnalysisGraph,
@@ -694,11 +694,12 @@ def _call_result_subject(node: Node, source: bytes) -> str:
 
 def _capacity_call(call: _CallSite, target_id: str) -> CapacityCallSite:
     identity = "\0".join((
-        "c-capacity-summary-v1", call.caller_id, str(call.line), call.callee,
+        CAPACITY_SUMMARY_POLICY, call.caller_id, str(call.line), call.callee,
         *call.arguments, call.result_subject, target_id, str(not call.indirect),
     ))
     return CapacityCallSite(
         call_id="capacity_call_" + hashlib.sha256(identity.encode()).hexdigest()[:20],
+        policy_version=CAPACITY_SUMMARY_POLICY,
         caller_id=call.caller_id,
         target_node_id=target_id,
         path=call.path,
