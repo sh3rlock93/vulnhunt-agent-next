@@ -48,6 +48,14 @@ class CapacityFactKind(StrEnum):
     GUARD = "guard"
 
 
+class CapacityReturnKind(StrEnum):
+    NONE = "none"
+    STATUS = "status"
+    PASS_THROUGH = "pass_through"
+    CONSUMED_OR_REQUIRED = "consumed_or_required"
+    UNKNOWN = "unknown"
+
+
 class GraphNode(AnalysisModel):
     node_id: str = Field(min_length=1)
     path: str = Field(min_length=1)
@@ -155,6 +163,38 @@ class CapacityFact(AnalysisModel):
     transform_depth: int = Field(default=0, ge=0, le=12)
 
 
+class CapacityCallSite(AnalysisModel):
+    call_id: str = Field(pattern=r"^capacity_call_[0-9a-f]{20}$")
+    policy_version: str = "c-capacity-summary-v1"
+    caller_id: str = Field(min_length=1)
+    target_node_id: str = ""
+    path: str = Field(min_length=1)
+    line: int = Field(ge=1)
+    callee: str = Field(min_length=1)
+    arguments: tuple[str, ...] = ()
+    result_subject: str = ""
+    direct: bool = True
+
+
+class FunctionCapacitySummary(AnalysisModel):
+    summary_id: str = Field(pattern=r"^capacity_summary_[0-9a-f]{20}$")
+    policy_version: str = "c-capacity-summary-v1"
+    node_id: str = Field(min_length=1)
+    path: str = Field(min_length=1)
+    function: str = Field(min_length=1)
+    parameters: tuple[str, ...] = ()
+    pointer_parameters: tuple[str, ...] = ()
+    written_parameters: tuple[str, ...] = ()
+    write_extents: dict[str, tuple[str, ...]] = Field(default_factory=dict)
+    return_expressions: tuple[str, ...] = ()
+    return_kind: CapacityReturnKind = CapacityReturnKind.NONE
+    pass_through_parameters: tuple[str, ...] = ()
+    guard_fact_ids: tuple[str, ...] = ()
+    failure_returns: tuple[str, ...] = ()
+    propagated_call_ids: tuple[str, ...] = ()
+    propagation_depth: int = Field(default=0, ge=0, le=5)
+
+
 class CAnalysisGraph(AnalysisModel):
     schema_version: int = 2
     language: str = "c"
@@ -166,6 +206,8 @@ class CAnalysisGraph(AnalysisModel):
     risk_chains: tuple[RiskChain, ...] = ()
     constraint_facts: tuple[ConstraintFact, ...] = ()
     capacity_facts: tuple[CapacityFact, ...] = ()
+    capacity_calls: tuple[CapacityCallSite, ...] = ()
+    capacity_summaries: tuple[FunctionCapacitySummary, ...] = ()
     unresolved_calls: tuple[UnresolvedCall, ...] = ()
 
 

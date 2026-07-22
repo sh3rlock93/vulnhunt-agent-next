@@ -7,7 +7,12 @@ import re
 
 from tree_sitter import Node
 
-from .models import CapacityFact, CapacityFactKind
+from .models import (
+    CapacityFact,
+    CapacityFactKind,
+    CapacityReturnKind,
+    FunctionCapacitySummary,
+)
 from .risk_chains import is_allocator_name
 
 CAPACITY_FACT_POLICY = "c-capacity-fact-v1"
@@ -23,6 +28,7 @@ _CAPACITY_TERM = re.compile(
 _COMPARISON = re.compile(r"(.+?)\s*(<=|<|>=|>)\s*(.+)")
 _MEMORY_WRITES = frozenset({"memcpy", "memmove", "memset"})
 _NON_POINTER_IDENTIFIERS = frozenset({"NULL", "true", "false"})
+_FAILURE_RETURN = re.compile(r"^(?:0|-1|NULL|false)$")
 
 
 @dataclass(frozen=True)
@@ -221,10 +227,110 @@ def extract_capacity_facts(
     ))
 
 
+def build_local_capacity_summary(
+    *,
+    path: str,
+    node_id: str,
+    function: str,
+    source: bytes,
+    declarator: Node,
+    body_nodes: tuple[Node, ...],
+    facts: tuple[CapacityFact, ...],
+) -> FunctionCapacitySummary:
+    """Summarize only locally established parameter and return behavior."""
+    parameters, pointer_parameters = _function_parameters(declarator, source)
+    pointer_set = set(pointer_parameters)
+    writes: dict[str, set[str]] = {}
+    for fact in facts:
+        if fact.kind is not CapacityFactKind.WRITE:
+            continue
+        parameter = fact.subject if fact.subject in pointer_set else fact.base
+        if parameter not in pointer_set:
+            continue
+        writes.setdefault(parameter, set()).add(fact.write_extent or "1")
+
+    returns = tuple(sorted({
+        expression
+        for body in body_nodes
+        for node in (body, *_walk(body))
+        if node.type == "return_statement"
+        if (expression := _return_expression(node, source))
+    }))
+    pass_through = tuple(sorted(pointer_set.intersection(returns)))
+    failures = tuple(sorted(expression for expression in returns if _FAILURE_RETURN.fullmatch(
+        expression
+    )))
+    if not returns:
+        return_kind = CapacityReturnKind.NONE
+    elif pass_through:
+        return_kind = CapacityReturnKind.PASS_THROUGH
+    elif writes and any(not _FAILURE_RETURN.fullmatch(item) for item in returns):
+        return_kind = CapacityReturnKind.CONSUMED_OR_REQUIRED
+    elif len(failures) == len(returns):
+        return_kind = CapacityReturnKind.STATUS
+    else:
+        return_kind = CapacityReturnKind.UNKNOWN
+
+    identity = "\0".join(("c-capacity-summary-v1", node_id))
+    return FunctionCapacitySummary(
+        summary_id="capacity_summary_" + hashlib.sha256(identity.encode()).hexdigest()[:20],
+        node_id=node_id,
+        path=path,
+        function=function,
+        parameters=parameters,
+        pointer_parameters=pointer_parameters,
+        written_parameters=tuple(sorted(writes)),
+        write_extents={
+            parameter: tuple(sorted(extents))
+            for parameter, extents in sorted(writes.items())
+        },
+        return_expressions=returns,
+        return_kind=return_kind,
+        pass_through_parameters=pass_through,
+        guard_fact_ids=tuple(sorted(
+            fact.fact_id for fact in facts if fact.kind is CapacityFactKind.GUARD
+        )),
+        failure_returns=failures,
+    )
+
+
 def _assignment_parts(node: Node) -> tuple[Node | None, Node | None]:
     if node.type == "assignment_expression":
         return node.child_by_field_name("left"), node.child_by_field_name("right")
     return node.child_by_field_name("declarator"), node.child_by_field_name("value")
+
+
+def _function_parameters(
+    declarator: Node,
+    source: bytes,
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    parameter_list = _first_node(declarator, "parameter_list")
+    if parameter_list is None:
+        return (), ()
+    parameters = []
+    pointers = []
+    for declaration in parameter_list.named_children:
+        if declaration.type not in {"parameter_declaration", "variadic_parameter"}:
+            continue
+        identifiers = [
+            _text(item, source) for item in (declaration, *_walk(declaration))
+            if item.type == "identifier"
+        ]
+        if not identifiers:
+            continue
+        name = identifiers[-1]
+        parameters.append(name)
+        declaration_text = _text(declaration, source)
+        if "*" in declaration_text or "[" in declaration_text:
+            pointers.append(name)
+    return tuple(parameters), tuple(pointers)
+
+
+def _return_expression(node: Node, source: bytes) -> str:
+    named = tuple(node.named_children)
+    if not named:
+        return ""
+    return _compact(_text(named[0], source)).rstrip(";")
 
 
 def _assignment_operator(node: Node, source: bytes) -> str:

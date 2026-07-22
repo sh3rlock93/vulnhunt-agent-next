@@ -7,6 +7,11 @@ from .capacity import (
     MAX_CAPACITY_TRANSFORMS,
     extract_capacity_facts,
 )
+from .capacity_summaries import (
+    CAPACITY_SUMMARY_POLICY,
+    MAX_CAPACITY_CALL_DEPTH,
+    propagate_capacity_summaries,
+)
 from .context import context_for_file, context_for_work_item
 from .context_cache import (
     CONTEXT_CACHE_POLICY,
@@ -21,12 +26,15 @@ from .models import (
     CAnalysisGraph,
     CapacityFact,
     CapacityFactKind,
+    CapacityCallSite,
+    CapacityReturnKind,
     ConstraintFact,
     ConstraintKind,
     CoveragePlan,
     EdgeKind,
     GraphEdge,
     GraphNode,
+    FunctionCapacitySummary,
     GuardState,
     IncrementalScope,
     NodeKind,
@@ -43,12 +51,15 @@ __all__ = [
     "CAnalysisGraph",
     "CapacityFact",
     "CapacityFactKind",
+    "CapacityCallSite",
+    "CapacityReturnKind",
     "ConstraintFact",
     "ConstraintKind",
     "CoveragePlan",
     "EdgeKind",
     "GraphEdge",
     "GraphNode",
+    "FunctionCapacitySummary",
     "GuardState",
     "IncrementalScope",
     "NodeKind",
@@ -74,4 +85,7 @@ __all__ = [
     "MAX_ALIAS_HOPS",
     "MAX_CAPACITY_TRANSFORMS",
     "extract_capacity_facts",
+    "CAPACITY_SUMMARY_POLICY",
+    "MAX_CAPACITY_CALL_DEPTH",
+    "propagate_capacity_summaries",
 ]
