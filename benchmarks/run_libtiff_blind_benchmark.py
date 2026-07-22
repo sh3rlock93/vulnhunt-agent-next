@@ -375,22 +375,22 @@ def _run_deterministic_discovery(
     for item in work:
         if item.work_id not in admitted:
             continue
-        packet = cache.get(item)
-        path = output / "contexts" / f"{packet['cache_key']}.json"
-        context_records.append({
-            "work_id": item.work_id,
-            "cache_key": packet["cache_key"],
-            "bytes": path.stat().st_size,
-            "target_signal_ids": list(item.target_signal_ids),
-            "risk_chain_ids": [
-                chain["chain_id"] for chain in packet.get("risk_chains", [])
-            ],
-            "capacity_risk_chain_ids": [
-                chain["chain_id"]
-                for chain in packet.get("capacity_risk_chains", [])
-            ],
-            "hydrated_context_files": packet.get("hydrated_context_files", []),
-        })
+        for packet in cache.get_shards(item):
+            path = output / "contexts" / f"{packet['cache_key']}.json"
+            context_records.append({
+                "work_id": item.work_id,
+                "cache_key": packet["cache_key"],
+                "bytes": path.stat().st_size,
+                "target_signal_ids": list(item.target_signal_ids),
+                "risk_chain_ids": [
+                    chain["chain_id"] for chain in packet.get("risk_chains", [])
+                ],
+                "capacity_risk_chain_ids": [
+                    chain["chain_id"]
+                    for chain in packet.get("capacity_risk_chains", [])
+                ],
+                "hydrated_context_files": packet.get("hydrated_context_files", []),
+            })
     terminal = _terminal_routes(graph, work, allocation)
     plan = {
         "routing": routing.model_dump(mode="json"),

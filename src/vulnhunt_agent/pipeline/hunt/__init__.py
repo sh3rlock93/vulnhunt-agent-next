@@ -14,7 +14,7 @@ import uuid
 from dataclasses import asdict
 from pathlib import Path
 
-from ...analysis import CAnalysisGraph, SharedContextCache
+from ...analysis import CAnalysisGraph, CONTEXT_SHARD_POLICY, SharedContextCache
 from ...agents.hunter import TARGET_COMPLETION_POLICY
 from ...agents.durable_queue import DurableHuntQueueStore
 from ...agents.queue import HuntTask
@@ -305,16 +305,25 @@ async def run_hunt(store: RunStore, bus: EventBus) -> None:
         source_snapshot=source_snapshot,
         analysis=analysis,
     )
-    analysis_contexts = {
-        item.work_id: context_cache.get(item)
+    analysis_context_shards = {
+        item.work_id: context_cache.get_shards(item)
         for item in work_items
         if item.work_id in admitted_ids
+    }
+    analysis_contexts = {
+        work_id: packets[0]
+        for work_id, packets in analysis_context_shards.items()
     }
     context_cache_stats = context_cache.stats()
     hunt_plan["context_cache"] = context_cache_stats
     hunt_plan["context_cache_keys"] = {
         work_id: context["cache_key"]
         for work_id, context in sorted(analysis_contexts.items())
+    }
+    hunt_plan["context_shard_policy"] = CONTEXT_SHARD_POLICY
+    hunt_plan["context_shard_keys"] = {
+        work_id: [packet["cache_key"] for packet in packets]
+        for work_id, packets in sorted(analysis_context_shards.items())
     }
     store.save_step("hunt_plan", hunt_plan)
 
@@ -540,7 +549,9 @@ async def run_hunt(store: RunStore, bus: EventBus) -> None:
                 task = task_by_id[work_id]
                 qstore.requeue_budget_deferred(task)
                 item = by_work_id[work_id]
-                analysis_contexts[work_id] = context_cache.get(item)
+                packets = context_cache.get_shards(item)
+                analysis_context_shards[work_id] = packets
+                analysis_contexts[work_id] = packets[0]
                 admitted_ids.add(work_id)
                 recycled_work_ids.append(work_id)
                 batch.append(task)
@@ -555,6 +566,10 @@ async def run_hunt(store: RunStore, bus: EventBus) -> None:
         hunt_plan["context_cache_keys"] = {
             work_id: context["cache_key"]
             for work_id, context in sorted(analysis_contexts.items())
+        }
+        hunt_plan["context_shard_keys"] = {
+            work_id: [packet["cache_key"] for packet in packets]
+            for work_id, packets in sorted(analysis_context_shards.items())
         }
         store.save_step("hunt_plan", hunt_plan)
         with SqliteRepository(store.dir / "state.db", read_only=True) as repository:
@@ -596,6 +611,10 @@ async def run_hunt(store: RunStore, bus: EventBus) -> None:
     hunt_plan["context_cache_keys"] = {
         work_id: context["cache_key"]
         for work_id, context in sorted(analysis_contexts.items())
+    }
+    hunt_plan["context_shard_keys"] = {
+        work_id: [packet["cache_key"] for packet in packets]
+        for work_id, packets in sorted(analysis_context_shards.items())
     }
     store.save_step("hunt_plan", hunt_plan)
     with SqliteRepository(store.dir / "state.db", read_only=True) as repository:
