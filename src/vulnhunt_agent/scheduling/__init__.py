@@ -13,6 +13,7 @@ from .budget import (
     adaptive_iteration_limit,
     adaptive_output_token_limit,
     allocate_work_items,
+    apply_admission_focus,
 )
 from .metrics import estimate_cost_usd, total_usage
 from .router import ROUTER_POLICY, build_routing_plan
@@ -40,6 +41,7 @@ __all__ = [
     "adaptive_iteration_limit",
     "adaptive_output_token_limit",
     "allocate_work_items",
+    "apply_admission_focus",
     "build_slice_work_items",
     "build_routing_plan",
     "build_shadow_plan",

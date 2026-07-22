@@ -41,6 +41,7 @@ from ...scheduling import (
     adaptive_iteration_limit,
     adaptive_output_token_limit,
     allocate_work_items,
+    apply_admission_focus,
     build_routing_plan,
     build_slice_work_items,
     total_usage,
@@ -261,6 +262,12 @@ async def run_hunt(store: RunStore, bus: EventBus) -> None:
             and scan_scope.get("mode", "full") == "full"
         ),
     )
+    work_items = apply_admission_focus(work_items, allocation)
+    by_work_id = {item.work_id: item for item in work_items}
+    hunt_plan["work_items"] = [
+        item.model_dump(mode="json")
+        for item in work_items
+    ]
     admission_ledger = RecyclableAdmissionLedger(allocation)
     admitted_ids = set(allocation.admitted_work_ids)
     task_by_id = {task.work_id: task for task in queue.tasks}

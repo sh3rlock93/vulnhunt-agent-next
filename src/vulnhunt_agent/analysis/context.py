@@ -71,8 +71,14 @@ def context_for_work_item(
     signals = {item["signal_id"]: item for item in graph.get("signals", [])}
     related_nodes = _related_nodes(graph, work_item)
     constraint_facts = _constraint_facts(graph, work_item, related_nodes)
-    risk_chains = _matching_risk_chains(graph, work_item)
-    capacity_chains = matching_capacity_risk_chains(graph, work_item)
+    risk_chains = _focus_first(
+        _matching_risk_chains(graph, work_item),
+        work_item.focus_chain_ids,
+    )
+    capacity_chains = _focus_first(
+        matching_capacity_risk_chains(graph, work_item),
+        work_item.focus_chain_ids,
+    )
     selected_ids = set(work_item.slice_ids)
     matching = [
         item for item in plan.get("slices", [])
@@ -108,6 +114,7 @@ def context_for_work_item(
         "required": work_item.required,
         "routing_reasons": list(work_item.routing_reasons),
         "scan_scope_digest": work_item.scan_scope_digest,
+        "focus_chain_ids": list(work_item.focus_chain_ids),
         "full_snapshot_context": True,
         "related_nodes": related_nodes,
         "constraint_policy_version": (
@@ -191,6 +198,17 @@ def matching_capacity_risk_chains_for_targets(
 
 def _matching_risk_chains(graph: dict, work_item: HunterWorkItem) -> list[dict]:
     return matching_risk_chains(graph, work_item)
+
+
+def _focus_first(chains: list[dict], focus_chain_ids: tuple[str, ...]) -> list[dict]:
+    order = {chain_id: index for index, chain_id in enumerate(focus_chain_ids)}
+    return sorted(
+        chains,
+        key=lambda chain: (
+            0 if str(chain.get("chain_id", "")) in order else 1,
+            order.get(str(chain.get("chain_id", "")), len(order)),
+        ),
+    )
 
 
 def matching_risk_chains_for_targets(

@@ -544,6 +544,7 @@ class RunRecord(DomainModel):
 
 MAX_HUNTER_TARGET_NODES = 4
 MAX_HUNTER_TARGET_SIGNALS = 6
+MAX_HUNTER_FOCUS_CHAINS = 32
 
 
 class HunterWorkItem(DomainModel):
@@ -562,6 +563,10 @@ class HunterWorkItem(DomainModel):
     target_signal_ids: tuple[str, ...] = Field(
         default=(),
         max_length=MAX_HUNTER_TARGET_SIGNALS,
+    )
+    focus_chain_ids: tuple[str, ...] = Field(
+        default=(),
+        max_length=MAX_HUNTER_FOCUS_CHAINS,
     )
     changed_line_ranges: dict[str, tuple[tuple[int, int], ...]] = Field(
         default_factory=dict,
@@ -590,6 +595,8 @@ class HunterWorkItem(DomainModel):
             raise ValueError("Hunter target node IDs must be unique")
         if len(set(self.target_signal_ids)) != len(self.target_signal_ids):
             raise ValueError("Hunter target signal IDs must be unique")
+        if len(set(self.focus_chain_ids)) != len(self.focus_chain_ids):
+            raise ValueError("Hunter focus chain IDs must be unique")
         for path, ranges in self.changed_line_ranges.items():
             _validate_relative_path(path, label="Hunter changed-range file")
             for start, end in ranges:
