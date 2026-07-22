@@ -363,6 +363,29 @@ def allocate_work_items(
     )
 
 
+def apply_admission_focus(
+    work_items: tuple[HunterWorkItem, ...],
+    allocation: BudgetAllocation,
+) -> tuple[HunterWorkItem, ...]:
+    """Attach auditable ranking chains without changing stable work identities."""
+    ranked_chain_ids = {
+        record.work_id: record.chain_ids
+        for record in allocation.ranking
+        if record.chain_ids
+    }
+    focused = []
+    for item in work_items:
+        chain_ids = ranked_chain_ids.get(item.work_id, item.focus_chain_ids)
+        if chain_ids == item.focus_chain_ids:
+            focused.append(item)
+            continue
+        focused.append(HunterWorkItem.model_validate({
+            **item.model_dump(mode="python"),
+            "focus_chain_ids": chain_ids,
+        }))
+    return tuple(focused)
+
+
 def _allocate_native_diverse(
     work_items: tuple[HunterWorkItem, ...],
     policy: BudgetPolicy,

@@ -451,6 +451,7 @@ def context_cache_key(
         "context_files": sorted(work_item.files),
         "target_node_ids": sorted(work_item.target_node_ids),
         "target_signal_ids": sorted(work_item.target_signal_ids),
+        "focus_chain_ids": list(work_item.focus_chain_ids),
         "risk_chains": matching_risk_chains(graph, work_item)[:6],
         "capacity_risk_chains": capacity_chains[:3],
         "related_nodes": related_nodes,
