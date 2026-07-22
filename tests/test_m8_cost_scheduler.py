@@ -50,12 +50,15 @@ from vulnhunt_agent.pipeline.filter_files import run_filter
 from vulnhunt_agent.pipeline.source_snapshot import run_source_snapshot
 from vulnhunt_agent.pipeline import hunt as hunt_pipeline
 from vulnhunt_agent.scheduling import (
+    BudgetAllocation,
     BudgetController,
     BudgetedLLMClient,
     BudgetExceededError,
+    WorkInputBudgetPlan,
     adaptive_iteration_limit,
     adaptive_output_token_limit,
     allocate_work_items,
+    build_work_input_budget,
     build_routing_plan,
     build_slice_work_items,
     build_shadow_plan,
@@ -368,6 +371,112 @@ async def test_budgeted_client_caps_output_and_stops_the_next_call() -> None:
     assert delegate.max_tokens == [5]
     with pytest.raises(BudgetExceededError, match="max_output_tokens"):
         await client.chat(messages=[], system="", tools=[], max_tokens=4_000)
+
+
+def test_per_work_input_cap_prevents_one_session_from_consuming_its_peer() -> None:
+    first = "work_" + "a" * 64
+    second = "work_" + "b" * 64
+    plan = WorkInputBudgetPlan(
+        policy_version="work-input-fairness-v1",
+        per_work_input_limit=50,
+        critical_first_call_reserve=50,
+        work_input_limits={first: 50, second: 50},
+        critical_work_ids=(),
+    )
+    controller = BudgetController(
+        BudgetPolicy(max_input_tokens=100, max_output_tokens=100),
+        work_input_budget=plan,
+    )
+    reservation = controller.reserve_call(
+        input_upper_bound=30,
+        requested_output_tokens=10,
+        work_id=first,
+    )
+    controller.complete_call(reservation, LLMResponse(
+        text="{}",
+        input_tokens=30,
+        output_tokens=1,
+        cache_read_tokens=0,
+        cache_write_tokens=0,
+        stop_reason="end_turn",
+        content_blocks=[{"text": "{}"}],
+    ))
+
+    with pytest.raises(BudgetExceededError, match="max_input_tokens_per_work"):
+        controller.reserve_call(
+            input_upper_bound=21,
+            requested_output_tokens=1,
+            work_id=first,
+        )
+    peer = controller.reserve_call(
+        input_upper_bound=50,
+        requested_output_tokens=1,
+        work_id=second,
+    )
+    assert peer.input_tokens == 50
+
+
+def test_unstarted_critical_work_keeps_its_first_call_reserve() -> None:
+    general = "work_" + "a" * 64
+    critical = "work_" + "b" * 64
+    plan = WorkInputBudgetPlan(
+        policy_version="work-input-fairness-v1",
+        per_work_input_limit=50,
+        critical_first_call_reserve=50,
+        work_input_limits={general: 100, critical: 50},
+        critical_work_ids=(critical,),
+    )
+    controller = BudgetController(
+        BudgetPolicy(max_input_tokens=100, max_output_tokens=100),
+        work_input_budget=plan,
+    )
+
+    with pytest.raises(BudgetExceededError, match="critical_input_reserve"):
+        controller.reserve_call(
+            input_upper_bound=51,
+            requested_output_tokens=1,
+            work_id=general,
+        )
+    reserved = controller.reserve_call(
+        input_upper_bound=50,
+        requested_output_tokens=1,
+        work_id=critical,
+    )
+    assert reserved.work_id == critical
+    assert controller.snapshot()["pending_critical_work_ids"] == []
+
+
+def test_work_input_budget_is_derived_from_admitted_sessions() -> None:
+    items = tuple(
+        item.model_copy(update={"required": True})
+        for item in build_shadow_plan(
+            run_id="run-fair-input",
+            source_snapshot=HASH_A,
+            selected_files=["first.c", "second.c"],
+            hunters=["c-bounds-integers"],
+            analysis={},
+        )
+    )
+    allocation = BudgetAllocation(
+        admitted_work_ids=tuple(item.work_id for item in items),
+        deferred={},
+        critical_slots=2,
+        high_risk_slots=0,
+        retry_slots=0,
+        general_slots=0,
+    )
+
+    plan = build_work_input_budget(
+        items,
+        allocation,
+        BudgetPolicy(max_input_tokens=101),
+    )
+
+    assert plan.policy_version == "work-input-fairness-v1"
+    assert plan.per_work_input_limit == 50
+    assert plan.critical_first_call_reserve == 50
+    assert plan.work_input_limits == {item.work_id: 50 for item in items}
+    assert plan.critical_work_ids == tuple(item.work_id for item in items)
 
 
 def test_budget_controller_refuses_calls_after_deadline() -> None:

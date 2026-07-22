@@ -393,6 +393,7 @@ def _run_deterministic_discovery(
         "allocation": {
             **asdict(allocation),
             "decisions": [asdict(item) for item in allocation.decisions],
+            "input_fairness": asdict(admission_plan.input_budget),
         },
         "plan_contract": admission_plan.contract,
         "contexts": context_records,

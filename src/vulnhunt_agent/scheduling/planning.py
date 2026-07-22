@@ -8,7 +8,13 @@ from typing import Any
 
 from ..analysis import CAnalysisGraph
 from ..domain.schemas import BudgetPolicy, HunterRoutingPlan, HunterWorkItem
-from .budget import BudgetAllocation, allocate_work_items, apply_admission_focus
+from .budget import (
+    BudgetAllocation,
+    WorkInputBudgetPlan,
+    allocate_work_items,
+    apply_admission_focus,
+    build_work_input_budget,
+)
 from .router import build_routing_plan
 from .slices import build_slice_work_items
 
@@ -33,6 +39,7 @@ class NativeAdmissionPlan:
 
     work_items: tuple[HunterWorkItem, ...]
     allocation: BudgetAllocation
+    input_budget: WorkInputBudgetPlan
     contract: dict[str, Any]
 
 
@@ -90,10 +97,12 @@ def allocate_native_work_plan(
         native_full_scan=native_full_scan,
     )
     focused = apply_admission_focus(plan.work_items, allocation)
+    input_budget = build_work_input_budget(focused, allocation, policy)
     contract = _plan_contract(
         plan,
         focused,
         allocation,
+        input_budget,
         policy,
         eligible_work_ids={item.work_id for item in eligible},
         consumed_sessions=consumed_sessions,
@@ -103,6 +112,7 @@ def allocate_native_work_plan(
     return NativeAdmissionPlan(
         work_items=focused,
         allocation=allocation,
+        input_budget=input_budget,
         contract=contract,
     )
 
@@ -111,6 +121,7 @@ def _plan_contract(
     plan: NativeWorkPlan,
     work_items: tuple[HunterWorkItem, ...],
     allocation: BudgetAllocation,
+    input_budget: WorkInputBudgetPlan,
     policy: BudgetPolicy,
     *,
     eligible_work_ids: set[str],
@@ -143,6 +154,7 @@ def _plan_contract(
             "capacity_units": [
                 asdict(item) for item in allocation.capacity_units
             ],
+            "input_fairness": asdict(input_budget),
             "retry_slots": allocation.retry_slots,
         },
     }
@@ -158,6 +170,7 @@ def _plan_contract(
         "capacity_units": [
             asdict(item) for item in allocation.capacity_units
         ],
+        "input_fairness": asdict(input_budget),
     }
 
 
