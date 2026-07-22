@@ -144,3 +144,50 @@ def test_small_multi_chain_context_stays_in_one_packet(tmp_path: Path) -> None:
         chain["chain_id"] for chain in shards[0]["capacity_risk_chains"]
     }
     assert cache.stats()["sharded_work_items"] == 0
+
+
+def test_capacity_context_preserves_ranked_formula_evidence(tmp_path: Path) -> None:
+    repo, analysis, work = _fixture(tmp_path, rationale_bytes=32)
+    first_chain = analysis["graph"]["capacity_risk_chains"][0]
+    allocation_id = first_chain["allocation_fact_id"]
+    derivation_id = "capacity_" + "f" * 20
+    first_chain["fact_ids"] = [allocation_id, derivation_id]
+    analysis["graph"]["capacity_facts"] = [
+        {
+            "fact_id": allocation_id,
+            "kind": "allocation",
+            "path": "decode.c",
+            "line": 10,
+            "function": "decode",
+            "subject": "output",
+            "base": "output",
+            "element_count": "plane_size(width, height)",
+            "offset": "0",
+            "remaining_capacity": "plane_size(width, height)",
+            "write_extent": "",
+            "evidence": "output allocated by malloc(plane_size(width, height))",
+        },
+        {
+            "fact_id": derivation_id,
+            "kind": "write",
+            "path": "decode.c",
+            "line": 20,
+            "function": "decode",
+            "subject": "plane_width",
+            "base": "output",
+            "element_count": "",
+            "offset": "row * stride",
+            "remaining_capacity": "",
+            "write_extent": "PAD(width, sampling) / sampling",
+            "evidence": "memcpy writes PAD(width, sampling) / sampling bytes",
+        },
+    ]
+
+    packet = context_for_work_item(analysis, work)
+    evidence = packet["capacity_risk_chains"][0]["evidence_facts"]
+
+    assert [item["fact_id"] for item in evidence] == [
+        allocation_id,
+        derivation_id,
+    ]
+    assert evidence[1]["write_extent"] == "PAD(width, sampling) / sampling"

@@ -7,7 +7,11 @@ from vulnhunt_agent.analysis import (
     GuardState,
 )
 from vulnhunt_agent.domain.schemas import BudgetPolicy, HunterWorkItem
-from vulnhunt_agent.scheduling import allocate_work_items, work_id_for
+from vulnhunt_agent.scheduling import (
+    allocate_work_items,
+    apply_admission_focus,
+    work_id_for,
+)
 
 
 def _work(
@@ -96,7 +100,7 @@ def test_one_capacity_root_is_one_bounds_first_admission_unit() -> None:
 
     admitted = next(item for item in items if item.work_id in first.admitted_work_ids)
     assert first == second
-    assert first.policy_version == "c-budget-v6"
+    assert first.policy_version == "c-budget-v7"
     assert admitted.hunter == "c-bounds-integers"
     assert admitted.seed_file == "decode.c"
     assert first.chain_critical_slots == 1
@@ -144,6 +148,32 @@ def test_complete_priority_is_eligible_without_fixed_score_threshold() -> None:
     assert allocation.chain_critical_slots == 1
     assert allocation.decisions[0].quota == "chain_critical"
     assert allocation.decisions[0].score_components["capacity_chain"] == 70
+
+
+def test_capacity_representative_focuses_one_root_cause_obligation() -> None:
+    chain = _chain()
+    work = _work(
+        1,
+        "decode.c",
+        ("unrelated", "allocation"),
+        "c-bounds-integers",
+    )
+    allocation = allocate_work_items(
+        (work,),
+        BudgetPolicy(max_hunter_sessions=1, max_retries_per_work_item=0),
+        capacity_chains=(chain,),
+        native_full_scan=True,
+    )
+
+    focused = apply_admission_focus(
+        (work,),
+        allocation,
+        capacity_chains=(chain,),
+    )[0]
+
+    assert focused.work_id == work.work_id
+    assert focused.focus_chain_ids == (chain.chain_id,)
+    assert focused.target_signal_ids == ("allocation",)
 
 
 def test_partial_capacity_path_is_not_critical_from_raw_score_alone() -> None:

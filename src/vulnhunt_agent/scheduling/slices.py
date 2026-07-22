@@ -60,7 +60,7 @@ def build_slice_work_items(
                 ).hexdigest()[:20]
                 ordered_members = sorted(
                     work_members,
-                    key=_focus_order,
+                    key=_stable_work_order,
                 )
                 seed = ordered_members[0].seed_file
                 files = _bounded_files(component_files, ordered_members, seed)
@@ -108,14 +108,14 @@ def build_slice_work_items(
                     required=any(item.required for item in ordered_members),
                     routing_reasons=reasons,
                 ))
-    return tuple(sorted(out, key=lambda item: (*_focus_order(item), item.work_id)))
+    return tuple(sorted(out, key=_stable_work_order))
 
 
 def _routed_components(
     work_items: tuple[HunterWorkItem, ...],
 ) -> list[list[HunterWorkItem]]:
     """Connected components over routed items that share an AnalysisSlice."""
-    ordered = sorted(work_items, key=lambda item: item.work_id)
+    ordered = sorted(work_items, key=_stable_work_order)
     remaining = set(range(len(ordered)))
     components: list[list[HunterWorkItem]] = []
     while remaining:
@@ -151,7 +151,7 @@ def _member_batches(
     """Keep every routed seed file while enforcing the eight-file boundary."""
     ordered = sorted(
         members,
-        key=_focus_order,
+        key=_stable_work_order,
     )
     batches: list[list[HunterWorkItem]] = []
     for item in ordered:
@@ -233,6 +233,18 @@ def _focus_order(item: HunterWorkItem) -> tuple[int, int, int, int, str]:
         -int(item.required),
         -item.risk,
         item.seed_file,
+    )
+
+
+def _stable_work_order(item: HunterWorkItem) -> tuple:
+    """Order work independently of snapshot-derived work identities."""
+    return (
+        *_focus_order(item),
+        item.hunter,
+        item.slice_ids,
+        item.target_node_ids,
+        item.target_signal_ids,
+        item.files,
     )
 
 

@@ -386,7 +386,10 @@ def _run_deterministic_discovery(
                 ],
                 "hydrated_context_files": packet.get("hydrated_context_files", []),
             })
-    terminal = _terminal_routes(graph, work, allocation)
+    # Admission focus can narrow one execution to its canonical root-cause
+    # obligation.  Coverage accounting must still use the pre-focus routing
+    # plan so sibling signals retain their admitted/deferred disposition.
+    terminal = _terminal_routes(graph, native_work_plan.work_items, allocation)
     plan = {
         "routing": routing.model_dump(mode="json"),
         "work_items": [item.model_dump(mode="json") for item in work],
@@ -571,6 +574,7 @@ async def _run_authenticated_discovery(
             "hydrated_context_files": packet.get("hydrated_context_files", []),
         })
     plan["contexts"] = context_records
+    plan["budget_state"] = hunt.get("budget_state") or {}
     _write_json(output / "analysis.json", analysis)
     _write_json(output / "plan.json", plan)
     with SqliteRepository(run_dir / "state.db", read_only=True) as repository:

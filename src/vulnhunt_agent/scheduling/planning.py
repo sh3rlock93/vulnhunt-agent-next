@@ -96,7 +96,11 @@ def allocate_native_work_plan(
         entrypoint_ids=graph.entrypoint_ids,
         native_full_scan=native_full_scan,
     )
-    focused = apply_admission_focus(plan.work_items, allocation)
+    focused = apply_admission_focus(
+        plan.work_items,
+        allocation,
+        capacity_chains=graph.capacity_risk_chains,
+    )
     input_budget = build_work_input_budget(focused, allocation, policy)
     contract = _plan_contract(
         plan,
@@ -130,6 +134,10 @@ def _plan_contract(
     include_capacity_chains: bool,
 ) -> dict[str, Any]:
     graph = plan.analysis.get("graph") or {}
+    work_keys = {
+        item.work_id: _normalized_work_key(item)
+        for item in work_items
+    }
     semantic = {
         "policy_version": NATIVE_PLAN_CONTRACT_POLICY,
         "source_snapshot": plan.source_snapshot,
@@ -161,6 +169,25 @@ def _plan_contract(
     return {
         "policy_version": NATIVE_PLAN_CONTRACT_POLICY,
         "semantic_sha256": _sha256_json(semantic),
+        "normalized_semantic_sha256": _sha256_json({
+            "policy_version": NATIVE_PLAN_CONTRACT_POLICY,
+            "graph_sha256": semantic["graph_sha256"],
+            "selected_files": semantic["selected_files"],
+            "enabled_hunters": semantic["enabled_hunters"],
+            "budget": semantic["budget"],
+            "consumed_sessions": consumed_sessions,
+            "native_full_scan": native_full_scan,
+            "include_capacity_chains": include_capacity_chains,
+            "work_items": sorted(
+                (_normalized_work_item(item) for item in work_items),
+                key=_sha256_json,
+            ),
+            "allocation": _normalized_allocation(
+                allocation,
+                input_budget,
+                work_keys,
+            ),
+        }),
         "graph_sha256": semantic["graph_sha256"],
         "enabled_hunters": list(plan.enabled_hunters),
         "selected_files": len(plan.selected_files),
@@ -178,6 +205,81 @@ def _semantic_work_item(item: HunterWorkItem) -> dict[str, Any]:
     payload = item.model_dump(mode="json")
     payload.pop("run_id", None)
     return payload
+
+
+def _normalized_work_item(item: HunterWorkItem) -> dict[str, Any]:
+    payload = _semantic_work_item(item)
+    payload.pop("work_id", None)
+    payload.pop("source_snapshot", None)
+    # The opaque scope digest binds an executable work item to one discovery
+    # artifact.  The normalized contract already records the selected files
+    # and every semantic target, so retaining this identity digest would make
+    # equivalent deterministic and authenticated plans compare unequal.
+    payload.pop("scan_scope_digest", None)
+    return payload
+
+
+def _normalized_work_key(item: HunterWorkItem) -> str:
+    return "normalized_work_" + _sha256_json(_normalized_work_item(item))[:20]
+
+
+def _normalized_allocation(
+    allocation: BudgetAllocation,
+    input_budget: WorkInputBudgetPlan,
+    work_keys: dict[str, str],
+) -> dict[str, Any]:
+    def work_key(work_id: str) -> str:
+        return work_keys.get(work_id, "unknown_work")
+
+    decisions = []
+    for decision in allocation.decisions:
+        payload = asdict(decision)
+        payload["work_key"] = work_key(payload.pop("work_id"))
+        decisions.append(payload)
+    ranking = []
+    for record in allocation.ranking:
+        payload = asdict(record)
+        payload.pop("record_id", None)
+        payload["work_key"] = work_key(payload.pop("work_id"))
+        ranking.append(payload)
+    capacity_units = []
+    for unit in allocation.capacity_units:
+        payload = asdict(unit)
+        payload["representative_work_key"] = work_key(
+            payload.pop("representative_work_id")
+        )
+        payload["work_keys"] = sorted(
+            work_key(work_id) for work_id in payload.pop("work_ids")
+        )
+        capacity_units.append(payload)
+    return {
+        "policy_version": allocation.policy_version,
+        "admitted_work_keys": [
+            work_key(work_id) for work_id in allocation.admitted_work_ids
+        ],
+        "deferred": sorted(
+            (work_key(work_id), reason)
+            for work_id, reason in allocation.deferred.items()
+        ),
+        "decisions": decisions,
+        "ranking": ranking,
+        "capacity_units": capacity_units,
+        "input_fairness": {
+            "policy_version": input_budget.policy_version,
+            "per_work_input_limit": input_budget.per_work_input_limit,
+            "critical_first_call_reserve": (
+                input_budget.critical_first_call_reserve
+            ),
+            "work_input_limits": sorted(
+                (work_key(work_id), limit)
+                for work_id, limit in input_budget.work_input_limits.items()
+            ),
+            "critical_work_keys": [
+                work_key(work_id) for work_id in input_budget.critical_work_ids
+            ],
+        },
+        "retry_slots": allocation.retry_slots,
+    }
 
 
 def _sha256_json(value: Any) -> str:

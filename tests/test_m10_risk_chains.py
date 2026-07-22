@@ -205,7 +205,7 @@ def test_full_native_admission_uses_versioned_seed_fairness() -> None:
     )
 
     assert first == second
-    assert first.policy_version == "c-budget-v6"
+    assert first.policy_version == "c-budget-v7"
     assert len(first.admitted_work_ids) == 22
     assert first.retry_slots == 2
     assert first.chain_critical_slots == 1
