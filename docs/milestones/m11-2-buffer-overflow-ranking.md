@@ -1,6 +1,6 @@
 # M11.2 — Capacity-aware buffer-overflow ranking
 
-Status: in progress; PR 2 of 7 implemented
+Status: in progress; PR 3 of 7 implemented
 
 ## Goal
 
@@ -44,6 +44,15 @@ input. Existing LibTIFF and synthetic ranking regressions must remain green.
 - [x] Allocator wrappers and `count * sizeof(element)` forms are recognized.
 - [x] Alias traversal stops after 8 hops and transformations stop after 12.
 - [x] Repeated and reordered analysis is byte-for-byte deterministic.
+
+## PR 3 acceptance gates
+
+- [x] Direct call arguments, result variables, and resolved targets are persisted.
+- [x] Pointer parameters written by a function carry symbolic write extents.
+- [x] Consumed/required and pass-through return behavior is explicit.
+- [x] Parameter writes and return behavior propagate through at most five calls.
+- [x] External and function-pointer calls remain unresolved and do not propagate.
+- [x] The generic libwebp Huffman call path is linked end to end.
 
 ## Non-goals
 

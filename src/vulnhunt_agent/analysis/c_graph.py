@@ -15,14 +15,17 @@ from ..indexer.tree_sitter_indexer import (
     c_function_regions,
 )
 from .constraints import extract_constraint_facts
-from .capacity import extract_capacity_facts
+from .capacity import build_local_capacity_summary, extract_capacity_facts
+from .capacity_summaries import propagate_capacity_summaries
 from .models import (
     CAnalysisGraph,
+    CapacityCallSite,
     CapacityFact,
     ConstraintFact,
     EdgeKind,
     GraphEdge,
     GraphNode,
+    FunctionCapacitySummary,
     NodeKind,
     RiskChain,
     SecuritySignal,
@@ -114,6 +117,9 @@ class _CallSite:
     path: str
     line: int
     callee: str
+    arguments: tuple[str, ...] = ()
+    result_subject: str = ""
+    indirect: bool = False
 
 
 @dataclass(frozen=True)
@@ -124,6 +130,7 @@ class _Extracted:
     risk_chains: tuple[RiskChain, ...] = ()
     constraint_facts: tuple[ConstraintFact, ...] = ()
     capacity_facts: tuple[CapacityFact, ...] = ()
+    capacity_summary: FunctionCapacitySummary | None = None
 
 
 def build_c_analysis_graph(repo: Path, source_files: list[str]) -> CAnalysisGraph:
@@ -164,6 +171,13 @@ def build_c_analysis_graph(repo: Path, source_files: list[str]) -> CAnalysisGrap
         (fact for item in extracted for fact in item.capacity_facts),
         key=lambda item: item.fact_id,
     )
+    local_capacity_summaries = tuple(sorted(
+        (
+            item.capacity_summary for item in extracted
+            if item.capacity_summary is not None
+        ),
+        key=lambda item: item.summary_id,
+    ))
 
     by_symbol: dict[str, list[GraphNode]] = {}
     for node in nodes:
@@ -171,13 +185,16 @@ def build_c_analysis_graph(repo: Path, source_files: list[str]) -> CAnalysisGrap
             by_symbol.setdefault(node.symbol, []).append(node)
 
     edges: list[GraphEdge] = []
+    capacity_calls: list[CapacityCallSite] = []
     unresolved: list[UnresolvedCall] = []
     for call in sorted(calls, key=lambda item: (
         item.path, item.line, item.caller_id, item.callee
     )):
-        targets = by_symbol.get(call.callee, [])
+        targets = by_symbol.get(call.callee, []) if not call.indirect else []
+        target_id = ""
         if targets:
             target = _resolve_target(node_by_id[call.caller_id], targets)
+            target_id = target.node_id
             edges.append(_edge(
                 call.caller_id,
                 target.node_id,
@@ -196,6 +213,7 @@ def build_c_analysis_graph(repo: Path, source_files: list[str]) -> CAnalysisGrap
                 line=call.line,
                 callee=call.callee,
             ))
+        capacity_calls.append(_capacity_call(call, target_id))
 
     for scanner in grammar_paths["l"]:
         scanner_id = _node_id(scanner, "<flex>", 1)
@@ -234,6 +252,14 @@ def build_c_analysis_graph(repo: Path, source_files: list[str]) -> CAnalysisGrap
         for signal in signals
         if signal.role is SignalRole.SINK and signal.risk >= 4
     ]
+    capacity_calls = sorted(
+        {item.call_id: item for item in capacity_calls}.values(),
+        key=lambda item: item.call_id,
+    )
+    capacity_summaries = propagate_capacity_summaries(
+        local_capacity_summaries,
+        tuple(capacity_calls),
+    )
     return CAnalysisGraph(
         nodes=tuple(nodes),
         edges=tuple(edges),
@@ -243,6 +269,8 @@ def build_c_analysis_graph(repo: Path, source_files: list[str]) -> CAnalysisGrap
         risk_chains=tuple(risk_chains),
         constraint_facts=tuple(constraint_facts),
         capacity_facts=tuple(capacity_facts),
+        capacity_calls=tuple(capacity_calls),
+        capacity_summaries=capacity_summaries,
         unresolved_calls=tuple(sorted(
             unresolved,
             key=lambda item: (item.path, item.line, item.source, item.callee),
@@ -278,6 +306,10 @@ def _extract_c_function(
     call_sites: list[_CallSite] = []
     signals: list[SecuritySignal] = []
     call_names: list[str] = []
+    function_pointer_names = set(re.findall(
+        r"\(\s*\*\s*([A-Za-z_]\w*)\s*\)\s*\(",
+        _text(region.declarator, source),
+    ))
     for body_node in region.body_nodes:
         for descendant in (body_node, *_walk(body_node)):
             if descendant.type == "call_expression":
@@ -291,6 +323,12 @@ def _extract_c_function(
                     path=relative,
                     line=call_line,
                     callee=callee,
+                    arguments=_call_arguments(descendant, source),
+                    result_subject=_call_result_subject(descendant, source),
+                    indirect=(
+                        callee in function_pointer_names
+                        or not _is_direct_call(descendant)
+                    ),
                 ))
                 source_spec = _SOURCE_CALLS.get(callee)
                 if source_spec:
@@ -384,6 +422,15 @@ def _extract_c_function(
         function_node=region.container,
         body_nodes=region.body_nodes,
     )
+    capacity_summary = build_local_capacity_summary(
+        path=relative,
+        node_id=node_id,
+        function=name,
+        source=source,
+        declarator=region.declarator,
+        body_nodes=region.body_nodes,
+        facts=capacity_facts,
+    )
     return _Extracted(
         node=node,
         calls=tuple(call_sites),
@@ -391,6 +438,7 @@ def _extract_c_function(
         risk_chains=risk_chains,
         constraint_facts=constraint_facts,
         capacity_facts=capacity_facts,
+        capacity_summary=capacity_summary,
     )
 
 
@@ -598,6 +646,60 @@ def _call_name(node: Node, source: bytes) -> str:
     return ""
 
 
+def _is_direct_call(node: Node) -> bool:
+    function = node.child_by_field_name("function")
+    return function is not None and function.type == "identifier"
+
+
+def _call_arguments(node: Node, source: bytes) -> tuple[str, ...]:
+    arguments = node.child_by_field_name("arguments")
+    if arguments is None:
+        return ()
+    return tuple(_compact(_text(item, source)) for item in arguments.named_children)
+
+
+def _call_result_subject(node: Node, source: bytes) -> str:
+    parent = node.parent
+    while parent is not None and parent.type in {
+        "parenthesized_expression", "cast_expression", "conditional_expression"
+    }:
+        parent = parent.parent
+    if parent is None or parent.type not in {
+        "assignment_expression", "init_declarator"
+    }:
+        return ""
+    left = (
+        parent.child_by_field_name("left")
+        if parent.type == "assignment_expression"
+        else parent.child_by_field_name("declarator")
+    )
+    if left is None:
+        return ""
+    identifiers = [
+        _text(item, source) for item in (left, *_walk(left))
+        if item.type == "identifier"
+    ]
+    return identifiers[-1] if identifiers else ""
+
+
+def _capacity_call(call: _CallSite, target_id: str) -> CapacityCallSite:
+    identity = "\0".join((
+        "c-capacity-summary-v1", call.caller_id, str(call.line), call.callee,
+        *call.arguments, call.result_subject, target_id, str(not call.indirect),
+    ))
+    return CapacityCallSite(
+        call_id="capacity_call_" + hashlib.sha256(identity.encode()).hexdigest()[:20],
+        caller_id=call.caller_id,
+        target_node_id=target_id,
+        path=call.path,
+        line=call.line,
+        callee=call.callee,
+        arguments=call.arguments,
+        result_subject=call.result_subject,
+        direct=not call.indirect,
+    )
+
+
 def _signal(
     node_id: str,
     path: str,
@@ -716,3 +818,7 @@ def _strip_c_comments(text: str) -> str:
         text,
         flags=re.DOTALL,
     )
+
+
+def _compact(value: str) -> str:
+    return " ".join(value.strip().split())[:500]
