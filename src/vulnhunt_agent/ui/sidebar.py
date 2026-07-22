@@ -47,6 +47,9 @@ def default_config() -> dict:
         "repo_path": "",
         "scan_base_ref": "",
         "scan_head_ref": "",
+        "scan_scope_mode": "full",
+        "scan_scope_include_paths": [],
+        "scan_scope_exclude_paths": [],
         "note": "",
         "max_tokens": app_settings.MAX_TOKENS,
         "max_hunters_parallel": 3,
@@ -107,6 +110,34 @@ def _settings_form(store: RunStore) -> None:
             cfg.get("scan_head_ref", ""),
             placeholder="HEAD",
         )
+    with st.sidebar.expander("Bounded scan scope", expanded=False):
+        scope_modes = ["full", "files", "component"]
+        configured_mode = cfg.get("scan_scope_mode", "full")
+        scope_mode = st.selectbox(
+            "Scope mode",
+            scope_modes,
+            index=(
+                scope_modes.index(configured_mode)
+                if configured_mode in scope_modes
+                else 0
+            ),
+            help="Bounded modes preserve the full snapshot but limit Hunter scheduling.",
+        )
+        scope_includes = st.text_area(
+            "Include paths (one per line)",
+            "\n".join(cfg.get("scan_scope_include_paths") or []),
+            disabled=scope_mode == "full",
+        )
+        scope_excludes = st.text_area(
+            "Exclude paths (one per line)",
+            "\n".join(cfg.get("scan_scope_exclude_paths") or []),
+            disabled=scope_mode == "full",
+        )
+        if scope_mode != "full":
+            st.warning(
+                "Bounded scope reports incomplete repository coverage and cannot be "
+                "combined with Git diff refs."
+            )
 
     env_default = cfg.get("environment") or ENVIRONMENTS[0]
     env_idx = ENVIRONMENTS.index(env_default) if env_default in ENVIRONMENTS else 0
@@ -179,6 +210,9 @@ def _settings_form(store: RunStore) -> None:
         "repo_source": repo_source,
         "scan_base_ref": scan_base_ref.strip(),
         "scan_head_ref": scan_head_ref.strip(),
+        "scan_scope_mode": scope_mode,
+        "scan_scope_include_paths": _scope_lines(scope_includes),
+        "scan_scope_exclude_paths": _scope_lines(scope_excludes),
         "max_hunters_parallel": int(max_par),
         "hunter_max_iterations": int(max_iter),
         "budget_max_hunter_sessions": int(budget_sessions),
@@ -228,3 +262,7 @@ def _model_picker(label: str, current_id: str, key: str, help: str = "") -> str:
     if picked.startswith("custom ("):
         return current_id
     return app_settings.by_label(picked).model_id
+
+
+def _scope_lines(value: str) -> list[str]:
+    return [line.strip() for line in value.splitlines() if line.strip()]

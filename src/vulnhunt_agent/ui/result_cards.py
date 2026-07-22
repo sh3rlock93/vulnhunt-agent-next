@@ -70,6 +70,14 @@ def _analysis_graph(store: RunStore, d: dict) -> None:
     else:
         st.error("Coverage plan has unresolved entrypoints or critical sinks.")
     incremental = d.get("incremental_scope") or {}
+    scan_scope = d.get("scan_scope") or {}
+    if scan_scope.get("mode", "full") != "full":
+        st.warning(
+            f"Bounded {scan_scope.get('mode')} scope · "
+            f"{len(scan_scope.get('selected_files', []))} scheduled file(s) · "
+            f"{len(scan_scope.get('scope_deferred_critical_sink_ids', []))} "
+            "critical signal(s) scope-deferred · repository coverage incomplete"
+        )
     if incremental.get("mode") == "incremental":
         st.info(
             f"Git diff scope · {len(incremental.get('changed_files', []))} changed "
@@ -102,6 +110,12 @@ def _selector(store: RunStore, d: dict) -> None:
         + (" · complete" if d.get("coverage_complete") else " · incomplete")
     )
     incremental = d.get("incremental_scope") or {}
+    scan_scope = d.get("scan_scope") or {}
+    if scan_scope.get("mode", "full") != "full":
+        st.warning(
+            f"Explicit {scan_scope.get('mode')} scope: {len(selected)} file(s). "
+            "Repository-wide coverage is incomplete."
+        )
     if incremental.get("mode") == "incremental":
         full = len(d.get("full_coverage_selected") or [])
         reduction = (

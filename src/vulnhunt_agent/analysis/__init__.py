@@ -8,6 +8,7 @@ from .context_cache import (
     context_cache_key,
 )
 from .incremental import INCREMENTAL_POLICY, build_incremental_scope
+from .scope import SCAN_SCOPE_POLICY, build_scan_scope
 from .models import (
     AnalysisSlice,
     CAnalysisGraph,
@@ -48,6 +49,8 @@ __all__ = [
     "CONTEXT_CACHE_POLICY",
     "SharedContextCache",
     "INCREMENTAL_POLICY",
+    "SCAN_SCOPE_POLICY",
     "build_incremental_scope",
+    "build_scan_scope",
     "context_cache_key",
 ]

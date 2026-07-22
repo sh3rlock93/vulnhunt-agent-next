@@ -5,6 +5,7 @@ import argparse
 import asyncio
 import json
 import sqlite3
+import tomllib
 from pathlib import Path
 from typing import Sequence
 
@@ -54,6 +55,28 @@ def build_parser() -> argparse.ArgumentParser:
     )
     scan.add_argument("--custom-image", default="")
     scan.add_argument("--max-hunter-sessions", type=int, default=100)
+    scan.add_argument(
+        "--scope-mode",
+        choices=("full", "files", "component"),
+        default=None,
+    )
+    scan.add_argument(
+        "--include-path",
+        action="append",
+        default=[],
+        help="repository-relative file or component to include; repeatable",
+    )
+    scan.add_argument(
+        "--exclude-path",
+        action="append",
+        default=[],
+        help="repository-relative file or component to exclude; repeatable",
+    )
+    scan.add_argument(
+        "--scope-manifest",
+        type=Path,
+        help="JSON or TOML file containing mode/include_paths/exclude_paths",
+    )
     scan.add_argument(
         "--provider-model-probe",
         action="store_true",
@@ -208,6 +231,7 @@ async def _run_scan(args) -> int:
     run_id = args.run_id or new_run_id()
     store = RunStore(args.run_root.resolve() / run_id)
     model_id = args.model_id or app_settings.DEFAULT_MODEL.model_id
+    scope_config = _load_scan_scope_config(args)
     store.save_config({
         "repo_source": args.repo,
         "repo_path": str(repo),
@@ -227,6 +251,7 @@ async def _run_scan(args) -> int:
         "budget_max_wall_clock_minutes": 60,
         "budget_max_retries_per_work_item": 1,
         "provider_preflight_model_probe": args.provider_model_probe,
+        **scope_config,
     })
     bus = EventBus(store.dir / "events.jsonl")
     for step in (
@@ -245,6 +270,7 @@ async def _run_scan(args) -> int:
             "run_dir": str(store.dir),
             "mode": "plan_only",
             "incremental_scope": analysis.get("incremental_scope") or {},
+            "scan_scope": analysis.get("scan_scope") or {},
             "selected_files": selector.get("selected") or [],
         })
         return 0
@@ -258,10 +284,52 @@ async def _run_scan(args) -> int:
         "run_dir": str(store.dir),
         "mode": "complete",
         "incremental_scope": analysis.get("incremental_scope") or {},
+        "scan_scope": analysis.get("scan_scope") or {},
         "hunt": store.load_step("hunt") or {},
         "verify": store.load_step("verify") or {},
     })
     return 0
+
+
+def _load_scan_scope_config(args) -> dict:
+    if args.scope_manifest is not None:
+        if args.scope_mode is not None or args.include_path or args.exclude_path:
+            raise ValueError(
+                "--scope-manifest cannot be combined with inline scope options"
+            )
+        path = args.scope_manifest.resolve()
+        if path.suffix.casefold() == ".toml":
+            payload = tomllib.loads(path.read_text(encoding="utf-8"))
+        else:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            raise ValueError("scope manifest must contain an object")
+        allowed = {"policy_version", "mode", "include_paths", "exclude_paths"}
+        unknown = set(payload) - allowed
+        if unknown:
+            raise ValueError(
+                "scope manifest contains unknown fields: " + ", ".join(sorted(unknown))
+            )
+        if payload.get("policy_version", "scan-scope-v1") != "scan-scope-v1":
+            raise ValueError("unsupported scope manifest policy_version")
+        mode = payload.get("mode", "full")
+        includes = payload.get("include_paths", [])
+        excludes = payload.get("exclude_paths", [])
+    else:
+        mode = args.scope_mode or "full"
+        includes = args.include_path
+        excludes = args.exclude_path
+    if mode not in {"full", "files", "component"}:
+        raise ValueError(f"unsupported scope mode: {mode}")
+    if not isinstance(includes, list) or not all(isinstance(p, str) for p in includes):
+        raise ValueError("scope include_paths must be a list of strings")
+    if not isinstance(excludes, list) or not all(isinstance(p, str) for p in excludes):
+        raise ValueError("scope exclude_paths must be a list of strings")
+    return {
+        "scan_scope_mode": mode,
+        "scan_scope_include_paths": includes,
+        "scan_scope_exclude_paths": excludes,
+    }
 
 
 def _print_json(value: object) -> None:

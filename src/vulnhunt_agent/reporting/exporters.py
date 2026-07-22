@@ -64,6 +64,14 @@ def build_canonical_report(
             "repository_url": run.source_url,
             "source_ref": run.source_ref,
             "source_snapshot": run.source_snapshot,
+            "scan_scope": {
+                "mode": run.config.get("scan_scope_mode", "full"),
+                "include_paths": run.config.get("scan_scope_include_paths", []),
+                "exclude_paths": run.config.get("scan_scope_exclude_paths", []),
+                "repository_complete": (
+                    run.config.get("scan_scope_mode", "full") == "full"
+                ),
+            },
         },
         "finding": {
             "candidate_id": finding.candidate_id,
@@ -176,6 +184,8 @@ def render_markdown(report: dict[str, Any]) -> str:
         "## Provenance",
         "",
         f"- Source snapshot: `{report['run']['source_snapshot']}`",
+        f"- Scan scope: `{report['run']['scan_scope']['mode']}`; "
+        f"repository complete: `{report['run']['scan_scope']['repository_complete']}`",
         f"- Report policy: `{report['provenance']['policy_version']}`",
         f"- Consensus policy: `{report['provenance']['consensus_version']}`",
         "- Evidence IDs: "

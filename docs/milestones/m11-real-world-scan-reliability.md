@@ -1,6 +1,6 @@
 # M11 — Reliable bounded scans and candidate falsification on live repositories
 
-Status: PR 1–2 implemented and verified; PR 3 pending
+Status: PR 1–3 implemented and verified; PR 4 pending
 
 ## Goal
 
@@ -187,13 +187,13 @@ Expected changes:
 
 ### PR 3 acceptance gates
 
-- [ ] A four-file libexpat tokenizer scope schedules only those seed files.
-- [ ] `xmlparse.c` is not forced into an explicit tokenizer-only scope.
-- [ ] Out-of-scope critical signals are counted as `scope_deferred`.
-- [ ] Full mode retains M10's no-uncovered-critical-sink guarantee.
-- [ ] Relative-path normalization rejects traversal and nonexistent paths.
-- [ ] Equivalent reordered scope manifests produce the same digest and work IDs.
-- [ ] Reports distinguish scoped completeness from repository completeness.
+- [x] A four-file libexpat tokenizer scope schedules only those seed files.
+- [x] `xmlparse.c` is not forced into an explicit tokenizer-only scope.
+- [x] Out-of-scope critical signals are counted as `scope_deferred`.
+- [x] Full mode retains M10's no-uncovered-critical-sink guarantee.
+- [x] Relative-path normalization rejects traversal and nonexistent paths.
+- [x] Equivalent reordered scope manifests produce the same digest and work IDs.
+- [x] Reports distinguish scoped completeness from repository completeness.
 
 ## PR 4 — Full-snapshot context and constraint hydration
 

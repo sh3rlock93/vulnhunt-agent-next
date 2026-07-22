@@ -435,6 +435,7 @@ class HunterWorkItem(DomainModel):
     work_id: str = Field(pattern=r"^work_[0-9a-f]{64}$")
     run_id: str = Field(min_length=1)
     source_snapshot: str = Field(pattern=SHA256_PATTERN)
+    scan_scope_digest: str | None = Field(default=None, pattern=SHA256_PATTERN)
     planning_policy: str = Field(min_length=1)
     slice_ids: tuple[str, ...] = ()
     target_node_ids: tuple[str, ...] = Field(
@@ -489,6 +490,9 @@ class HunterRoutingPlan(DomainModel):
     covered_critical_sink_ids: tuple[str, ...] = ()
     uncovered_critical_sink_ids: tuple[str, ...] = ()
     forced_files: tuple[str, ...] = ()
+    scan_scope_digest: str | None = Field(default=None, pattern=SHA256_PATTERN)
+    scope_deferred_critical_sink_ids: tuple[str, ...] = ()
+    repository_complete: bool = True
 
     @model_validator(mode="after")
     def validate_routing_coverage(self) -> "HunterRoutingPlan":
@@ -497,6 +501,12 @@ class HunterRoutingPlan(DomainModel):
         uncovered = set(self.uncovered_critical_sink_ids)
         if covered | uncovered != detected or covered & uncovered:
             raise ValueError("critical-sink routing coverage is inconsistent")
+        if detected & set(self.scope_deferred_critical_sink_ids):
+            raise ValueError("in-scope and scope-deferred critical sinks overlap")
+        if tuple(sorted(set(self.scope_deferred_critical_sink_ids))) != (
+            self.scope_deferred_critical_sink_ids
+        ):
+            raise ValueError("scope-deferred critical sink IDs must be sorted and unique")
         work_ids = [item.work_id for item in self.work_items]
         if len(set(work_ids)) != len(work_ids):
             raise ValueError("routing plan contains duplicate work IDs")
@@ -600,6 +610,61 @@ class ProviderPreflightResult(DomainModel):
             raise ValueError("requested model probe must account for exactly one call")
         if not self.model_probe_requested and self.billable_model_calls:
             raise ValueError("local-only preflight cannot account for model calls")
+        return self
+
+
+class ScanScopeMode(StrEnum):
+    FULL = "full"
+    FILES = "files"
+    COMPONENT = "component"
+
+
+class ScanScopeManifest(DomainModel):
+    """Canonical scheduling scope over an immutable full source snapshot."""
+
+    policy_version: str = "scan-scope-v1"
+    mode: ScanScopeMode = ScanScopeMode.FULL
+    include_paths: tuple[str, ...] = ()
+    exclude_paths: tuple[str, ...] = ()
+    selected_files: tuple[str, ...] = ()
+    in_scope_critical_sink_ids: tuple[str, ...] = ()
+    scope_deferred_critical_sink_ids: tuple[str, ...] = ()
+    digest: str = Field(pattern=SHA256_PATTERN)
+    repository_complete: bool
+
+    @model_validator(mode="after")
+    def validate_scope(self) -> "ScanScopeManifest":
+        for label, paths in (
+            ("scope include", self.include_paths),
+            ("scope exclude", self.exclude_paths),
+            ("scope selected", self.selected_files),
+        ):
+            if tuple(sorted(set(paths))) != paths:
+                raise ValueError(f"{label} paths must be sorted and unique")
+            for path in paths:
+                _validate_relative_path(path, label=label)
+        for label, identifiers in (
+            ("in-scope critical", self.in_scope_critical_sink_ids),
+            ("scope-deferred critical", self.scope_deferred_critical_sink_ids),
+        ):
+            if tuple(sorted(set(identifiers))) != identifiers:
+                raise ValueError(f"{label} IDs must be sorted and unique")
+        if set(self.in_scope_critical_sink_ids) & set(
+            self.scope_deferred_critical_sink_ids
+        ):
+            raise ValueError("critical sink cannot be both in scope and deferred")
+        if self.mode is ScanScopeMode.FULL:
+            if self.include_paths or self.exclude_paths:
+                raise ValueError("full scope cannot contain include or exclude paths")
+            if not self.repository_complete:
+                raise ValueError("full scope must be repository-complete")
+            if self.scope_deferred_critical_sink_ids:
+                raise ValueError("full scope cannot defer critical sinks by scope")
+        else:
+            if not self.include_paths:
+                raise ValueError("bounded scope requires at least one include path")
+            if self.repository_complete:
+                raise ValueError("bounded scope cannot claim repository completeness")
         return self
 
 

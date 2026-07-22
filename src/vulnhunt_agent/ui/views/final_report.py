@@ -18,6 +18,13 @@ _SEVERITY_BADGE = {
 
 def render_final_report(store: RunStore) -> None:
     hunt = store.load_step("hunt") or {}
+    scan_scope = hunt.get("scan_scope") or {}
+    if scan_scope.get("mode", "full") != "full":
+        st.warning(
+            f"This is a bounded {scan_scope.get('mode')} result, not a repository-wide "
+            f"result. {len(scan_scope.get('scope_deferred_critical_sink_ids', []))} "
+            "critical signal(s) were outside scope."
+        )
     deferred = hunt.get("unanalysed_work_ids") or []
     if deferred:
         st.warning(

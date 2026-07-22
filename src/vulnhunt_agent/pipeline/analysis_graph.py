@@ -7,6 +7,7 @@ from ..analysis import (
     build_c_analysis_graph,
     build_coverage_plan,
     build_incremental_scope,
+    build_scan_scope,
 )
 from ..analysis.models import CAnalysisGraph, IncrementalScope
 from ..core.events import EventBus
@@ -32,6 +33,22 @@ async def run_analysis_graph(store: RunStore, bus: EventBus) -> None:
     if language == "c":
         graph = build_c_analysis_graph(Path(config["repo_path"]), source_files)
         plan = build_coverage_plan(graph)
+        scope_mode = str(config.get("scan_scope_mode") or "full")
+        if scope_mode != "full" and (
+            config.get("scan_base_ref") or config.get("scan_head_ref")
+        ):
+            raise ValueError(
+                "explicit bounded scope cannot be combined with Git diff refs"
+            )
+        scan_scope = build_scan_scope(
+            Path(config["repo_path"]),
+            source_files=source_files,
+            graph=graph,
+            coverage=plan,
+            mode=scope_mode,
+            include_paths=config.get("scan_scope_include_paths") or (),
+            exclude_paths=config.get("scan_scope_exclude_paths") or (),
+        )
         incremental = build_incremental_scope(
             Path(config["repo_path"]),
             base_ref=config.get("scan_base_ref"),
@@ -46,12 +63,22 @@ async def run_analysis_graph(store: RunStore, bus: EventBus) -> None:
             mode="full",
             fallback_reason="non_c_environment",
         )
+        scan_scope = build_scan_scope(
+            Path(config["repo_path"]),
+            source_files=source_files,
+            graph=graph,
+            coverage=plan,
+            mode=str(config.get("scan_scope_mode") or "full"),
+            include_paths=config.get("scan_scope_include_paths") or (),
+            exclude_paths=config.get("scan_scope_exclude_paths") or (),
+        )
 
     result = {
         "language": language,
         "graph": graph.model_dump(mode="json"),
         "coverage_plan": plan.model_dump(mode="json"),
         "incremental_scope": incremental.model_dump(mode="json"),
+        "scan_scope": scan_scope.model_dump(mode="json"),
         "summary": {
             "nodes": len(graph.nodes),
             "edges": len(graph.edges),
@@ -70,6 +97,12 @@ async def run_analysis_graph(store: RunStore, bus: EventBus) -> None:
             "impacted_files": len(incremental.selected_files),
             "file_reduction_percent": incremental.file_reduction_percent,
             "incremental_fallback_reason": incremental.fallback_reason,
+            "scope_mode": scan_scope.mode.value,
+            "scope_selected_files": len(scan_scope.selected_files),
+            "scope_deferred_critical_sinks": len(
+                scan_scope.scope_deferred_critical_sink_ids
+            ),
+            "repository_complete": scan_scope.repository_complete,
         },
     }
     store.save_step("analysis_graph", result)
