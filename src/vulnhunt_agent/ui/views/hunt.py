@@ -85,6 +85,13 @@ def render_hunt_view(store: RunStore) -> None:
                 f"{scheduled}/{plan.get('full_scan_scheduled_sessions', scheduled)} "
                 f"({plan.get('incremental_session_reduction_percent', 0):.1f}% reduction)"
             )
+        scope = plan.get("scan_scope") or {}
+        if scope.get("mode", "full") != "full":
+            st.warning(
+                f"Bounded {scope.get('mode')} scope · repository coverage incomplete · "
+                f"{len(scope.get('scope_deferred_critical_sink_ids', []))} "
+                "critical signal(s) scope-deferred"
+            )
 
     durable = DurableHuntQueueStore(
         store.dir / "hunters",

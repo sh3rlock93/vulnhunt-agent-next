@@ -74,6 +74,13 @@ async def run_hunt(store: RunStore, bus: EventBus) -> None:
 
     selector = store.load_step("file_selector") or {}
     analysis = store.load_step("analysis_graph") or {}
+    scan_scope = analysis.get("scan_scope") or {
+        "policy_version": "scan-scope-v1",
+        "mode": "full",
+        "selected_files": [],
+        "scope_deferred_critical_sink_ids": [],
+        "repository_complete": True,
+    }
     files = list(selector.get("selected", []))
     if language_of(env) == "c" and any(path in {"", "."} for path in files):
         raise RuntimeError(
@@ -131,6 +138,7 @@ async def run_hunt(store: RunStore, bus: EventBus) -> None:
         "completion_repair_limit": 1,
         "iteration_tiers": [6, 18, 40],
         "scan_mode": incremental.get("mode", "full"),
+        "scan_scope": scan_scope,
         "scan_base_ref": incremental.get("base_ref", ""),
         "scan_head_ref": incremental.get("head_ref", ""),
         "changed_files": len(incremental.get("changed_files", [])),
@@ -164,6 +172,14 @@ async def run_hunt(store: RunStore, bus: EventBus) -> None:
         "uncovered_critical_sink_ids": list(
             routing_plan.uncovered_critical_sink_ids
         ),
+        "scope_deferred_critical_sink_ids": list(
+            routing_plan.scope_deferred_critical_sink_ids
+        ),
+        "scope_deferred_targets": [
+            {"target_id": target_id, "status": "scope_deferred"}
+            for target_id in routing_plan.scope_deferred_critical_sink_ids
+        ],
+        "repository_complete": routing_plan.repository_complete,
         "forced_files": list(routing_plan.forced_files),
         "work_items": [
             item.model_dump(mode="json")
@@ -237,6 +253,7 @@ async def run_hunt(store: RunStore, bus: EventBus) -> None:
         native_full_scan=(
             language_of(env) == "c"
             and incremental.get("mode", "full") == "full"
+            and scan_scope.get("mode", "full") == "full"
         ),
     )
     admitted_ids = set(allocation.admitted_work_ids)
@@ -298,6 +315,7 @@ async def run_hunt(store: RunStore, bus: EventBus) -> None:
             budget_policy,
             budget_controller.snapshot(),
             context_cache_stats,
+            scan_scope,
         )
         advance_run(
             store,
@@ -471,6 +489,7 @@ async def run_hunt(store: RunStore, bus: EventBus) -> None:
         budget_policy,
         budget_controller.snapshot(),
         context_cache_stats,
+        scan_scope,
     )
     advance_run(
         store,
@@ -719,6 +738,7 @@ def _save_summary(
     policy: BudgetPolicy,
     budget_state: dict[str, int | float | bool],
     context_cache: dict[str, int | str],
+    scan_scope: dict,
 ) -> None:
     final = qstore.load()
     summary = {
@@ -737,6 +757,19 @@ def _save_summary(
         "budget": policy.model_dump(mode="json"),
         "budget_state": budget_state,
         "context_cache": context_cache,
+        "scan_scope": scan_scope,
+        "repository_complete": bool(
+            scan_scope.get("repository_complete", True)
+        ),
+        "scope_deferred_critical_sink_ids": list(
+            scan_scope.get("scope_deferred_critical_sink_ids", [])
+        ),
+        "scope_deferred_targets": [
+            {"target_id": target_id, "status": "scope_deferred"}
+            for target_id in scan_scope.get(
+                "scope_deferred_critical_sink_ids", []
+            )
+        ],
         "unanalysed_work_ids": sorted(
             task.work_id
             for task in final.tasks

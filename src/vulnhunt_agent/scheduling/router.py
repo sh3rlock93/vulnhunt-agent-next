@@ -75,18 +75,23 @@ def build_routing_plan(
     deterministic fallback rather than disappearing from coverage.
     """
     language = str((analysis or {}).get("language", ""))
+    configured_scope = (analysis or {}).get("scan_scope") or {}
     if language != "c":
         return _fallback_language_plan(
             run_id=run_id,
             source_snapshot=source_snapshot,
             selected_files=selected_files,
             enabled_hunters=enabled_hunters,
+            scan_scope=configured_scope,
         )
 
     graph = CAnalysisGraph.model_validate((analysis or {}).get("graph") or {})
     coverage = CoveragePlan.model_validate(
         (analysis or {}).get("coverage_plan") or {}
     )
+    scan_scope = configured_scope
+    scan_scope_digest = str(scan_scope.get("digest") or "") or None
+    bounded_scope = scan_scope.get("mode", "full") != "full"
     signals = {item.signal_id: item for item in graph.signals}
     active_critical_ids = _active_critical_ids(analysis, graph)
     incremental = (analysis or {}).get("incremental_scope") or {}
@@ -98,7 +103,11 @@ def build_routing_plan(
         for signal_id in active_critical_ids
         if signal_id in signals
     ]
-    selected = set(selected_files)
+    selected = (
+        set(scan_scope.get("selected_files", ()))
+        if bounded_scope
+        else set(selected_files)
+    )
     forced_files = tuple(sorted({
         signal.path for signal in critical if signal.path not in selected
     }))
@@ -186,9 +195,11 @@ def build_routing_plan(
                         target_node_ids=batch.target_node_ids,
                         target_signal_ids=batch.target_signal_ids,
                         changed_line_ranges=local_changed_ranges,
+                        scan_scope_digest=scan_scope_digest,
                     ),
                     run_id=run_id,
                     source_snapshot=source_snapshot,
+                    scan_scope_digest=scan_scope_digest,
                     planning_policy=ROUTER_POLICY,
                     slice_ids=slice_ids,
                     target_node_ids=batch.target_node_ids,
@@ -218,6 +229,11 @@ def build_routing_plan(
         covered_critical_sink_ids=tuple(sorted(covered)),
         uncovered_critical_sink_ids=tuple(sorted(detected - covered)),
         forced_files=forced_files,
+        scan_scope_digest=scan_scope_digest,
+        scope_deferred_critical_sink_ids=tuple(
+            scan_scope.get("scope_deferred_critical_sink_ids", ())
+        ),
+        repository_complete=bool(scan_scope.get("repository_complete", True)),
     )
 
 
@@ -226,6 +242,10 @@ def _active_critical_ids(
     graph: CAnalysisGraph,
 ) -> tuple[str, ...]:
     incremental = (analysis or {}).get("incremental_scope") or {}
+    scan_scope = (analysis or {}).get("scan_scope") or {}
+    if scan_scope.get("mode", "full") != "full":
+        active = set(scan_scope.get("in_scope_critical_sink_ids", []))
+        return tuple(sorted(active & set(graph.critical_sink_ids)))
     if incremental.get("mode") == "incremental":
         active = set(incremental.get("critical_sink_ids", []))
         return tuple(sorted(active & set(graph.critical_sink_ids)))
@@ -386,7 +406,9 @@ def _fallback_language_plan(
     source_snapshot: str,
     selected_files: list[str],
     enabled_hunters: list[str],
+    scan_scope: dict,
 ) -> HunterRoutingPlan:
+    scan_scope_digest = str(scan_scope.get("digest") or "") or None
     hunter = next(iter(enabled_hunters), "")
     items = []
     if hunter:
@@ -398,9 +420,11 @@ def _fallback_language_plan(
                     slice_ids=(),
                     files=(path,),
                     hunter=hunter,
+                    scan_scope_digest=scan_scope_digest,
                 ),
                 run_id=run_id,
                 source_snapshot=source_snapshot,
+                scan_scope_digest=scan_scope_digest,
                 planning_policy=ROUTER_POLICY,
                 seed_file=path,
                 files=(path,),
@@ -411,4 +435,6 @@ def _fallback_language_plan(
         policy_version=ROUTER_POLICY,
         legacy_sessions=len(set(selected_files)) * len(set(enabled_hunters)),
         work_items=tuple(items),
+        scan_scope_digest=scan_scope_digest,
+        repository_complete=bool(scan_scope.get("repository_complete", True)),
     )

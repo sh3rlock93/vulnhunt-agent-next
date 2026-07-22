@@ -24,9 +24,14 @@ async def run_file_selector(store: RunStore, bus: EventBus) -> None:
     scores = {r["path"]: int(r.get("score", 0)) for r in ranked.get("all", [])}
     plan = analysis.get("coverage_plan") or {}
     incremental = analysis.get("incremental_scope") or {}
+    scan_scope = analysis.get("scan_scope") or {}
     incremental_mode = incremental.get("mode") == "incremental"
+    bounded_mode = scan_scope.get("mode", "full") != "full"
     full_planned = set(plan.get("selected_files", []))
     planned = (
+        set(scan_scope.get("selected_files", []))
+        if bounded_mode
+        else
         set(incremental.get("selected_files", []))
         if incremental_mode
         else full_planned
@@ -49,6 +54,8 @@ async def run_file_selector(store: RunStore, bus: EventBus) -> None:
         }
         if incremental_mode:
             item["in_incremental_scope"] = p in planned
+        if bounded_mode:
+            item["in_scan_scope"] = p in planned
         files.append(item)
     files.sort(key=lambda f: (
         -f["analysis_priority"], -f["score"], f["path"]
@@ -67,7 +74,10 @@ async def run_file_selector(store: RunStore, bus: EventBus) -> None:
             == incremental.get("head_commit")
         )
     )
-    if prev_selected is not None and same_incremental_scope:
+    if bounded_mode:
+        valid = {f["path"] for f in files}
+        selected = [p for p in sorted(planned) if p in valid]
+    elif prev_selected is not None and same_incremental_scope:
         valid = {f["path"] for f in files}
         selected = [p for p in prev_selected if p in valid]
     elif incremental_mode:
@@ -87,6 +97,8 @@ async def run_file_selector(store: RunStore, bus: EventBus) -> None:
         and not plan.get("uncovered_sink_ids"),
         "coverage_selected": sorted(planned),
     }
+    if bounded_mode:
+        result["scan_scope"] = scan_scope
     if incremental_mode:
         result.update({
             "full_coverage_selected": sorted(full_planned),
