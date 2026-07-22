@@ -15,7 +15,7 @@ from .models import (
 )
 from .risk_chains import is_allocator_name
 
-CAPACITY_FACT_POLICY = "c-capacity-fact-v1"
+CAPACITY_FACT_POLICY = "c-capacity-fact-v2"
 MAX_ALIAS_HOPS = 8
 MAX_CAPACITY_TRANSFORMS = 12
 
@@ -84,7 +84,7 @@ def extract_capacity_facts(
         left, right = _assignment_parts(node)
         if left is None or right is None:
             continue
-        subject = _declared_or_simple_identifier(left, source)
+        subject = _assignment_subject(left, source)
         if not subject:
             continue
         line = node.start_point[0] + 1
@@ -182,6 +182,17 @@ def extract_capacity_facts(
             ))
             continue
 
+        if (
+            _contains_subscript(left)
+            and not expression.lstrip().startswith("&")
+            and _alias_root(expression) not in pointer_variables
+            and _alias_root(expression) not in pointers
+        ):
+            # An array-element assignment is a pointer alias only when the
+            # assigned value is already known to be pointer-shaped.  This
+            # preserves rows[i] = cursor without turning table[i] = value into
+            # a new pointer state for the whole table.
+            continue
         if subject not in pointer_variables and subject not in pointers:
             continue
         alias_root = _alias_root(expression)
@@ -323,6 +334,13 @@ def build_local_capacity_summary(
     """Summarize only locally established parameter and return behavior."""
     parameters, pointer_parameters = _function_parameters(declarator, source)
     pointer_set = set(pointer_parameters)
+    pointer_aliases = {
+        fact.subject: fact.base
+        for fact in facts
+        if fact.kind is CapacityFactKind.ALIAS
+        and fact.base in pointer_set
+        and fact.subject != fact.base
+    }
     writes: dict[str, set[str]] = {}
     for fact in facts:
         if fact.kind is not CapacityFactKind.WRITE:
@@ -354,7 +372,7 @@ def build_local_capacity_summary(
     else:
         return_kind = CapacityReturnKind.UNKNOWN
 
-    identity = "\0".join(("c-capacity-summary-v1", node_id))
+    identity = "\0".join(("c-capacity-summary-v2", node_id))
     return FunctionCapacitySummary(
         summary_id="capacity_summary_" + hashlib.sha256(identity.encode()).hexdigest()[:20],
         node_id=node_id,
@@ -362,6 +380,7 @@ def build_local_capacity_summary(
         function=function,
         parameters=parameters,
         pointer_parameters=pointer_parameters,
+        pointer_aliases=dict(sorted(pointer_aliases.items())),
         written_parameters=tuple(sorted(writes)),
         write_extents={
             parameter: tuple(sorted(extents))
@@ -444,13 +463,21 @@ def _alias_expression(
     pointers: dict[str, _PointerState],
 ) -> _PointerState | None:
     expression = _strip_casts(expression)
-    address = re.fullmatch(r"&\s*([A-Za-z_]\w*)\s*\[(.+)]", expression)
+    address = re.fullmatch(r"&\s*([A-Za-z_]\w*)(?:\s*\[.+])+", expression)
     if address is not None:
-        name, delta = address.groups()
+        name, delta = address.group(1), "0"
     else:
-        addition = re.fullmatch(r"([A-Za-z_]\w*)\s*\+\s*(.+)", expression)
+        addition = re.fullmatch(
+            r"([A-Za-z_]\w*)(?:\s*\[[^]]+])*\s*\+\s*(.+)",
+            expression,
+        )
         if addition is not None:
             name, delta = addition.groups()
+        elif (subscript := re.fullmatch(
+            r"([A-Za-z_]\w*)(?:\s*\[[^]]+])+",
+            expression,
+        )) is not None:
+            name, delta = subscript.group(1), "0"
         elif _IDENTIFIER.fullmatch(expression):
             name, delta = expression, "0"
         else:
@@ -485,13 +512,11 @@ def _write_shape(node: Node, source: bytes) -> tuple[str, str, str] | None:
             left, "subscript_expression"
         )
         if subscript is not None:
-            argument = subscript.child_by_field_name("argument")
             index = subscript.child_by_field_name("index")
-            if argument is not None and index is not None:
-                subject = _strip_casts(_compact(_text(argument, source)))
-                if _IDENTIFIER.fullmatch(subject):
-                    index_text = _compact(_text(index, source))
-                    return subject, _add(index_text, "1"), _compact(_text(node, source))
+            subject = _root_identifier(_text(subscript, source))
+            if subject and index is not None:
+                index_text = _compact(_text(index, source))
+                return subject, _add(index_text, "1"), _compact(_text(node, source))
         pointer = left if left.type == "pointer_expression" else None
         if pointer is not None:
             subject = next(
@@ -564,15 +589,30 @@ def _fact(
     )
 
 
-def _declared_or_simple_identifier(node: Node, source: bytes) -> str:
+def _assignment_subject(node: Node, source: bytes) -> str:
     text = _compact(_text(node, source))
     if _IDENTIFIER.fullmatch(text):
         return text
+    if node.type == "subscript_expression" or _first_node(
+        node, "subscript_expression"
+    ) is not None:
+        return _root_identifier(text)
     identifiers = [
         _text(item, source) for item in (node, *_walk(node))
         if item.type == "identifier"
     ]
     return identifiers[-1] if identifiers else ""
+
+
+def _root_identifier(expression: str) -> str:
+    match = re.search(r"\b([A-Za-z_]\w*)\b", _strip_casts(expression))
+    return match.group(1) if match is not None else ""
+
+
+def _contains_subscript(node: Node) -> bool:
+    return node.type == "subscript_expression" or _first_node(
+        node, "subscript_expression"
+    ) is not None
 
 
 def _call_name(node: Node | None, source: bytes) -> str:

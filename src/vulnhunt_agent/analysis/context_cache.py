@@ -648,6 +648,8 @@ def _fit_packet(packet: dict) -> dict:
     placeholder = "sha256:" + "0" * 64
     truncation = packet["truncation"]
     truncation.setdefault("removed_source_excerpts", 0)
+    truncation.setdefault("compacted_capacity_risk_chains", 0)
+    truncation.setdefault("removed_selected_range_files", 0)
     truncation.setdefault("minimum_evidence_excerpt_bytes", MIN_EVIDENCE_EXCERPT_BYTES)
     truncation.setdefault("evidence_excerpt_guaranteed", False)
     focus_ids = set(packet.get("focus_chain_ids") or ())
@@ -713,6 +715,59 @@ def _fit_packet(packet: dict) -> dict:
             truncation["trimmed"].sort(key=lambda item: (item["path"], item["reason"]))
         return True
 
+    def compact_capacity_chain() -> bool:
+        chains = packet.get("capacity_risk_chains") or []
+        for index in range(len(chains) - 1, -1, -1):
+            compact = _compact_capacity_risk_chain(chains[index])
+            if compact == chains[index]:
+                continue
+            chains[index] = compact
+            mark_fit()
+            truncation["compacted_capacity_risk_chains"] += 1
+            return True
+        return False
+
+    def compact_selected_ranges() -> bool:
+        selected_ranges = packet.get("selected_ranges") or {}
+        non_focus = sorted(
+            (path for path in selected_ranges if path not in focus_paths),
+            reverse=True,
+        )
+        if non_focus:
+            selected_ranges.pop(non_focus[0])
+            truncation["removed_selected_range_files"] += 1
+            mark_fit()
+            return True
+        for path in sorted(selected_ranges, reverse=True):
+            ranges = selected_ranges[path]
+            if len(ranges) <= 32:
+                continue
+            selected_ranges[path] = ranges[:32]
+            truncation["trimmed_selected_ranges"] = (
+                int(truncation.get("trimmed_selected_ranges", 0))
+                + len(ranges) - 32
+            )
+            mark_fit()
+            return True
+        return False
+
+    def compact_truncation_records() -> bool:
+        for field in ("omitted", "trimmed"):
+            records = truncation.get(field) or []
+            if len(records) <= 32:
+                continue
+            total_field = f"{field}_total"
+            previous_total = truncation.get(total_field)
+            truncation[total_field] = (
+                int(previous_total) + len(records) - 32
+                if previous_total is not None
+                else len(records)
+            )
+            del records[32:]
+            mark_fit()
+            return True
+        return False
+
     while encoded_size() > MAX_CONTEXT_BYTES:
         slices = packet.get("slices") or []
         if slices:
@@ -751,6 +806,12 @@ def _fit_packet(packet: dict) -> dict:
             constraints.pop(non_focus_constraint)
             mark_fit()
             truncation["removed_constraints"] += 1
+            continue
+        if compact_capacity_chain():
+            continue
+        if compact_selected_ranges():
+            continue
+        if compact_truncation_records():
             continue
         content_entry = next(
             (
@@ -812,6 +873,50 @@ def _fit_packet(packet: dict) -> dict:
         had_source_evidence and any(item.get("content") for item in excerpts)
     )
     return packet
+
+
+def _compact_capacity_risk_chain(chain: dict) -> dict:
+    """Keep semantic capacity evidence while dropping opaque identifier fan-out."""
+    evidence_lines = {
+        str(path): [int(line) for line in lines[:32]]
+        for path, lines in list(sorted(
+            (chain.get("evidence_lines") or {}).items()
+        ))[:16]
+    }
+    return {
+        "chain_id": chain.get("chain_id", ""),
+        "policy_version": chain.get("policy_version", ""),
+        "root_cause_group": chain.get("root_cause_group", ""),
+        "root_node_id": chain.get("root_node_id", ""),
+        "root_path": chain.get("root_path", ""),
+        "root_function": chain.get("root_function", ""),
+        "base": chain.get("base", ""),
+        "element_count": chain.get("element_count", ""),
+        "element_size": chain.get("element_size", ""),
+        "paths": list(chain.get("paths") or ())[:16],
+        "guard_state": chain.get("guard_state", "unknown"),
+        "missing_elements": list(chain.get("missing_elements") or ()),
+        "evidence_lines": evidence_lines,
+        "priority_class": chain.get("priority_class", ""),
+        "score": int(chain.get("score", 0)),
+        "confidence": chain.get("confidence", ""),
+        "entrypoint_reachable": bool(chain.get("entrypoint_reachable")),
+        "call_count": int(chain.get("call_count", len(chain.get("call_ids") or ()))),
+        "summary_count": int(
+            chain.get("summary_count", len(chain.get("summary_ids") or ()))
+        ),
+        "pointer_advance_count": int(chain.get(
+            "pointer_advance_count",
+            len(chain.get("pointer_advance_fact_ids") or ()),
+        )),
+        "write_count": int(
+            chain.get("write_count", len(chain.get("write_fact_ids") or ()))
+        ),
+        "guard_count": int(
+            chain.get("guard_count", len(chain.get("guard_fact_ids") or ()))
+        ),
+        "rationale": chain.get("rationale", ""),
+    }
 
 
 def _focus_evidence_paths(packet: dict) -> set[str]:

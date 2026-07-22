@@ -19,6 +19,8 @@ def _truncation() -> dict:
         "removed_slices": 0,
         "removed_risk_chains": 0,
         "removed_capacity_risk_chains": 0,
+        "compacted_capacity_risk_chains": 0,
+        "removed_selected_range_files": 0,
         "removed_related_nodes": 0,
         "removed_constraints": 0,
     }
@@ -114,3 +116,138 @@ def test_packet_fit_falls_back_to_nonempty_target_without_focus_chain() -> None:
     assert fitted["source_excerpts"][0]["content"] == "int main(void) { return 0; }"
     assert fitted["risk_chains"][0]["chain_id"] == "risk_cccccccccccccccccccc"
     assert fitted["truncation"]["evidence_excerpt_guaranteed"] is True
+
+
+def test_packet_fit_compacts_one_large_focus_capacity_chain_before_source() -> None:
+    focus_id = "capacity_risk_" + "d" * 20
+    packet = {
+        "focus_chain_ids": [focus_id],
+        "risk_chains": [],
+        "capacity_risk_chains": [{
+            "chain_id": focus_id,
+            "policy_version": "c-capacity-risk-chain-v3",
+            "root_cause_group": "capacity_group_" + "e" * 20,
+            "root_path": "decode.c",
+            "root_function": "decode",
+            "base": "output",
+            "element_count": "capacity",
+            "element_size": "1",
+            "paths": ["decode.c", "write.c"],
+            "fact_ids": [f"capacity_{index:020x}" for index in range(2_000)],
+            "call_ids": [f"capacity_call_{index:020x}" for index in range(50)],
+            "summary_ids": [f"capacity_summary_{index:020x}" for index in range(50)],
+            "pointer_advance_fact_ids": ["capacity_" + "1" * 20],
+            "write_fact_ids": ["capacity_" + "2" * 20],
+            "guard_fact_ids": [],
+            "guard_state": "absent",
+            "missing_elements": ["source"],
+            "evidence_lines": {"decode.c": [10], "write.c": [20]},
+            "priority_class": "complete_unchecked_capacity_path",
+            "score": 100,
+            "confidence": "high",
+            "entrypoint_reachable": True,
+            "rationale": "complete cross-file capacity path",
+        }],
+        "slices": [],
+        "related_nodes": [],
+        "constraint_facts": [],
+        "source_excerpts": [{
+            "path": "decode.c",
+            "kind": "target",
+            "truncated": False,
+            "content": "F" * 4_000,
+        }],
+        "truncation": _truncation(),
+    }
+
+    fitted = _fit_packet(packet)
+    encoded = (json.dumps(
+        {**fitted, "packet_digest": "sha256:" + "0" * 64},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ) + "\n").encode()
+    chain = fitted["capacity_risk_chains"][0]
+
+    assert len(encoded) <= MAX_CONTEXT_BYTES
+    assert chain["chain_id"] == focus_id
+    assert chain["paths"] == ["decode.c", "write.c"]
+    assert chain["evidence_lines"] == {"decode.c": [10], "write.c": [20]}
+    assert chain["write_count"] == 1
+    assert "fact_ids" not in chain
+    assert len(fitted["source_excerpts"][0]["content"]) == 4_000
+    assert fitted["truncation"]["compacted_capacity_risk_chains"] == 1
+
+
+def test_packet_fit_removes_non_focus_selected_range_fanout() -> None:
+    focus_id = "risk_" + "f" * 20
+    packet = {
+        "focus_chain_ids": [focus_id],
+        "risk_chains": [{
+            "chain_id": focus_id,
+            "path": "focus.c",
+            "rationale": "focused risk chain",
+        }],
+        "capacity_risk_chains": [],
+        "slices": [],
+        "related_nodes": [],
+        "constraint_facts": [],
+        "selected_ranges": {
+            "focus.c": [[line, line] for line in range(1, 80)],
+            **{
+                f"support_{index}.c": [
+                    [line, line] for line in range(1, 80)
+                ]
+                for index in range(40)
+            },
+        },
+        "source_excerpts": [{
+            "path": "focus.c",
+            "kind": "target",
+            "truncated": False,
+            "content": "F" * 4_000,
+        }],
+        "truncation": _truncation(),
+    }
+
+    fitted = _fit_packet(packet)
+    encoded = (json.dumps(
+        {**fitted, "packet_digest": "sha256:" + "0" * 64},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ) + "\n").encode()
+
+    assert len(encoded) <= MAX_CONTEXT_BYTES
+    assert "focus.c" in fitted["selected_ranges"]
+    assert len(fitted["selected_ranges"]) < 41
+    assert len(fitted["source_excerpts"][0]["content"]) == 4_000
+    assert fitted["truncation"]["removed_selected_range_files"] > 0
+
+
+def test_packet_fit_caps_oversized_focus_selected_ranges() -> None:
+    focus_id = "risk_" + "1" * 20
+    packet = {
+        "focus_chain_ids": [focus_id],
+        "risk_chains": [{"chain_id": focus_id, "path": "focus.c"}],
+        "capacity_risk_chains": [],
+        "slices": [],
+        "related_nodes": [],
+        "constraint_facts": [],
+        "selected_ranges": {
+            "focus.c": [[line, line] for line in range(1, 4_000)],
+        },
+        "source_excerpts": [{
+            "path": "focus.c",
+            "kind": "target",
+            "truncated": False,
+            "content": "F" * 4_000,
+        }],
+        "truncation": _truncation(),
+    }
+
+    fitted = _fit_packet(packet)
+
+    assert len(fitted["selected_ranges"]["focus.c"]) == 32
+    assert len(fitted["source_excerpts"][0]["content"]) == 4_000
+    assert fitted["truncation"]["trimmed_selected_ranges"] == 3_967

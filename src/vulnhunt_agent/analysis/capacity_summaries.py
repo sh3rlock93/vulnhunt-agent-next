@@ -9,7 +9,7 @@ from .models import (
     FunctionCapacitySummary,
 )
 
-CAPACITY_SUMMARY_POLICY = "c-capacity-summary-v1"
+CAPACITY_SUMMARY_POLICY = "c-capacity-summary-v2"
 MAX_CAPACITY_CALL_DEPTH = 5
 
 
@@ -43,7 +43,10 @@ def propagate_capacity_summaries(
             propagated = set(caller.propagated_call_ids)
             for parameter in callee.written_parameters:
                 actual = bindings.get(parameter, "")
-                caller_parameter = _argument_root(actual)
+                caller_parameter = _resolve_pointer_alias(
+                    _argument_root(actual),
+                    caller.pointer_aliases,
+                )
                 if caller_parameter not in caller_pointer_set:
                     continue
                 written.add(caller_parameter)
@@ -71,6 +74,10 @@ def propagate_capacity_summaries(
                 if callee.return_kind is CapacityReturnKind.PASS_THROUGH:
                     for parameter in callee.pass_through_parameters:
                         caller_parameter = _argument_root(bindings.get(parameter, ""))
+                        caller_parameter = _resolve_pointer_alias(
+                            caller_parameter,
+                            caller.pointer_aliases,
+                        )
                         if caller_parameter in caller_pointer_set:
                             pass_through.add(caller_parameter)
 
@@ -107,3 +114,11 @@ def _substitute(expression: str, bindings: dict[str, str]) -> str:
     for parameter, actual in sorted(bindings.items(), key=lambda item: -len(item[0])):
         result = re.sub(rf"\b{re.escape(parameter)}\b", f"({actual})", result)
     return " ".join(result.split())[:500]
+
+
+def _resolve_pointer_alias(subject: str, aliases: dict[str, str]) -> str:
+    seen = set()
+    while subject in aliases and subject not in seen:
+        seen.add(subject)
+        subject = aliases[subject]
+    return subject
