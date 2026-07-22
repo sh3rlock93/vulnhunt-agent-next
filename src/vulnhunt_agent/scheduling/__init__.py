@@ -3,6 +3,7 @@
 from .budget import (
     AdmissionDecision,
     AdmissionEvent,
+    AdmissionRankingRecord,
     BudgetAllocation,
     BudgetController,
     BudgetedLLMClient,
@@ -26,6 +27,7 @@ from .slices import (
 __all__ = [
     "AdmissionDecision",
     "AdmissionEvent",
+    "AdmissionRankingRecord",
     "BudgetAllocation",
     "BudgetController",
     "BudgetedLLMClient",
