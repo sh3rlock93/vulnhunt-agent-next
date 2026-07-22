@@ -96,7 +96,7 @@ def test_one_capacity_root_is_one_bounds_first_admission_unit() -> None:
 
     admitted = next(item for item in items if item.work_id in first.admitted_work_ids)
     assert first == second
-    assert first.policy_version == "c-budget-v5"
+    assert first.policy_version == "c-budget-v6"
     assert admitted.hunter == "c-bounds-integers"
     assert admitted.seed_file == "decode.c"
     assert first.chain_critical_slots == 1

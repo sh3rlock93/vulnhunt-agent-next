@@ -111,15 +111,47 @@ def test_twelve_session_dense_plan_admits_distinct_critical_seeds() -> None:
     }
     seeds = {item.seed_file for item in admitted.values() if item.required}
     assert first == second
-    assert first.policy_version == "c-budget-v5"
+    assert first.policy_version == "c-budget-v6"
     assert len(first.admitted_work_ids) == 11
     assert first.retry_slots == 1
-    assert first.chain_critical_slots == 2
+    assert first.chain_critical_slots == 6
+    assert first.chain_revisit_slots == 4
     assert first.seed_diverse_slots == 3
     assert first.borrowed_slots > 0
     assert len(seeds) >= 3
     assert sum(item.seed_file.endswith("xmlparse.c") for item in admitted.values()) < 11
     assert all(item.seed_family and item.coverage_group for item in first.decisions)
+
+
+def test_seed_capped_critical_work_is_revisited_after_diversity() -> None:
+    dense = tuple(_work(index, "src/dense.c") for index in range(3))
+    diverse = (
+        _work(10, "src/other-a.c"),
+        _work(11, "src/other-b.c"),
+    )
+    allocation = allocate_work_items(
+        (*dense, *diverse),
+        BudgetPolicy(max_hunter_sessions=5, max_retries_per_work_item=0),
+        risk_chains=tuple(
+            _chain(item, index + 1) for index, item in enumerate(dense)
+        ),
+        native_full_scan=True,
+    )
+
+    assert allocation.admitted_work_ids == tuple(
+        decision.work_id for decision in allocation.decisions
+    )
+    assert [decision.quota for decision in allocation.decisions] == [
+        "chain_critical",
+        "chain_critical",
+        "seed_diverse",
+        "seed_diverse",
+        "chain_critical_revisit",
+    ]
+    assert allocation.chain_critical_slots == 3
+    assert allocation.chain_revisit_slots == 1
+    assert allocation.decisions[-1].cap_exception is True
+    assert allocation.deferred == {}
 
 
 def test_unused_retry_and_class_quotas_are_borrowed_deterministically() -> None:
