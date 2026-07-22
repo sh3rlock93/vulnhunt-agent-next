@@ -145,7 +145,27 @@ def _prepare(store: RunStore, d: dict) -> None:
 
 
 def _hunt(store: RunStore, d: dict) -> None:
-    pass
+    if d.get("outcome") == "invalid_execution":
+        preflight = d.get("provider_preflight") or {}
+        failed = next(
+            (
+                item
+                for item in preflight.get("providers", [])
+                if not item.get("ready")
+            ),
+            {},
+        )
+        st.error(
+            "Analysis did not run: provider preflight failed "
+            f"(`{failed.get('code', 'unknown')}`)."
+        )
+        if failed.get("remediation"):
+            st.info(failed["remediation"])
+        if failed.get("diagnostic_fingerprint"):
+            st.caption(
+                "Redacted diagnostic fingerprint: "
+                f"`{failed['diagnostic_fingerprint']}`"
+            )
 
 
 def _verify(store: RunStore, d: dict) -> None:

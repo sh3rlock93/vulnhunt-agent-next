@@ -20,6 +20,10 @@ from ...agents.durable_queue import DurableHuntQueueStore
 from ...agents.queue import HuntTask
 from ...core.events import EventBus
 from ...core.llm import LLMClient
+from ...core.provider_preflight import (
+    failed_client_initialization,
+    preflight_model_client,
+)
 from ...core.run_store import RunStore
 from ...core.v2_run import advance_run, assert_source_snapshot_current
 from ...domain.schemas import BudgetPolicy, BudgetUsage
@@ -167,6 +171,40 @@ async def run_hunt(store: RunStore, bus: EventBus) -> None:
         ],
     }
 
+    hunter_client = None
+    reviewer_client = None
+    if work_items:
+        hunter_client, reviewer_client, preflight = await _initialize_and_preflight(
+            cfg,
+            bus,
+        )
+    else:
+        preflight = {
+            "policy_version": "provider-preflight-v1",
+            "status": "skipped_no_work",
+            "run_outcome": "not_applicable",
+            "billable_model_calls": 0,
+            "providers": [],
+        }
+    store.save_step("provider_preflight", preflight)
+    hunt_plan["provider_preflight"] = preflight
+    if preflight["status"] == "failed":
+        hunt_plan["budget_allocation"] = {
+            "status": "not_started",
+            "admitted_sessions": 0,
+            "deferred_sessions": len(work_items),
+        }
+        store.save_step("hunt_plan", hunt_plan)
+        _save_invalid_preflight_summary(store, bus, preflight)
+        _fail_run_for_preflight(store, preflight)
+        failed = next(
+            item for item in preflight["providers"] if not item["ready"]
+        )
+        raise RuntimeError(
+            "provider preflight failed before Hunter admission "
+            f"[{failed['code']}]: {failed['remediation']}"
+        )
+
     qstore = DurableHuntQueueStore(
         store.dir / "hunters",
         store.dir / "state.db",
@@ -268,12 +306,12 @@ async def run_hunt(store: RunStore, bus: EventBus) -> None:
         )
         return
 
-    hunter_client = LLMClient(model_id=cfg["model_id"])
+    if hunter_client is None or reviewer_client is None:
+        raise RuntimeError("provider clients missing after successful preflight")
     budgeted_hunter_client = BudgetedLLMClient(
         hunter_client,
         budget_controller,
     )
-    reviewer_client = _maybe_other_client(cfg, "model_id_reviewer", hunter_client, bus)
     bus.emit(
         "model_transport",
         scope="hunter",
@@ -503,6 +541,145 @@ def _maybe_other_client(cfg: dict, key: str, fallback: LLMClient, bus: EventBus)
         bus.emit("model_picked", scope=key, model_id=other)
         return LLMClient(model_id=other)
     return fallback
+
+
+async def _preflight_clients(
+    scoped_clients: tuple[tuple[str, object], ...],
+    *,
+    model_probe: bool,
+) -> dict:
+    by_identity: dict[int, dict] = {}
+    for scope, client in scoped_clients:
+        identity = id(client)
+        if identity not in by_identity:
+            result = await preflight_model_client(client, model_probe=model_probe)
+            by_identity[identity] = {
+                **result.model_dump(mode="json"),
+                "scopes": [scope],
+            }
+        else:
+            by_identity[identity]["scopes"].append(scope)
+    providers = list(by_identity.values())
+    ready = all(item["ready"] for item in providers)
+    return {
+        "policy_version": "provider-preflight-v1",
+        "status": "ready" if ready else "failed",
+        "run_outcome": "ready" if ready else "invalid_execution",
+        "billable_model_calls": sum(
+            item["billable_model_calls"] for item in providers
+        ),
+        "providers": providers,
+    }
+
+
+async def _initialize_and_preflight(
+    cfg: dict,
+    bus: EventBus,
+) -> tuple[object | None, object | None, dict]:
+    hunter_model = str(cfg["model_id"])
+    reviewer_model = str(cfg.get("model_id_reviewer") or hunter_model)
+    try:
+        hunter_client = LLMClient(model_id=hunter_model)
+    except Exception as exc:
+        result = failed_client_initialization(
+            model_id=hunter_model,
+            transport="uninitialized",
+            error=exc,
+        )
+        return None, None, _single_preflight_failure(result, ("hunter",))
+    try:
+        reviewer_client = _maybe_other_client(
+            cfg,
+            "model_id_reviewer",
+            hunter_client,
+            bus,
+        )
+    except Exception as exc:
+        result = failed_client_initialization(
+            model_id=reviewer_model,
+            transport="uninitialized",
+            error=exc,
+        )
+        return hunter_client, None, _single_preflight_failure(result, ("reviewer",))
+    preflight = await _preflight_clients(
+        (
+            ("hunter", hunter_client),
+            ("reviewer", reviewer_client),
+        ),
+        model_probe=bool(cfg.get("provider_preflight_model_probe", False)),
+    )
+    return hunter_client, reviewer_client, preflight
+
+
+def _single_preflight_failure(result, scopes: tuple[str, ...]) -> dict:
+    provider = {
+        **result.model_dump(mode="json"),
+        "scopes": list(scopes),
+    }
+    return {
+        "policy_version": "provider-preflight-v1",
+        "status": "failed",
+        "run_outcome": "invalid_execution",
+        "billable_model_calls": result.billable_model_calls,
+        "providers": [provider],
+    }
+
+
+def _save_invalid_preflight_summary(
+    store: RunStore,
+    bus: EventBus,
+    preflight: dict,
+) -> None:
+    summary = {
+        "status": "invalid_execution",
+        "outcome": "invalid_execution",
+        "reason": "provider_preflight_failed",
+        "provider_preflight": preflight,
+        "total": 0,
+        "done": 0,
+        "failed": 0,
+        "budget_deferred": 0,
+        "pending": 0,
+        "total_findings": None,
+        "zero_findings": False,
+        "usage": {
+            "sessions": 0,
+            "calls": preflight["billable_model_calls"],
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
+            "tool_calls": 0,
+            "wall_time_ms": 0,
+        },
+        "tasks": [],
+    }
+    store.save_step("hunt", summary)
+    bus.emit(
+        "provider_preflight_failed",
+        outcome="invalid_execution",
+        providers=preflight["providers"],
+    )
+
+
+def _fail_run_for_preflight(store: RunStore, preflight: dict) -> None:
+    with SqliteRepository(store.dir / "state.db") as repository:
+        run = repository.get_run(store.dir.name)
+        if run is None or run.state in {
+            RunState.FAILED,
+            RunState.CANCELLED,
+            RunState.COMPLETED,
+        }:
+            return
+        code = next(
+            item["code"] for item in preflight["providers"] if not item["ready"]
+        )
+        repository.transition_run(
+            run.run_id,
+            RunState.FAILED,
+            idempotency_key="pipeline:provider-preflight-failed",
+            reason=f"Provider preflight failed: {code}",
+        )
 
 
 async def _heartbeat_lease(

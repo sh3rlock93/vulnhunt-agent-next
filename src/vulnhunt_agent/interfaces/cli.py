@@ -54,6 +54,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     scan.add_argument("--custom-image", default="")
     scan.add_argument("--max-hunter-sessions", type=int, default=100)
+    scan.add_argument(
+        "--provider-model-probe",
+        action="store_true",
+        help="perform one explicit billable model call after local provider preflight",
+    )
 
     status = subparsers.add_parser("status", help="show one run and task counts")
     status.add_argument("run_id")
@@ -221,6 +226,7 @@ async def _run_scan(args) -> int:
         "budget_max_output_tokens": 200_000,
         "budget_max_wall_clock_minutes": 60,
         "budget_max_retries_per_work_item": 1,
+        "provider_preflight_model_probe": args.provider_model_probe,
     })
     bus = EventBus(store.dir / "events.jsonl")
     for step in (

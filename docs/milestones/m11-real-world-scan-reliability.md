@@ -1,6 +1,6 @@
 # M11 — Reliable bounded scans and candidate falsification on live repositories
 
-Status: PR 1 implemented and verified; PR 2 pending
+Status: PR 1–2 implemented and verified; PR 3 pending
 
 ## Goal
 
@@ -148,13 +148,13 @@ Expected changes:
 
 ### PR 2 acceptance gates
 
-- [ ] A read-only Codex state database is reported as `state_store_read_only`.
-- [ ] App-server initialization denial is not mislabelled as authentication.
-- [ ] No Hunter task is admitted after a terminal preflight failure.
-- [ ] A zero-call failed run cannot display a zero-finding success result.
-- [ ] API, Codex subscription, and fake test providers share one result contract.
-- [ ] Diagnostics are redacted and contain a concrete remediation.
-- [ ] Existing M10 protocol-repair and retry tests remain green.
+- [x] A read-only Codex state database is reported as `state_store_read_only`.
+- [x] App-server initialization denial is not mislabelled as authentication.
+- [x] No Hunter task is admitted after a terminal preflight failure.
+- [x] A zero-call failed run cannot display a zero-finding success result.
+- [x] API, Codex subscription, and fake test providers share one result contract.
+- [x] Diagnostics are redacted and contain a concrete remediation.
+- [x] Existing M10 protocol-repair and retry tests remain green.
 
 ## PR 3 — First-class bounded scan scope
 

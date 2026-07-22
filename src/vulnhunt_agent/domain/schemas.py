@@ -550,6 +550,59 @@ class BudgetUsage(DomainModel):
     created_at: datetime = Field(default_factory=utc_now)
 
 
+class ProviderPreflightCode(StrEnum):
+    READY = "ready"
+    STATE_STORE_READ_ONLY = "state_store_read_only"
+    APP_SERVER_INIT_DENIED = "app_server_init_denied"
+    AUTHENTICATION_REQUIRED = "authentication_required"
+    MODEL_UNAVAILABLE = "model_unavailable"
+    UNSUPPORTED_CLI_FEATURE = "unsupported_cli_feature"
+    PROVIDER_PROTOCOL_ERROR = "provider_protocol_error"
+    PROVIDER_TRANSPORT_ERROR = "provider_transport_error"
+    PROVIDER_CONFIGURATION_ERROR = "provider_configuration_error"
+
+
+class ProviderPreflightCheck(DomainModel):
+    name: str = Field(min_length=1, max_length=100)
+    status: str = Field(pattern=r"^(passed|failed|skipped)$")
+    detail: str = Field(default="", max_length=300)
+
+
+class ProviderPreflightResult(DomainModel):
+    """Redacted, provider-neutral readiness result produced before admission."""
+
+    policy_version: str = "provider-preflight-v1"
+    transport: str = Field(min_length=1, max_length=100)
+    model_id: str = Field(min_length=1, max_length=300)
+    ready: bool
+    code: ProviderPreflightCode
+    remediation: str = Field(default="", max_length=500)
+    diagnostic_fingerprint: str | None = Field(
+        default=None,
+        pattern=SHA256_PATTERN,
+    )
+    model_probe_requested: bool = False
+    billable_model_calls: int = Field(default=0, ge=0, le=1)
+    checks: tuple[ProviderPreflightCheck, ...] = ()
+
+    @model_validator(mode="after")
+    def validate_readiness(self) -> "ProviderPreflightResult":
+        if self.ready and self.code is not ProviderPreflightCode.READY:
+            raise ValueError("ready provider preflight must use the ready code")
+        if not self.ready:
+            if self.code is ProviderPreflightCode.READY:
+                raise ValueError("failed provider preflight requires a failure code")
+            if not self.remediation:
+                raise ValueError("failed provider preflight requires remediation")
+            if self.diagnostic_fingerprint is None:
+                raise ValueError("failed provider preflight requires a diagnostic fingerprint")
+        if self.model_probe_requested and self.billable_model_calls != 1:
+            raise ValueError("requested model probe must account for exactly one call")
+        if not self.model_probe_requested and self.billable_model_calls:
+            raise ValueError("local-only preflight cannot account for model calls")
+        return self
+
+
 class TaskLease(DomainModel):
     run_id: str = Field(min_length=1, max_length=200)
     task_type: str = Field(min_length=1, max_length=100)
