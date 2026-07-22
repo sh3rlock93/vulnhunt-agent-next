@@ -15,8 +15,10 @@ from ..indexer.tree_sitter_indexer import (
     c_function_regions,
 )
 from .constraints import extract_constraint_facts
+from .capacity import extract_capacity_facts
 from .models import (
     CAnalysisGraph,
+    CapacityFact,
     ConstraintFact,
     EdgeKind,
     GraphEdge,
@@ -121,6 +123,7 @@ class _Extracted:
     signals: tuple[SecuritySignal, ...]
     risk_chains: tuple[RiskChain, ...] = ()
     constraint_facts: tuple[ConstraintFact, ...] = ()
+    capacity_facts: tuple[CapacityFact, ...] = ()
 
 
 def build_c_analysis_graph(repo: Path, source_files: list[str]) -> CAnalysisGraph:
@@ -155,6 +158,10 @@ def build_c_analysis_graph(repo: Path, source_files: list[str]) -> CAnalysisGrap
     )
     constraint_facts = sorted(
         (fact for item in extracted for fact in item.constraint_facts),
+        key=lambda item: item.fact_id,
+    )
+    capacity_facts = sorted(
+        (fact for item in extracted for fact in item.capacity_facts),
         key=lambda item: item.fact_id,
     )
 
@@ -235,6 +242,7 @@ def build_c_analysis_graph(repo: Path, source_files: list[str]) -> CAnalysisGrap
         critical_sink_ids=tuple(sorted(critical_sinks)),
         risk_chains=tuple(risk_chains),
         constraint_facts=tuple(constraint_facts),
+        capacity_facts=tuple(capacity_facts),
         unresolved_calls=tuple(sorted(
             unresolved,
             key=lambda item: (item.path, item.line, item.source, item.callee),
@@ -368,12 +376,21 @@ def _extract_c_function(
         source=function_source,
         start_line=line,
     )
+    capacity_facts = extract_capacity_facts(
+        path=relative,
+        node_id=node_id,
+        function=name,
+        source=source,
+        function_node=region.container,
+        body_nodes=region.body_nodes,
+    )
     return _Extracted(
         node=node,
         calls=tuple(call_sites),
         signals=unique_signals,
         risk_chains=risk_chains,
         constraint_facts=constraint_facts,
+        capacity_facts=capacity_facts,
     )
 
 

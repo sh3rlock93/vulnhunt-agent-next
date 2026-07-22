@@ -40,6 +40,14 @@ class ConstraintKind(StrEnum):
     NARROWING = "narrowing"
 
 
+class CapacityFactKind(StrEnum):
+    ALLOCATION = "allocation"
+    ALIAS = "alias"
+    ADVANCE = "advance"
+    WRITE = "write"
+    GUARD = "guard"
+
+
 class GraphNode(AnalysisModel):
     node_id: str = Field(min_length=1)
     path: str = Field(min_length=1)
@@ -125,6 +133,28 @@ class ConstraintFact(AnalysisModel):
     confidence: str = Field(pattern=r"^(?:low|medium|high)$")
 
 
+class CapacityFact(AnalysisModel):
+    fact_id: str = Field(pattern=r"^capacity_[0-9a-f]{20}$")
+    policy_version: str = "c-capacity-fact-v1"
+    kind: CapacityFactKind
+    node_id: str = Field(min_length=1)
+    path: str = Field(min_length=1)
+    function: str = Field(min_length=1)
+    line: int = Field(ge=1)
+    subject: str = Field(min_length=1)
+    base: str = ""
+    element_count: str = ""
+    element_size: str = ""
+    offset: str = ""
+    remaining_capacity: str = ""
+    write_extent: str = ""
+    relation: str = ""
+    evidence: str = Field(min_length=1)
+    confidence: str = Field(pattern=r"^(?:low|medium|high)$")
+    alias_depth: int = Field(default=0, ge=0, le=8)
+    transform_depth: int = Field(default=0, ge=0, le=12)
+
+
 class CAnalysisGraph(AnalysisModel):
     schema_version: int = 2
     language: str = "c"
@@ -135,6 +165,7 @@ class CAnalysisGraph(AnalysisModel):
     critical_sink_ids: tuple[str, ...] = ()
     risk_chains: tuple[RiskChain, ...] = ()
     constraint_facts: tuple[ConstraintFact, ...] = ()
+    capacity_facts: tuple[CapacityFact, ...] = ()
     unresolved_calls: tuple[UnresolvedCall, ...] = ()
 
 

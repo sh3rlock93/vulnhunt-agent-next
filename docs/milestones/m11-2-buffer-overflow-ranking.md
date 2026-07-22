@@ -1,6 +1,6 @@
 # M11.2 — Capacity-aware buffer-overflow ranking
 
-Status: in progress; PR 1 of 7 implemented
+Status: in progress; PR 2 of 7 implemented
 
 ## Goal
 
@@ -35,6 +35,15 @@ input. Existing LibTIFF and synthetic ranking regressions must remain green.
 - [x] Linked risk-chain IDs, missing elements, and guard states are visible.
 - [x] Reversing work-item and risk-chain input order produces identical output.
 - [x] Existing admission IDs, quotas, and ordering do not change.
+
+## PR 2 acceptance gates
+
+- [x] Allocation base, element count, and element size are structured facts.
+- [x] Pointer aliases, offsets, advances, remaining capacity, and writes are linked.
+- [x] Explicit capacity comparisons are retained without claiming dominance.
+- [x] Allocator wrappers and `count * sizeof(element)` forms are recognized.
+- [x] Alias traversal stops after 8 hops and transformations stop after 12.
+- [x] Repeated and reordered analysis is byte-for-byte deterministic.
 
 ## Non-goals
 
