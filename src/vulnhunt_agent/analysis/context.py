@@ -3,6 +3,9 @@ from __future__ import annotations
 
 from ..domain.schemas import HunterWorkItem
 
+MAX_RELATED_CONTEXT_NODES = 16
+MAX_CONTEXT_CONSTRAINTS = 24
+
 
 def context_for_file(
     analysis: dict | None,
@@ -66,6 +69,8 @@ def context_for_work_item(
     plan = analysis.get("coverage_plan") or {}
     nodes = {item["node_id"]: item for item in graph.get("nodes", [])}
     signals = {item["signal_id"]: item for item in graph.get("signals", [])}
+    related_nodes = _related_nodes(graph, work_item)
+    constraint_facts = _constraint_facts(graph, work_item, related_nodes)
     risk_chains = _matching_risk_chains(graph, work_item)
     selected_ids = set(work_item.slice_ids)
     matching = [
@@ -101,6 +106,14 @@ def context_for_work_item(
         "risk": work_item.risk,
         "required": work_item.required,
         "routing_reasons": list(work_item.routing_reasons),
+        "scan_scope_digest": work_item.scan_scope_digest,
+        "full_snapshot_context": True,
+        "related_nodes": related_nodes,
+        "constraint_policy_version": (
+            constraint_facts[0].get("policy_version", "")
+            if constraint_facts else "c-constraint-v1"
+        ),
+        "constraint_facts": constraint_facts,
         "risk_chain_policy_version": (
             risk_chains[0].get("policy_version", "") if risk_chains else ""
         ),
@@ -173,3 +186,95 @@ def _compact_risk_chain(chain: dict) -> dict:
         "sink_lines": list(chain.get("sink_lines", ())),
         "rationale": chain.get("rationale", ""),
     }
+
+
+def _related_nodes(graph: dict, work_item: HunterWorkItem) -> list[dict]:
+    nodes = {item["node_id"]: item for item in graph.get("nodes", [])}
+    signals = {item["signal_id"]: item for item in graph.get("signals", [])}
+    target_ids = set(work_item.target_node_ids)
+    target_ids.update(
+        signals[signal_id]["node_id"]
+        for signal_id in work_item.target_signal_ids
+        if signal_id in signals
+    )
+    aliases = {
+        alias
+        for node_id in target_ids
+        for alias in (
+            nodes.get(node_id, {}).get("symbol", ""),
+            *nodes.get(node_id, {}).get("aliases", ()),
+        )
+        if alias
+    }
+    relationships: dict[str, tuple[str, str]] = {}
+    for edge in graph.get("edges", []):
+        source = str(edge.get("source", ""))
+        target = str(edge.get("target", ""))
+        if target in target_ids and source in nodes:
+            relationships[source] = ("caller", str(edge.get("kind", "call")))
+        if source in target_ids and target in nodes:
+            relationships.setdefault(
+                target,
+                ("callee", str(edge.get("kind", "call"))),
+            )
+    for call in graph.get("unresolved_calls", []):
+        source = str(call.get("source", ""))
+        if source in nodes and str(call.get("callee", "")) in aliases:
+            relationships[source] = (
+                "caller",
+                f"indirect:{call.get('callee', '')}",
+            )
+    ordered = sorted(
+        relationships.items(),
+        key=lambda item: (
+            0 if item[1][0] == "caller" else 1,
+            item[0],
+        ),
+    )[:MAX_RELATED_CONTEXT_NODES]
+    return [
+        {
+            "node_id": node_id,
+            "path": nodes[node_id]["path"],
+            "symbol": nodes[node_id]["symbol"],
+            "line": int(nodes[node_id]["line"]),
+            "end_line": int(nodes[node_id]["end_line"]),
+            "relationship": relationship,
+            "via": via,
+        }
+        for node_id, (relationship, via) in ordered
+    ]
+
+
+def _constraint_facts(
+    graph: dict,
+    work_item: HunterWorkItem,
+    related_nodes: list[dict],
+) -> list[dict]:
+    signals = {item["signal_id"]: item for item in graph.get("signals", [])}
+    target_ids = set(work_item.target_node_ids)
+    target_ids.update(
+        signals[signal_id]["node_id"]
+        for signal_id in work_item.target_signal_ids
+        if signal_id in signals
+    )
+    related_ids = {item["node_id"] for item in related_nodes}
+    kind_rank = {
+        "buffer_size_bound": 0,
+        "numeric_bound": 1,
+        "dominant_guard": 2,
+        "minimum_consumption": 3,
+        "narrowing": 4,
+    }
+    facts = [
+        {**item, "relevance": "target" if item.get("node_id") in target_ids else "related"}
+        for item in graph.get("constraint_facts", [])
+        if item.get("node_id") in target_ids | related_ids
+    ]
+    return sorted(
+        facts,
+        key=lambda item: (
+            0 if item["relevance"] == "target" else 1,
+            kind_rank.get(str(item.get("kind", "")), 9),
+            str(item.get("fact_id", "")),
+        ),
+    )[:MAX_CONTEXT_CONSTRAINTS]

@@ -7,11 +7,14 @@ from .context_cache import (
     SharedContextCache,
     context_cache_key,
 )
+from .constraints import CONSTRAINT_POLICY, extract_constraint_facts
 from .incremental import INCREMENTAL_POLICY, build_incremental_scope
 from .scope import SCAN_SCOPE_POLICY, build_scan_scope
 from .models import (
     AnalysisSlice,
     CAnalysisGraph,
+    ConstraintFact,
+    ConstraintKind,
     CoveragePlan,
     EdgeKind,
     GraphEdge,
@@ -30,6 +33,8 @@ from .risk_chains import RISK_CHAIN_POLICY
 __all__ = [
     "AnalysisSlice",
     "CAnalysisGraph",
+    "ConstraintFact",
+    "ConstraintKind",
     "CoveragePlan",
     "EdgeKind",
     "GraphEdge",
@@ -47,10 +52,12 @@ __all__ = [
     "context_for_file",
     "context_for_work_item",
     "CONTEXT_CACHE_POLICY",
+    "CONSTRAINT_POLICY",
     "SharedContextCache",
     "INCREMENTAL_POLICY",
     "SCAN_SCOPE_POLICY",
     "build_incremental_scope",
     "build_scan_scope",
     "context_cache_key",
+    "extract_constraint_facts",
 ]

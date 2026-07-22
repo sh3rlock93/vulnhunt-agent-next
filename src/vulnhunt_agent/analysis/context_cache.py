@@ -13,12 +13,22 @@ from .context import (
     matching_risk_chains_for_targets,
 )
 
-CONTEXT_CACHE_POLICY = "c-context-v4"
+CONTEXT_CACHE_POLICY = "c-context-v5"
 MAX_CONTEXT_BYTES = 24_000
 MAX_LINES_PER_FILE = 80
 CONTEXT_LINE_RADIUS = 6
 MAX_RELATED_HEADERS = 4
 MAX_BUILD_FILES = 2
+CONTEXT_KIND_LINE_LIMITS = {
+    "target": 72,
+    "constraint": 48,
+    "caller": 48,
+    "callee": 48,
+    "related": 40,
+    "header": 32,
+    "build": 24,
+    "parser": 64,
+}
 
 _BUILD_FILES = (
     "CMakeLists.txt",
@@ -69,10 +79,12 @@ class SharedContextCache:
         packet = self._build(work_item, cache_key)
         packet = _fit_packet(packet)
         packet["packet_digest"] = _packet_digest(packet)
-        encoded = (
-            json.dumps(packet, indent=2, ensure_ascii=False, sort_keys=True)
-            + "\n"
-        )
+        encoded = json.dumps(
+            packet,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ) + "\n"
         temporary = path.with_suffix(".tmp")
         temporary.write_text(encoded)
         temporary.replace(path)
@@ -121,29 +133,72 @@ class SharedContextCache:
             "routing_reasons",
         ):
             compact.pop(field, None)
-        related_headers = self._related_headers(work_item.files)
+        related_nodes = compact.get("related_nodes") or []
+        constraint_facts = compact.get("constraint_facts") or []
+        constraint_files = tuple(dict.fromkeys(
+            str(item.get("path", ""))
+            for item in constraint_facts
+            if item.get("path") and item.get("path") not in work_item.files
+        ))
+        relationship_by_file: dict[str, str] = {}
+        for item in related_nodes:
+            path = str(item.get("path", ""))
+            if path and path not in work_item.files:
+                relationship_by_file.setdefault(
+                    path,
+                    str(item.get("relationship", "related")),
+                )
+        relationship_files = tuple(sorted(
+            relationship_by_file,
+            key=lambda path: (
+                0 if relationship_by_file[path] == "caller" else 1,
+                path,
+            ),
+        ))
+        context_source_files = tuple(dict.fromkeys((
+            *work_item.files,
+            *constraint_files,
+            *relationship_files,
+        )))
+        context_hints = self._context_hints(work_item, related_nodes)
+        related_headers = self._related_headers(
+            context_source_files,
+            hints=context_hints,
+        )
         build_files = tuple(
             name for name in _BUILD_FILES if (self.repo / name).is_file()
         )[:MAX_BUILD_FILES]
         ordered_files = tuple(dict.fromkeys((
-            *work_item.files,
+            *context_source_files,
             *related_headers,
             *build_files,
         )))
+        all_context_files = set(context_source_files)
         ranges = _relevant_ranges(
             self.analysis,
             slice_ids=set(work_item.slice_ids),
-            files=set(work_item.files),
+            files=all_context_files,
             target_signal_ids=set(work_item.target_signal_ids),
             target_node_ids=set(work_item.target_node_ids),
             changed_line_ranges=work_item.changed_line_ranges,
+            related_nodes=related_nodes,
+            constraint_facts=constraint_facts,
         )
-        excerpts = self._excerpts(
+        for header in related_headers:
+            header_ranges = self._matching_header_ranges(header, context_hints)
+            if header_ranges:
+                ranges.setdefault(header, []).extend(header_ranges)
+        file_kinds = {
+            **{path: "target" for path in work_item.files},
+            **{path: "constraint" for path in constraint_files},
+            **relationship_by_file,
+            **{path: "header" for path in related_headers},
+            **{path: "build" for path in build_files},
+        }
+        excerpts, truncation = self._excerpts(
             ordered_files,
             ranges,
-            slice_files=set(work_item.files),
-            header_files=set(related_headers),
-            build_files=set(build_files),
+            file_kinds=file_kinds,
         )
         graph = self.analysis.get("graph") or {}
         plan = self.analysis.get("coverage_plan") or {}
@@ -154,17 +209,29 @@ class SharedContextCache:
             "graph_schema_version": int(graph.get("schema_version", 1)),
             "coverage_policy_version": str(plan.get("policy_version", "")),
             **compact,
+            "hydrated_context_files": list(context_source_files),
+            "context_hints": list(context_hints),
             "related_headers": list(related_headers),
             "build_files": list(build_files),
+            "selected_ranges": {
+                path: [list(pair) for pair in selected]
+                for path, selected in sorted(ranges.items())
+            },
             "source_excerpts": excerpts,
+            "truncation": truncation,
             "exploration_hint": (
                 "These excerpts are immutable starting context, not a read restriction. "
                 "Use read_file/grep for missing ranges, callers, headers, and sibling files."
             ),
         }
 
-    def _related_headers(self, source_files: tuple[str, ...]) -> tuple[str, ...]:
-        headers: set[str] = set()
+    def _related_headers(
+        self,
+        source_files: tuple[str, ...],
+        *,
+        hints: tuple[str, ...],
+    ) -> tuple[str, ...]:
+        headers: dict[str, int] = {}
         for relative in source_files:
             path = self._safe_file(relative)
             if path is None:
@@ -180,35 +247,108 @@ class SharedContextCache:
                         resolved.is_file()
                         and self.repo in resolved.parents
                     ):
-                        headers.add(resolved.relative_to(self.repo).as_posix())
+                        relative_header = resolved.relative_to(self.repo).as_posix()
+                        header_text = resolved.read_text(errors="replace")
+                        headers[relative_header] = max(
+                            headers.get(relative_header, 0),
+                            sum(
+                                (20 if not hint.isupper() else 1)
+                                for hint in hints
+                                if hint in header_text
+                            ),
+                        )
                         break
-        return tuple(sorted(headers))[:MAX_RELATED_HEADERS]
+        return tuple(sorted(
+            headers,
+            key=lambda relative: (-headers[relative], relative),
+        ))[:MAX_RELATED_HEADERS]
+
+    def _context_hints(
+        self,
+        work_item: HunterWorkItem,
+        related_nodes: list[dict],
+    ) -> tuple[str, ...]:
+        graph = self.analysis.get("graph") or {}
+        nodes = {item["node_id"]: item for item in graph.get("nodes", [])}
+        signals = {item["signal_id"]: item for item in graph.get("signals", [])}
+        node_ids = set(work_item.target_node_ids)
+        node_ids.update(
+            signals[signal_id]["node_id"]
+            for signal_id in work_item.target_signal_ids
+            if signal_id in signals
+        )
+        node_ids.update(str(item.get("node_id", "")) for item in related_nodes)
+        primary_hints: set[str] = set()
+        type_hints: set[str] = set()
+        for node_id in sorted(node_ids):
+            node = nodes.get(node_id)
+            if not node:
+                continue
+            primary_hints.update(
+                (str(node.get("symbol", "")), *node.get("aliases", ()))
+            )
+            path = self._safe_file(str(node.get("path", "")))
+            if path is None:
+                continue
+            lines = path.read_text(errors="replace").splitlines()
+            start = max(0, int(node.get("line", 1)) - 1)
+            declaration = " ".join(lines[start : start + 8])
+            type_hints.update(
+                re.findall(r"\b[A-Z][A-Za-z0-9_]{2,}\b", declaration)
+            )
+        primary = sorted(hint for hint in primary_hints if hint)
+        types = sorted(hint for hint in type_hints - primary_hints if hint)
+        return tuple((*primary, *types))[:40]
+
+    def _matching_header_ranges(
+        self,
+        relative: str,
+        hints: tuple[str, ...],
+    ) -> list[tuple[int, int]]:
+        path = self._safe_file(relative)
+        if path is None:
+            return []
+        lines = path.read_text(errors="replace").splitlines()
+        selected: list[tuple[int, int]] = []
+        seen: set[int] = set()
+        for hint in hints:
+            for line_number, line in enumerate(lines, start=1):
+                if hint in line and line_number not in seen:
+                    selected.append((line_number, line_number))
+                    seen.add(line_number)
+        return selected
 
     def _excerpts(
         self,
         files: tuple[str, ...],
         ranges: dict[str, list[tuple[int, int]]],
         *,
-        slice_files: set[str],
-        header_files: set[str],
-        build_files: set[str],
-    ) -> list[dict]:
+        file_kinds: dict[str, str],
+    ) -> tuple[list[dict], dict]:
         remaining = MAX_CONTEXT_BYTES
         out: list[dict] = []
+        omitted: list[dict[str, str]] = []
+        trimmed: list[dict[str, str]] = []
         for relative in files:
             if remaining <= 0:
-                break
+                omitted.append({"path": relative, "reason": "context_byte_limit"})
+                continue
             path = self._safe_file(relative)
             if path is None:
+                omitted.append({"path": relative, "reason": "not_snapshot_file"})
                 continue
             lines = path.read_text(errors="replace").splitlines()
+            initial_kind = file_kinds.get(relative, "related")
+            if Path(relative).suffix.lower() in {".l", ".y"}:
+                initial_kind = "parser"
             selected = _selected_lines(
                 len(lines),
                 ranges.get(relative, []),
                 whole_file=(
-                    Path(relative).suffix.lower() in {".h", ".l", ".y"}
-                    or relative in build_files
+                    Path(relative).suffix.lower() in {".l", ".y"}
+                    or file_kinds.get(relative) == "build"
                 ),
+                max_lines=CONTEXT_KIND_LINE_LIMITS[initial_kind],
             )
             content = "\n".join(
                 f"{line:6}: {lines[line - 1]}"
@@ -220,17 +360,10 @@ class SharedContextCache:
             if truncated:
                 content = encoded[:remaining].decode("utf-8", errors="ignore")
                 content += "\n... (shared context byte limit reached)"
-            kind = (
-                "build"
-                if relative in build_files
-                else "header"
-                if relative in header_files
-                else "parser"
-                if Path(relative).suffix.lower() in {".l", ".y"}
-                else "slice"
-                if relative in slice_files
-                else "related"
-            )
+                trimmed.append({"path": relative, "reason": "context_byte_limit"})
+            if len(selected) < len(lines):
+                trimmed.append({"path": relative, "reason": "line_selection_limit"})
+            kind = initial_kind
             out.append({
                 "path": relative,
                 "kind": kind,
@@ -239,7 +372,21 @@ class SharedContextCache:
                 "content": content,
             })
             remaining -= min(len(encoded), remaining)
-        return out
+        return out, {
+            "max_context_bytes": MAX_CONTEXT_BYTES,
+            "max_lines_per_file": MAX_LINES_PER_FILE,
+            "kind_line_limits": CONTEXT_KIND_LINE_LIMITS,
+            "omitted": omitted,
+            "trimmed": sorted(
+                {f"{item['path']}\0{item['reason']}": item for item in trimmed}.values(),
+                key=lambda item: (item["path"], item["reason"]),
+            ),
+            "packet_fit_applied": False,
+            "removed_slices": 0,
+            "removed_risk_chains": 0,
+            "removed_related_nodes": 0,
+            "removed_constraints": 0,
+        }
 
     def _safe_file(self, relative: str) -> Path | None:
         path = (self.repo / relative).resolve()
@@ -261,8 +408,28 @@ def context_cache_key(
     analysis = analysis or {}
     graph = analysis.get("graph") or {}
     plan = analysis.get("coverage_plan") or {}
+    compact = context_for_work_item(analysis, work_item)
+    related_nodes = compact.get("related_nodes") or []
+    constraint_facts = compact.get("constraint_facts") or []
+    context_files = set(work_item.files)
+    context_files.update(
+        str(item.get("path", ""))
+        for item in (*related_nodes, *constraint_facts)
+        if item.get("path")
+    )
+    selected_ranges = _relevant_ranges(
+        analysis,
+        slice_ids=set(work_item.slice_ids),
+        files=context_files,
+        target_signal_ids=set(work_item.target_signal_ids),
+        target_node_ids=set(work_item.target_node_ids),
+        changed_line_ranges=work_item.changed_line_ranges,
+        related_nodes=related_nodes,
+        constraint_facts=constraint_facts,
+    )
     identity = {
         "source_snapshot": source_snapshot,
+        "scan_scope_digest": work_item.scan_scope_digest,
         "graph_schema_version": int(graph.get("schema_version", 1)),
         "coverage_policy_version": str(plan.get("policy_version", "")),
         "slice_ids": sorted(work_item.slice_ids),
@@ -270,6 +437,13 @@ def context_cache_key(
         "target_node_ids": sorted(work_item.target_node_ids),
         "target_signal_ids": sorted(work_item.target_signal_ids),
         "risk_chains": matching_risk_chains(graph, work_item)[:6],
+        "related_nodes": related_nodes,
+        "constraint_policy_version": compact.get("constraint_policy_version", ""),
+        "constraint_facts": constraint_facts,
+        "selected_ranges": {
+            path: sorted(ranges)
+            for path, ranges in sorted(selected_ranges.items())
+        },
         "changed_line_ranges": {
             path: sorted(ranges)
             for path, ranges in sorted(work_item.changed_line_ranges.items())
@@ -277,6 +451,7 @@ def context_cache_key(
         "context_policy": CONTEXT_CACHE_POLICY,
         "max_context_bytes": MAX_CONTEXT_BYTES,
         "max_lines_per_file": MAX_LINES_PER_FILE,
+        "kind_line_limits": CONTEXT_KIND_LINE_LIMITS,
         "line_radius": CONTEXT_LINE_RADIUS,
         "max_related_headers": MAX_RELATED_HEADERS,
         "max_build_files": MAX_BUILD_FILES,
@@ -293,6 +468,8 @@ def _relevant_ranges(
     target_signal_ids: set[str],
     target_node_ids: set[str],
     changed_line_ranges: dict[str, tuple[tuple[int, int], ...]],
+    related_nodes: list[dict] | tuple[dict, ...] = (),
+    constraint_facts: list[dict] | tuple[dict, ...] = (),
 ) -> dict[str, list[tuple[int, int]]]:
     graph = analysis.get("graph") or {}
     plan = analysis.get("coverage_plan") or {}
@@ -342,6 +519,22 @@ def _relevant_ranges(
         start = int(node.get("line", 1))
         end = int(node.get("end_line", start))
         out.setdefault(node["path"], []).extend(((start, start), (end, end)))
+    for related in related_nodes:
+        path = str(related.get("path", ""))
+        if path not in files:
+            continue
+        start = int(related.get("line", 1))
+        end = int(related.get("end_line", start))
+        out.setdefault(path, []).extend(((start, start), (end, end)))
+    for fact in constraint_facts:
+        path = str(fact.get("path", ""))
+        if path not in files:
+            continue
+        start = int(fact.get("line", 1))
+        end = int(fact.get("end_line", start))
+        out.setdefault(path, []).append((start, end))
+    for path, selected in tuple(out.items()):
+        out[path] = sorted(set(selected))
     return out
 
 
@@ -350,19 +543,20 @@ def _selected_lines(
     ranges: list[tuple[int, int]],
     *,
     whole_file: bool,
+    max_lines: int = MAX_LINES_PER_FILE,
 ) -> list[int]:
     if line_count <= 0:
         return []
     if whole_file or not ranges:
-        return list(range(1, min(line_count, MAX_LINES_PER_FILE) + 1))
+        return list(range(1, min(line_count, max_lines) + 1))
     selected: set[int] = set()
     for start, end in ranges:
         lower = max(1, start - CONTEXT_LINE_RADIUS)
         upper = min(line_count, end + CONTEXT_LINE_RADIUS)
         selected.update(range(lower, upper + 1))
-        if len(selected) >= MAX_LINES_PER_FILE:
+        if len(selected) >= max_lines:
             break
-    return sorted(selected)[:MAX_LINES_PER_FILE]
+    return sorted(selected)[:max_lines]
 
 
 def _packet_digest(packet: dict) -> str:
@@ -386,10 +580,12 @@ def _fit_packet(packet: dict) -> dict:
 
     def encoded_size() -> int:
         measured = {**packet, "packet_digest": placeholder}
-        return len((
-            json.dumps(measured, indent=2, ensure_ascii=False, sort_keys=True)
-            + "\n"
-        ).encode("utf-8"))
+        return len((json.dumps(
+            measured,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ) + "\n").encode("utf-8"))
 
     while encoded_size() > MAX_CONTEXT_BYTES:
         excerpts = packet.get("source_excerpts") or []
@@ -406,14 +602,39 @@ def _fit_packet(packet: dict) -> dict:
                 "utf-8", errors="ignore"
             )
             content_entry["truncated"] = True
+            packet["truncation"]["packet_fit_applied"] = True
+            trimmed = packet["truncation"]["trimmed"]
+            decision = {
+                "path": str(content_entry.get("path", "")),
+                "reason": "packet_byte_limit",
+            }
+            if decision not in trimmed:
+                trimmed.append(decision)
+                trimmed.sort(key=lambda item: (item["path"], item["reason"]))
             continue
         slices = packet.get("slices") or []
         if slices:
             slices.pop()
+            packet["truncation"]["packet_fit_applied"] = True
+            packet["truncation"]["removed_slices"] += 1
             continue
         chains = packet.get("risk_chains") or []
         if len(chains) > 1:
             chains.pop()
+            packet["truncation"]["packet_fit_applied"] = True
+            packet["truncation"]["removed_risk_chains"] += 1
+            continue
+        related_nodes = packet.get("related_nodes") or []
+        if len(related_nodes) > 1:
+            related_nodes.pop()
+            packet["truncation"]["packet_fit_applied"] = True
+            packet["truncation"]["removed_related_nodes"] += 1
+            continue
+        constraints = packet.get("constraint_facts") or []
+        if len(constraints) > 1:
+            constraints.pop()
+            packet["truncation"]["packet_fit_applied"] = True
+            packet["truncation"]["removed_constraints"] += 1
             continue
         raise ValueError("context packet metadata exceeds the hard byte limit")
     return packet

@@ -1264,7 +1264,7 @@ def test_shared_context_cache_reuses_cross_hunter_packet_and_snapshot_keys(
 
     assert first == second
     stats = cache.stats()
-    assert stats["policy_version"] == "c-context-v4"
+    assert stats["policy_version"] == "c-context-v5"
     assert stats["entries"] == 1
     assert stats["hits"] == 1
     assert stats["misses"] == 1
@@ -1275,7 +1275,7 @@ def test_shared_context_cache_reuses_cross_hunter_packet_and_snapshot_keys(
         item["path"]: item["kind"]
         for item in first["source_excerpts"]
     }
-    assert excerpt_kinds["state.c"] == "slice"
+    assert excerpt_kinds["state.c"] == "target"
     assert excerpt_kinds["cue_parser.y"] == "parser"
     assert excerpt_kinds["cue_scanner.l"] == "parser"
     assert excerpt_kinds["state.h"] == "header"

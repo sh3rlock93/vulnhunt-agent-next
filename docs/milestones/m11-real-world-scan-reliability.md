@@ -1,6 +1,6 @@
 # M11 — Reliable bounded scans and candidate falsification on live repositories
 
-Status: PR 1–3 implemented and verified; PR 4 pending
+Status: PR 1–4 implemented and verified; PR 5 pending
 
 ## Goal
 
@@ -226,13 +226,13 @@ Expected changes:
 
 ### PR 4 acceptance gates
 
-- [ ] Scoped work can read context from outside its scheduling scope.
-- [ ] The libexpat `getAtts` packet includes its `storeAtts` caller and buffer-size constraint.
-- [ ] Oracle files, external paths, and non-snapshot content remain inaccessible.
-- [ ] No context packet exceeds the configured byte limit.
-- [ ] Truncation decisions are deterministic and visible in the artifact.
-- [ ] Snapshot, scope, constraint, or excerpt changes invalidate the cache key.
-- [ ] Existing M10 chain-first context tests remain green.
+- [x] Scoped work can read context from outside its scheduling scope.
+- [x] The libexpat `getAtts` packet includes its `storeAtts` caller and buffer-size constraint.
+- [x] Oracle files, external paths, and non-snapshot content remain inaccessible.
+- [x] No context packet exceeds the configured byte limit.
+- [x] Truncation decisions are deterministic and visible in the artifact.
+- [x] Snapshot, scope, constraint, or excerpt changes invalidate the cache key.
+- [x] Existing M10 chain-first context tests remain green.
 
 ## PR 5 — Dense-file fairness and recyclable budget quotas
 
