@@ -14,8 +14,9 @@ from .context import (
     matching_risk_chains_for_targets,
 )
 
-CONTEXT_CACHE_POLICY = "c-context-v5"
+CONTEXT_CACHE_POLICY = "c-context-v6"
 MAX_CONTEXT_BYTES = 24_000
+MIN_EVIDENCE_EXCERPT_BYTES = 512
 MAX_LINES_PER_FILE = 80
 CONTEXT_LINE_RADIUS = 6
 MAX_RELATED_HEADERS = 4
@@ -180,6 +181,11 @@ class SharedContextCache:
             *related_headers,
             *build_files,
         )))
+        focus_paths = _focus_evidence_paths(compact)
+        ordered_files = tuple(sorted(
+            ordered_files,
+            key=lambda path: (0 if path in focus_paths else 1, ordered_files.index(path)),
+        ))
         all_context_files = set(context_source_files)
         ranges = _relevant_ranges(
             self.analysis,
@@ -394,6 +400,9 @@ class SharedContextCache:
             "removed_capacity_risk_chains": 0,
             "removed_related_nodes": 0,
             "removed_constraints": 0,
+            "removed_source_excerpts": 0,
+            "minimum_evidence_excerpt_bytes": MIN_EVIDENCE_EXCERPT_BYTES,
+            "evidence_excerpt_guaranteed": False,
         }
 
     def _safe_file(self, relative: str) -> Path | None:
@@ -602,8 +611,26 @@ def _packet_digest(packet: dict) -> str:
 
 
 def _fit_packet(packet: dict) -> dict:
-    """Trim lowest-priority payload until the persisted packet is <= 24 KB."""
+    """Fit metadata around source evidence while preserving one useful excerpt."""
     placeholder = "sha256:" + "0" * 64
+    truncation = packet["truncation"]
+    truncation.setdefault("removed_source_excerpts", 0)
+    truncation.setdefault("minimum_evidence_excerpt_bytes", MIN_EVIDENCE_EXCERPT_BYTES)
+    truncation.setdefault("evidence_excerpt_guaranteed", False)
+    focus_ids = set(packet.get("focus_chain_ids") or ())
+    focus_paths = _focus_evidence_paths(packet)
+    excerpts = packet.get("source_excerpts") or []
+    had_source_evidence = any(str(item.get("content", "")) for item in excerpts)
+    protected = next(
+        (
+            item for item in excerpts
+            if item.get("path") in focus_paths and item.get("content")
+        ),
+        None,
+    ) or next(
+        (item for item in excerpts if item.get("kind") == "target" and item.get("content")),
+        None,
+    ) or next((item for item in excerpts if item.get("content")), None)
 
     def encoded_size() -> int:
         measured = {**packet, "packet_digest": placeholder}
@@ -614,60 +641,152 @@ def _fit_packet(packet: dict) -> dict:
             separators=(",", ":"),
         ) + "\n").encode("utf-8"))
 
+    def mark_fit() -> None:
+        truncation["packet_fit_applied"] = True
+
+    def pop_last(field: str, *, non_focus: bool = False) -> bool:
+        items = packet.get(field) or []
+        for index in range(len(items) - 1, -1, -1):
+            if non_focus and str(items[index].get("chain_id", "")) in focus_ids:
+                continue
+            items.pop(index)
+            mark_fit()
+            return True
+        return False
+
+    def trim_content(entry: dict, *, floor: int) -> bool:
+        content = str(entry.get("content", ""))
+        encoded = content.encode("utf-8")
+        if len(encoded) <= floor:
+            return False
+        excess = encoded_size() - MAX_CONTEXT_BYTES
+        keep = max(floor, len(encoded) - excess - 256)
+        entry["content"] = encoded[:keep].decode("utf-8", errors="ignore")
+        entry["truncated"] = True
+        mark_fit()
+        decision = {
+            "path": str(entry.get("path", "")),
+            "reason": "packet_byte_limit",
+        }
+        if decision not in truncation["trimmed"]:
+            truncation["trimmed"].append(decision)
+            truncation["trimmed"].sort(key=lambda item: (item["path"], item["reason"]))
+        return True
+
     while encoded_size() > MAX_CONTEXT_BYTES:
-        excerpts = packet.get("source_excerpts") or []
-        content_entry = next(
-            (item for item in reversed(excerpts) if item.get("content")),
-            None,
-        )
-        if content_entry is not None:
-            excess = encoded_size() - MAX_CONTEXT_BYTES
-            content = str(content_entry["content"])
-            encoded = content.encode("utf-8")
-            keep = max(0, len(encoded) - excess - 256)
-            content_entry["content"] = encoded[:keep].decode(
-                "utf-8", errors="ignore"
-            )
-            content_entry["truncated"] = True
-            packet["truncation"]["packet_fit_applied"] = True
-            trimmed = packet["truncation"]["trimmed"]
-            decision = {
-                "path": str(content_entry.get("path", "")),
-                "reason": "packet_byte_limit",
-            }
-            if decision not in trimmed:
-                trimmed.append(decision)
-                trimmed.sort(key=lambda item: (item["path"], item["reason"]))
-            continue
         slices = packet.get("slices") or []
         if slices:
             slices.pop()
-            packet["truncation"]["packet_fit_applied"] = True
-            packet["truncation"]["removed_slices"] += 1
+            mark_fit()
+            truncation["removed_slices"] += 1
+            continue
+        if pop_last("risk_chains", non_focus=True):
+            truncation["removed_risk_chains"] += 1
+            continue
+        if pop_last("capacity_risk_chains", non_focus=True):
+            truncation["removed_capacity_risk_chains"] += 1
+            continue
+        related_nodes = packet.get("related_nodes") or []
+        non_focus_related = next(
+            (
+                index for index in range(len(related_nodes) - 1, -1, -1)
+                if str(related_nodes[index].get("path", "")) not in focus_paths
+            ),
+            None,
+        )
+        if non_focus_related is not None:
+            related_nodes.pop(non_focus_related)
+            mark_fit()
+            truncation["removed_related_nodes"] += 1
+            continue
+        constraints = packet.get("constraint_facts") or []
+        non_focus_constraint = next(
+            (
+                index for index in range(len(constraints) - 1, -1, -1)
+                if str(constraints[index].get("path", "")) not in focus_paths
+            ),
+            None,
+        )
+        if non_focus_constraint is not None:
+            constraints.pop(non_focus_constraint)
+            mark_fit()
+            truncation["removed_constraints"] += 1
+            continue
+        content_entry = next(
+            (
+                item for item in reversed(excerpts)
+                if item is not protected and item.get("content")
+            ),
+            None,
+        )
+        if content_entry is not None and trim_content(content_entry, floor=0):
+            continue
+        removable_excerpt = next(
+            (
+                index for index in range(len(excerpts) - 1, -1, -1)
+                if excerpts[index] is not protected and not excerpts[index].get("content")
+            ),
+            None,
+        )
+        if removable_excerpt is not None:
+            removed = excerpts.pop(removable_excerpt)
+            truncation["omitted"].append({
+                "path": str(removed.get("path", "")),
+                "reason": "packet_byte_limit",
+            })
+            mark_fit()
+            truncation["removed_source_excerpts"] += 1
+            continue
+        if protected is not None:
+            protected_size = len(str(protected.get("content", "")).encode("utf-8"))
+            floor = min(MIN_EVIDENCE_EXCERPT_BYTES, max(1, protected_size))
+            if trim_content(protected, floor=floor):
+                continue
+        if related_nodes:
+            related_nodes.pop()
+            mark_fit()
+            truncation["removed_related_nodes"] += 1
+            continue
+        if constraints:
+            constraints.pop()
+            mark_fit()
+            truncation["removed_constraints"] += 1
             continue
         chains = packet.get("risk_chains") or []
         if len(chains) > 1:
             chains.pop()
-            packet["truncation"]["packet_fit_applied"] = True
-            packet["truncation"]["removed_risk_chains"] += 1
+            mark_fit()
+            truncation["removed_risk_chains"] += 1
             continue
         capacity_chains = packet.get("capacity_risk_chains") or []
         if len(capacity_chains) > 1:
             capacity_chains.pop()
-            packet["truncation"]["packet_fit_applied"] = True
-            packet["truncation"]["removed_capacity_risk_chains"] += 1
-            continue
-        related_nodes = packet.get("related_nodes") or []
-        if len(related_nodes) > 1:
-            related_nodes.pop()
-            packet["truncation"]["packet_fit_applied"] = True
-            packet["truncation"]["removed_related_nodes"] += 1
-            continue
-        constraints = packet.get("constraint_facts") or []
-        if len(constraints) > 1:
-            constraints.pop()
-            packet["truncation"]["packet_fit_applied"] = True
-            packet["truncation"]["removed_constraints"] += 1
+            mark_fit()
+            truncation["removed_capacity_risk_chains"] += 1
             continue
         raise ValueError("context packet metadata exceeds the hard byte limit")
+
+    if had_source_evidence and not any(item.get("content") for item in excerpts):
+        raise ValueError("context packet lost all source evidence while fitting")
+    truncation["evidence_excerpt_guaranteed"] = bool(
+        had_source_evidence and any(item.get("content") for item in excerpts)
+    )
     return packet
+
+
+def _focus_evidence_paths(packet: dict) -> set[str]:
+    focus_ids = set(packet.get("focus_chain_ids") or ())
+    paths: set[str] = set()
+    for field in ("risk_chains", "capacity_risk_chains"):
+        for chain in packet.get(field) or ():
+            if focus_ids and str(chain.get("chain_id", "")) not in focus_ids:
+                continue
+            for path in (
+                chain.get("path", ""),
+                chain.get("root_path", ""),
+                *(chain.get("paths") or ()),
+                *((chain.get("evidence_lines") or {}).keys()),
+            ):
+                if path:
+                    paths.add(str(path))
+    return paths

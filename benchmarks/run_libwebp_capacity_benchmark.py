@@ -429,7 +429,7 @@ def _capacity_policies_recorded(policies: dict[str, Any]) -> bool:
         policies.get("capacity_fact") == "c-capacity-fact-v1",
         policies.get("capacity_summary") == "c-capacity-summary-v1",
         policies.get("capacity_risk_chain") == "c-capacity-risk-chain-v2",
-        policies.get("context") == "c-context-v5",
+        policies.get("context") == "c-context-v6",
         policies.get("admission") == "c-budget-v5",
     ))
 
