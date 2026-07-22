@@ -14,8 +14,10 @@ from ..indexer.tree_sitter_indexer import (
     _c_function_name,
     c_function_regions,
 )
+from .constraints import extract_constraint_facts
 from .models import (
     CAnalysisGraph,
+    ConstraintFact,
     EdgeKind,
     GraphEdge,
     GraphNode,
@@ -118,6 +120,7 @@ class _Extracted:
     calls: tuple[_CallSite, ...]
     signals: tuple[SecuritySignal, ...]
     risk_chains: tuple[RiskChain, ...] = ()
+    constraint_facts: tuple[ConstraintFact, ...] = ()
 
 
 def build_c_analysis_graph(repo: Path, source_files: list[str]) -> CAnalysisGraph:
@@ -135,7 +138,11 @@ def build_c_analysis_graph(repo: Path, source_files: list[str]) -> CAnalysisGrap
             grammar_paths[suffix[1:]].append(relative)
             extracted.append(_extract_grammar_file(repo, relative))
 
-    nodes = sorted((item.node for item in extracted), key=lambda item: item.node_id)
+    macro_aliases = _header_macro_aliases(repo, source_files)
+    nodes = sorted(
+        (_with_macro_aliases(item.node, macro_aliases) for item in extracted),
+        key=lambda item: item.node_id,
+    )
     node_by_id = {item.node.node_id: item.node for item in extracted}
     calls = [call for item in extracted for call in item.calls]
     signals = sorted(
@@ -145,6 +152,10 @@ def build_c_analysis_graph(repo: Path, source_files: list[str]) -> CAnalysisGrap
     risk_chains = sorted(
         (chain for item in extracted for chain in item.risk_chains),
         key=lambda item: item.chain_id,
+    )
+    constraint_facts = sorted(
+        (fact for item in extracted for fact in item.constraint_facts),
+        key=lambda item: item.fact_id,
     )
 
     by_symbol: dict[str, list[GraphNode]] = {}
@@ -223,6 +234,7 @@ def build_c_analysis_graph(repo: Path, source_files: list[str]) -> CAnalysisGrap
         entrypoint_ids=tuple(sorted(set(entrypoints))),
         critical_sink_ids=tuple(sorted(critical_sinks)),
         risk_chains=tuple(risk_chains),
+        constraint_facts=tuple(constraint_facts),
         unresolved_calls=tuple(sorted(
             unresolved,
             key=lambda item: (item.path, item.line, item.source, item.callee),
@@ -334,6 +346,7 @@ def _extract_c_function(
         kind=NodeKind.FUNCTION,
         visibility=visibility,
         calls=tuple(sorted(set(call_names))),
+        aliases=_function_aliases(declarator, source, name),
     )
     unique_signals = tuple({item.signal_id: item for item in signals}.values())
     risk_chains = build_function_risk_chains(
@@ -346,11 +359,21 @@ def _extract_c_function(
         body_nodes=region.body_nodes,
         signals=unique_signals,
     )
+    function_source = source[
+        region.container.start_byte : region.container.end_byte
+    ].decode(errors="replace")
+    constraint_facts = extract_constraint_facts(
+        path=relative,
+        node_id=node_id,
+        source=function_source,
+        start_line=line,
+    )
     return _Extracted(
         node=node,
         calls=tuple(call_sites),
         signals=unique_signals,
         risk_chains=risk_chains,
+        constraint_facts=constraint_facts,
     )
 
 
@@ -497,6 +520,52 @@ def _header_exports(repo: Path, source_files: list[str]) -> set[str]:
 def _resolve_target(caller: GraphNode, candidates: list[GraphNode]) -> GraphNode:
     same_file = [item for item in candidates if item.path == caller.path]
     return sorted(same_file or candidates, key=lambda item: item.node_id)[0]
+
+
+def _function_aliases(declarator: Node, source: bytes, name: str) -> tuple[str, ...]:
+    text = _text(declarator, source)
+    aliases = {
+        match.group(1)
+        for match in re.finditer(
+            r"\b[A-Z_][A-Z0-9_]*\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*\)",
+            text,
+        )
+        if match.group(1) != name
+    }
+    return tuple(sorted(aliases))
+
+
+def _header_macro_aliases(repo: Path, source_files: list[str]) -> dict[str, set[str]]:
+    aliases: dict[str, set[str]] = {}
+    for relative in sorted(source_files):
+        if Path(relative).suffix.lower() != ".h":
+            continue
+        logical = re.sub(
+            r"\\\r?\n",
+            " ",
+            (repo / relative).read_text(errors="replace"),
+        )
+        for match in re.finditer(
+            r"^\s*#\s*define\s+([A-Za-z_][A-Za-z0-9_]*)"
+            r"(?:\([^\n)]*\))?\s+([^\n]+)$",
+            logical,
+            re.MULTILINE,
+        ):
+            macro = match.group(1)
+            for token in re.findall(r"\b[A-Za-z_][A-Za-z0-9_]*\b", match.group(2)):
+                if token != macro:
+                    aliases.setdefault(token, set()).add(macro)
+    return aliases
+
+
+def _with_macro_aliases(
+    node: GraphNode,
+    macro_aliases: dict[str, set[str]],
+) -> GraphNode:
+    aliases = set(node.aliases)
+    for alias in tuple(aliases):
+        aliases.update(macro_aliases.get(alias, ()))
+    return node.model_copy(update={"aliases": tuple(sorted(aliases))})
 
 
 def _call_name(node: Node, source: bytes) -> str:

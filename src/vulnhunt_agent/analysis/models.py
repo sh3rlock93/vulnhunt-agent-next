@@ -32,6 +32,14 @@ class GuardState(StrEnum):
     UNKNOWN = "unknown"
 
 
+class ConstraintKind(StrEnum):
+    NUMERIC_BOUND = "numeric_bound"
+    BUFFER_SIZE_BOUND = "buffer_size_bound"
+    MINIMUM_CONSUMPTION = "minimum_consumption"
+    DOMINANT_GUARD = "dominant_guard"
+    NARROWING = "narrowing"
+
+
 class GraphNode(AnalysisModel):
     node_id: str = Field(min_length=1)
     path: str = Field(min_length=1)
@@ -41,6 +49,7 @@ class GraphNode(AnalysisModel):
     kind: NodeKind
     visibility: str = Field(pattern=r"^(external|internal|generated)$")
     calls: tuple[str, ...] = ()
+    aliases: tuple[str, ...] = ()
 
 
 class GraphEdge(AnalysisModel):
@@ -100,6 +109,22 @@ class RiskChain(AnalysisModel):
     rationale: str = Field(min_length=1)
 
 
+class ConstraintFact(AnalysisModel):
+    fact_id: str = Field(pattern=r"^constraint_[0-9a-f]{20}$")
+    policy_version: str = "c-constraint-v1"
+    kind: ConstraintKind
+    node_id: str = Field(min_length=1)
+    path: str = Field(min_length=1)
+    line: int = Field(ge=1)
+    end_line: int = Field(ge=1)
+    subject: str = Field(min_length=1)
+    relation: str = Field(pattern=r"^(?:<=|<|>=|>|==|!=)$")
+    bound: str = Field(min_length=1)
+    expression: str = Field(min_length=1)
+    evidence: str = Field(min_length=1)
+    confidence: str = Field(pattern=r"^(?:low|medium|high)$")
+
+
 class CAnalysisGraph(AnalysisModel):
     schema_version: int = 2
     language: str = "c"
@@ -109,6 +134,7 @@ class CAnalysisGraph(AnalysisModel):
     entrypoint_ids: tuple[str, ...] = ()
     critical_sink_ids: tuple[str, ...] = ()
     risk_chains: tuple[RiskChain, ...] = ()
+    constraint_facts: tuple[ConstraintFact, ...] = ()
     unresolved_calls: tuple[UnresolvedCall, ...] = ()
 
 

@@ -257,7 +257,7 @@ def test_chain_first_context_contains_exact_flow_under_hard_limit(tmp_path) -> N
 
     assert focused.seed_file == "convert.c"
     assert focused.seed_file != "."
-    assert packet["context_policy"] == "c-context-v4"
+    assert packet["context_policy"] == "c-context-v5"
     assert packet["risk_chain_policy_version"] == "c-risk-chain-v1"
     assert packet["risk_chains"][0]["chain_id"] == chain.chain_id
     assert packet["risk_chains"][0]["score"] >= 90
