@@ -595,12 +595,29 @@ class SourceFileEntry(DomainModel):
         return self
 
 
+class SourceSymlinkEntry(DomainModel):
+    path: str = Field(min_length=1)
+    target: str = Field(min_length=1)
+    resolved_path: str = Field(min_length=1)
+    digest: str = Field(pattern=SHA256_PATTERN)
+
+    @model_validator(mode="after")
+    def validate_source_paths(self) -> "SourceSymlinkEntry":
+        _validate_relative_path(self.path, label="source symlink")
+        _validate_relative_path(self.resolved_path, label="resolved source symlink")
+        if "\0" in self.target:
+            raise ValueError("source symlink target may not contain NUL")
+        return self
+
+
 class SourceManifest(DomainModel):
     schema_version: int = 1
+    normalization_policy: str = "source-snapshot-v1"
     source_url: str | None = None
     resolved_ref: str | None = None
     files: tuple[SourceFileEntry, ...]
     excluded_paths: tuple[str, ...] = ()
+    symlinks: tuple[SourceSymlinkEntry, ...] = ()
 
 
 class SourceSnapshot(DomainModel):
