@@ -110,6 +110,21 @@ def test_one_capacity_root_is_one_bounds_first_admission_unit() -> None:
     assert first.duplicate_coverage_deferred == 2
     assert len({record.logical_chain_group for record in first.ranking}) == 1
     assert first.ranking[0].logical_chain_group == chain.root_cause_group
+    assert len(first.capacity_units) == 1
+    unit = first.capacity_units[0]
+    assert unit.policy_version == "capacity-admission-unit-v1"
+    assert unit.root_cause_group == chain.root_cause_group
+    assert unit.representative_chain_id == chain.chain_id
+    assert unit.representative_work_id == admitted.work_id
+    assert unit.chain_ids == (chain.chain_id,)
+    assert unit.work_ids == tuple(sorted(item.work_id for item in items))
+    assert unit.required_paths == chain.paths
+    assert all(record.capacity_unit_ids == (unit.unit_id,) for record in first.ranking)
+    assert all(
+        record.chain_ids == ()
+        for record in first.ranking
+        if record.work_id != unit.representative_work_id
+    )
 
 
 def test_complete_priority_is_eligible_without_fixed_score_threshold() -> None:
@@ -181,6 +196,18 @@ def test_multi_chain_batch_is_admitted_when_any_group_is_uncovered() -> None:
     assert set(multi_record.logical_chain_groups) == {
         first_chain.root_cause_group,
         second_chain.root_cause_group,
+    }
+    assert len(allocation.capacity_units) == 2
+    units = {unit.root_cause_group: unit for unit in allocation.capacity_units}
+    assert units[first_chain.root_cause_group].representative_work_id == (
+        first_work.work_id
+    )
+    assert units[second_chain.root_cause_group].representative_work_id == (
+        multi_work.work_id
+    )
+    assert set(multi_record.capacity_unit_ids) == {
+        units[first_chain.root_cause_group].unit_id,
+        units[second_chain.root_cause_group].unit_id,
     }
 
 

@@ -8,7 +8,7 @@ import math
 import threading
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Callable
 
 from ..core.llm import LLMResponse
@@ -21,6 +21,7 @@ NATIVE_CHAIN_SHARE = 0.50
 NATIVE_SEED_DIVERSITY_SHARE = 0.25
 NATIVE_HIGH_RISK_SHARE = 1 / 6
 NATIVE_EARLY_SEED_CAP = 2
+CAPACITY_ADMISSION_UNIT_POLICY = "capacity-admission-unit-v1"
 
 
 class BudgetExceededError(RuntimeError):
@@ -49,6 +50,23 @@ class BudgetAllocation:
     seed_cap_exceptions: int = 0
     decisions: tuple["AdmissionDecision", ...] = ()
     ranking: tuple["AdmissionRankingRecord", ...] = ()
+    capacity_units: tuple["CapacityAdmissionUnit", ...] = ()
+
+
+@dataclass(frozen=True)
+class CapacityAdmissionUnit:
+    """One canonical schedulable representative for a capacity root cause."""
+
+    unit_id: str
+    policy_version: str
+    root_cause_group: str
+    priority_class: str
+    representative_chain_id: str
+    representative_work_id: str
+    chain_ids: tuple[str, ...]
+    work_ids: tuple[str, ...]
+    required_paths: tuple[str, ...]
+    evidence_lines: dict[str, tuple[int, ...]]
 
 
 @dataclass(frozen=True)
@@ -65,6 +83,7 @@ class AdmissionDecision:
     coverage_group: str = ""
     logical_chain_group: str = ""
     logical_chain_groups: tuple[str, ...] = ()
+    capacity_unit_ids: tuple[str, ...] = ()
     cap_exception: bool = False
 
 
@@ -89,6 +108,7 @@ class AdmissionRankingRecord:
     coverage_group: str = ""
     logical_chain_group: str = ""
     logical_chain_groups: tuple[str, ...] = ()
+    capacity_unit_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -233,6 +253,12 @@ class _AdmissionCandidate:
     logical_chain_group: str
     logical_chain_groups: tuple[str, ...]
     chain_ids: tuple[str, ...]
+    risk_chain_ids: tuple[str, ...]
+    capacity_chain_ids: tuple[str, ...]
+    capacity_unit_ids: tuple[str, ...]
+    risk_missing_chain_elements: tuple[str, ...]
+    risk_guard_states: tuple[str, ...]
+    risk_entrypoint_reachable: bool
     missing_chain_elements: tuple[str, ...]
     guard_states: tuple[str, ...]
 
@@ -451,7 +477,8 @@ def _allocate_native_diverse(
         logical_chain_groups = tuple(sorted({
             chain.root_cause_group for chain in matching_capacity.values()
         }))
-        missing = set(_missing_chain_elements(tuple(matching.values())))
+        risk_missing = _missing_chain_elements(tuple(matching.values()))
+        missing = set(risk_missing)
         if matching_capacity:
             missing.discard("risk_chain")
             missing.update(
@@ -479,6 +506,16 @@ def _allocate_native_diverse(
             logical_chain_group=logical_chain_group,
             logical_chain_groups=logical_chain_groups,
             chain_ids=tuple(sorted((*matching, *matching_capacity))),
+            risk_chain_ids=tuple(sorted(matching)),
+            capacity_chain_ids=tuple(sorted(matching_capacity)),
+            capacity_unit_ids=(),
+            risk_missing_chain_elements=risk_missing,
+            risk_guard_states=tuple(sorted({
+                chain.guard_state.value for chain in matching.values()
+            })),
+            risk_entrypoint_reachable=any(
+                chain.node_id in entrypoints for chain in matching.values()
+            ),
             missing_chain_elements=tuple(sorted(missing)),
             guard_states=tuple(sorted({
                 chain.guard_state.value for chain in matching.values()
@@ -486,6 +523,10 @@ def _allocate_native_diverse(
                 chain.guard_state.value for chain in matching_capacity.values()
             })),
         ))
+    candidates, capacity_units = _canonicalize_capacity_candidates(
+        candidates,
+        capacity_chains,
+    )
     ordered = sorted(candidates, key=_candidate_order)
 
     nominal_retry = (
@@ -569,6 +610,7 @@ def _allocate_native_diverse(
             coverage_group=candidate.coverage_group,
             logical_chain_group=candidate.logical_chain_group,
             logical_chain_groups=candidate.logical_chain_groups,
+            capacity_unit_ids=candidate.capacity_unit_ids,
             cap_exception=cap_exception,
         ))
         return True
@@ -711,7 +753,176 @@ def _allocate_native_diverse(
             decisions=tuple(decisions),
             deferred=deferred,
         ),
+        capacity_units=capacity_units,
     )
+
+
+def _canonicalize_capacity_candidates(
+    candidates: list[_AdmissionCandidate],
+    capacity_chains: tuple[CapacityRiskChain, ...],
+) -> tuple[list[_AdmissionCandidate], tuple[CapacityAdmissionUnit, ...]]:
+    """Keep one auditable scheduling representative for each capacity root."""
+    chains_by_id = {chain.chain_id: chain for chain in capacity_chains}
+    candidates_by_group: dict[str, list[_AdmissionCandidate]] = {}
+    chain_ids_by_group: dict[str, set[str]] = {}
+    for candidate in candidates:
+        for chain_id in candidate.capacity_chain_ids:
+            chain = chains_by_id.get(chain_id)
+            if chain is None:
+                continue
+            candidates_by_group.setdefault(chain.root_cause_group, []).append(
+                candidate
+            )
+            chain_ids_by_group.setdefault(chain.root_cause_group, set()).add(
+                chain_id
+            )
+
+    units = []
+    units_by_work: dict[str, list[CapacityAdmissionUnit]] = {}
+    represented_units_by_work: dict[str, list[CapacityAdmissionUnit]] = {}
+    for group in sorted(candidates_by_group):
+        group_chains = tuple(
+            chains_by_id[chain_id]
+            for chain_id in sorted(chain_ids_by_group[group])
+        )
+        representative_chain = min(
+            group_chains,
+            key=lambda chain: (
+                _capacity_priority_rank(chain.priority_class.value),
+                -chain.score,
+                -_capacity_evidence_score(chain),
+                chain.chain_id,
+            ),
+        )
+        eligible = {
+            candidate.item.work_id: candidate
+            for candidate in candidates_by_group[group]
+            if representative_chain.chain_id in candidate.capacity_chain_ids
+        }
+        representative = min(
+            eligible.values(),
+            key=lambda candidate: (
+                candidate.item.seed_file != representative_chain.root_path,
+                _hunter_priority(candidate.item.hunter),
+                len(candidate.capacity_chain_ids),
+                _candidate_order(candidate),
+            ),
+        )
+        evidence_lines = {
+            path: tuple(lines)
+            for path, lines in sorted(representative_chain.evidence_lines.items())
+        }
+        unit = CapacityAdmissionUnit(
+            unit_id=_capacity_unit_id(group),
+            policy_version=CAPACITY_ADMISSION_UNIT_POLICY,
+            root_cause_group=group,
+            priority_class=representative_chain.priority_class.value,
+            representative_chain_id=representative_chain.chain_id,
+            representative_work_id=representative.item.work_id,
+            chain_ids=tuple(chain.chain_id for chain in group_chains),
+            work_ids=tuple(sorted({
+                candidate.item.work_id
+                for candidate in candidates_by_group[group]
+            })),
+            required_paths=representative_chain.paths,
+            evidence_lines=evidence_lines,
+        )
+        units.append(unit)
+        for work_id in unit.work_ids:
+            units_by_work.setdefault(work_id, []).append(unit)
+        represented_units_by_work.setdefault(
+            representative.item.work_id, []
+        ).append(unit)
+
+    canonical = []
+    for candidate in candidates:
+        associated = tuple(sorted(
+            units_by_work.get(candidate.item.work_id, ()),
+            key=lambda unit: unit.unit_id,
+        ))
+        represented = tuple(sorted(
+            represented_units_by_work.get(candidate.item.work_id, ()),
+            key=lambda unit: unit.unit_id,
+        ))
+        if not represented:
+            logical_groups = tuple(
+                unit.root_cause_group for unit in associated
+            )
+            canonical.append(replace(
+                candidate,
+                capacity_chain_score=0,
+                capacity_evidence_score=0,
+                priority_class="unclassified",
+                entrypoint_reachable=candidate.risk_entrypoint_reachable,
+                coverage_group=(
+                    logical_groups[0]
+                    if logical_groups else _coverage_group(candidate.item)
+                ),
+                logical_chain_group=(logical_groups[0] if logical_groups else ""),
+                logical_chain_groups=logical_groups,
+                chain_ids=candidate.risk_chain_ids,
+                capacity_chain_ids=(),
+                capacity_unit_ids=tuple(unit.unit_id for unit in associated),
+                missing_chain_elements=candidate.risk_missing_chain_elements,
+                guard_states=candidate.risk_guard_states,
+            ))
+            continue
+        representative_chains = tuple(
+            chains_by_id[unit.representative_chain_id]
+            for unit in represented
+        )
+        best_chain = min(
+            representative_chains,
+            key=lambda chain: (
+                _capacity_priority_rank(chain.priority_class.value),
+                -chain.score,
+                -_capacity_evidence_score(chain),
+                chain.chain_id,
+            ),
+        )
+        missing = set(candidate.risk_missing_chain_elements)
+        missing.discard("risk_chain")
+        missing.update(
+            element
+            for chain in representative_chains
+            for element in chain.missing_elements
+        )
+        canonical.append(replace(
+            candidate,
+            capacity_chain_score=max(chain.score for chain in representative_chains),
+            capacity_evidence_score=max(
+                _capacity_evidence_score(chain) for chain in representative_chains
+            ),
+            priority_class=best_chain.priority_class.value,
+            entrypoint_reachable=(
+                candidate.risk_entrypoint_reachable
+                or any(chain.entrypoint_reachable for chain in representative_chains)
+            ),
+            coverage_group=best_chain.root_cause_group,
+            logical_chain_group=best_chain.root_cause_group,
+            logical_chain_groups=tuple(
+                unit.root_cause_group for unit in associated
+            ),
+            chain_ids=tuple(sorted((
+                *candidate.risk_chain_ids,
+                *(chain.chain_id for chain in representative_chains),
+            ))),
+            capacity_chain_ids=tuple(sorted(
+                chain.chain_id for chain in representative_chains
+            )),
+            capacity_unit_ids=tuple(unit.unit_id for unit in associated),
+            missing_chain_elements=tuple(sorted(missing)),
+            guard_states=tuple(sorted({
+                *candidate.risk_guard_states,
+                *(chain.guard_state.value for chain in representative_chains),
+            })),
+        ))
+    return canonical, tuple(units)
+
+
+def _capacity_unit_id(root_cause_group: str) -> str:
+    canonical = f"{CAPACITY_ADMISSION_UNIT_POLICY}\0{root_cause_group}"
+    return "capacity_unit_" + hashlib.sha256(canonical.encode()).hexdigest()[:20]
 
 
 def _native_ranking_records(
@@ -760,6 +971,7 @@ def _native_ranking_records(
             coverage_group=candidate.coverage_group,
             logical_chain_group=candidate.logical_chain_group,
             logical_chain_groups=candidate.logical_chain_groups,
+            capacity_unit_ids=candidate.capacity_unit_ids,
         ))
     return tuple(records)
 

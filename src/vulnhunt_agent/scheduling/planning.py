@@ -140,6 +140,9 @@ def _plan_contract(
             "deferred": dict(sorted(allocation.deferred.items())),
             "decisions": [asdict(item) for item in allocation.decisions],
             "ranking": [asdict(item) for item in allocation.ranking],
+            "capacity_units": [
+                asdict(item) for item in allocation.capacity_units
+            ],
             "retry_slots": allocation.retry_slots,
         },
     }
@@ -152,6 +155,9 @@ def _plan_contract(
         "work_items": len(work_items),
         "admitted_sessions": len(allocation.admitted_work_ids),
         "deferred_sessions": len(allocation.deferred),
+        "capacity_units": [
+            asdict(item) for item in allocation.capacity_units
+        ],
     }
 
 
