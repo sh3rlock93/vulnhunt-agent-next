@@ -1,6 +1,6 @@
 # M11 — Reliable bounded scans and candidate falsification on live repositories
 
-Status: PR 1–6 merged; PR 7 implemented and release gates verified, pending merge
+Status: complete; PR 1–7 merged and release gates verified
 
 ## Goal
 
