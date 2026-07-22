@@ -55,5 +55,5 @@ green.
   were frozen
 - Oracle isolation: no oracle or fixed tree was provided to discovery and no
   denied oracle access attempt occurred
-- Local validation: Ruff and scoped mypy passed; pytest reported 255 passed
+- Local validation: Ruff and full mypy passed; pytest reported 255 passed
   and 7 intentionally skipped tests

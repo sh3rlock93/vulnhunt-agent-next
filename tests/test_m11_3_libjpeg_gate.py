@@ -4,6 +4,7 @@ import json
 import tomllib
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 from benchmarks.run_libjpeg_capacity_benchmark import (
     REQUIRED_BUDGET,
@@ -113,7 +114,7 @@ def test_authenticated_gate_loads_unverified_raw_hunter_finding(
 
 
 def test_authenticated_gate_requires_enforced_per_work_input_limit() -> None:
-    plan = {
+    plan: dict[str, Any] = {
         "budget_allocation": {
             "input_fairness": {
                 "policy_version": "work-input-fairness-v2",
