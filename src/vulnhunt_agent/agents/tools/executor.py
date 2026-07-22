@@ -33,6 +33,7 @@ class HunterTools:
         self._seen_reads: set[tuple] = set()
         self._seen_greps: set[tuple] = set()
         self.execution_records: list[dict] = []
+        self.source_reads: list[dict] = []
         self.written_pocs: list[str] = []
         self.tool_calls = 0
         self.repeated_reads = 0
@@ -54,7 +55,20 @@ class HunterTools:
                     self.repeated_reads += 1
                     return f"(already read {inp['path']} with the same range earlier in this session)"
                 self._seen_reads.add(read_key)
-                return self._read_file(inp["path"], inp.get("start", 1), inp.get("end"))
+                output = self._read_file(
+                    inp["path"], inp.get("start", 1), inp.get("end")
+                )
+                if not output.startswith("ERROR:"):
+                    self.source_reads.append({
+                        "path": str(inp["path"]),
+                        "start": max(1, int(inp.get("start", 1))),
+                        "end": (
+                            int(inp["end"])
+                            if inp.get("end") is not None else None
+                        ),
+                        "bytes": len(output.encode("utf-8")),
+                    })
+                return output
             if name == "grep":
                 grep_key = ("grep", inp["pattern"], inp.get("path"))
                 if grep_key in self._seen_greps:
