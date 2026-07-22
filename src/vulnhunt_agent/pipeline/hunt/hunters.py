@@ -192,6 +192,8 @@ _CHECKPOINT_FIELDS = (
     "protocol_repairs",
     "protocol_repair_successes",
     "transient_retries",
+    "source_evidence_retries",
+    "capacity_negative_rechecks",
     "model_failures",
 )
 

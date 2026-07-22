@@ -1,6 +1,8 @@
 """Bounded graph context passed to each file-scoped Hunter."""
 from __future__ import annotations
 
+import re
+
 from ..domain.schemas import HunterWorkItem
 
 MAX_RELATED_CONTEXT_NODES = 16
@@ -81,6 +83,7 @@ def context_for_work_item(
         work_item.focus_chain_ids,
         support_limit=3,
     )
+    capacity_chains = _attach_capacity_evidence_facts(graph, capacity_chains)
     selected_ids = set(work_item.slice_ids)
     matching = [
         item for item in plan.get("slices", [])
@@ -162,6 +165,106 @@ def matching_capacity_risk_chains(
         target_signal_ids=set(work_item.target_signal_ids),
         target_node_ids=set(work_item.target_node_ids),
     )
+
+
+def _attach_capacity_evidence_facts(
+    graph: dict,
+    chains: list[dict],
+) -> list[dict]:
+    """Keep the highest-value allocation/write formulas beside each chain."""
+    facts = {
+        str(item.get("fact_id", "")): item
+        for item in graph.get("capacity_facts", [])
+        if item.get("fact_id")
+    }
+    enriched = []
+    for chain in chains:
+        selected_ids = set(chain.get("fact_ids") or ())
+        candidates = [facts[fact_id] for fact_id in selected_ids if fact_id in facts]
+        candidates.sort(key=lambda item: (
+            -_capacity_fact_context_score(
+                item,
+                allocation_fact_id=str(chain.get("allocation_fact_id", "")),
+            ),
+            str(item.get("path", "")),
+            int(item.get("line", 0)),
+            str(item.get("fact_id", "")),
+        ))
+        enriched.append({
+            **chain,
+            "evidence_facts": [
+                _compact_capacity_fact(item) for item in candidates[:8]
+            ],
+        })
+    return enriched
+
+
+def _capacity_fact_context_score(
+    fact: dict,
+    *,
+    allocation_fact_id: str,
+) -> int:
+    if str(fact.get("fact_id", "")) == allocation_fact_id:
+        return 1_000
+    kind = str(fact.get("kind", ""))
+    score = {"advance": 90, "write": 60, "alias": 30, "allocation": 20}.get(
+        kind, 0
+    )
+    formulas = " ".join(str(fact.get(field, "")) for field in (
+        "element_count",
+        "offset",
+        "remaining_capacity",
+        "write_extent",
+        "evidence",
+    ))
+    if re.search(
+        r"\b\w*(?:width|height|stride|pitch|size|count|extent)\w*\b",
+        formulas,
+        re.I,
+    ):
+        score += 70
+    if any(marker in formulas for marker in ("[", "]", "*", "/", "+", "-", "(")):
+        score += 40
+    write_extent = str(fact.get("write_extent", ""))
+    if write_extent and re.search(r"[A-Za-z_]", write_extent):
+        score += 50
+        if not re.fullmatch(
+            r"\(?\s*(?:[A-Za-z_]\w*|\d+)\s*\)?\s*\+\s*\(?\s*\d+\s*\)?",
+            write_extent,
+        ):
+            score += 70
+    if re.search(
+        r"\b(?:memcpy|memmove|memset|strcpy|strncpy|read|recv)\b",
+        str(fact.get("evidence", "")),
+    ):
+        score += 100
+    if re.search(
+        r"\b(?:PAD|ALIGN|ROUND|\w*(?:Width|Height|Size))\s*\(",
+        str(fact.get("evidence", "")),
+    ):
+        score += 100
+    score += min(80, sum(formulas.count(marker) for marker in "*/+-") * 10)
+    return score
+
+
+def _compact_capacity_fact(fact: dict) -> dict:
+    return {
+        field: fact.get(field, "")
+        for field in (
+            "fact_id",
+            "kind",
+            "path",
+            "line",
+            "function",
+            "subject",
+            "base",
+            "element_count",
+            "offset",
+            "remaining_capacity",
+            "write_extent",
+            "evidence",
+        )
+    }
 
 
 def matching_capacity_risk_chains_for_targets(

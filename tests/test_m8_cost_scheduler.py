@@ -50,6 +50,7 @@ from vulnhunt_agent.pipeline.filter_files import run_filter
 from vulnhunt_agent.pipeline.source_snapshot import run_source_snapshot
 from vulnhunt_agent.pipeline import hunt as hunt_pipeline
 from vulnhunt_agent.scheduling import (
+    AdmissionDecision,
     BudgetAllocation,
     BudgetController,
     BudgetedLLMClient,
@@ -377,7 +378,7 @@ def test_per_work_input_cap_prevents_one_session_from_consuming_its_peer() -> No
     first = "work_" + "a" * 64
     second = "work_" + "b" * 64
     plan = WorkInputBudgetPlan(
-        policy_version="work-input-fairness-v1",
+        policy_version="work-input-fairness-v2",
         per_work_input_limit=50,
         critical_first_call_reserve=50,
         work_input_limits={first: 50, second: 50},
@@ -420,7 +421,7 @@ def test_unstarted_critical_work_keeps_its_first_call_reserve() -> None:
     general = "work_" + "a" * 64
     critical = "work_" + "b" * 64
     plan = WorkInputBudgetPlan(
-        policy_version="work-input-fairness-v1",
+        policy_version="work-input-fairness-v2",
         per_work_input_limit=50,
         critical_first_call_reserve=50,
         work_input_limits={general: 100, critical: 50},
@@ -464,6 +465,18 @@ def test_work_input_budget_is_derived_from_admitted_sessions() -> None:
         high_risk_slots=0,
         retry_slots=0,
         general_slots=0,
+        decisions=(
+            AdmissionDecision(
+                work_id=items[0].work_id,
+                rank=1,
+                quota="chain_critical",
+                component="first",
+                seed_file=items[0].seed_file,
+                score=100,
+                score_components={},
+                reason="test critical completion allowance",
+            ),
+        ),
     )
 
     plan = build_work_input_budget(
@@ -472,11 +485,14 @@ def test_work_input_budget_is_derived_from_admitted_sessions() -> None:
         BudgetPolicy(max_input_tokens=101),
     )
 
-    assert plan.policy_version == "work-input-fairness-v1"
-    assert plan.per_work_input_limit == 50
+    assert plan.policy_version == "work-input-fairness-v2"
+    assert plan.per_work_input_limit == 101
     assert plan.critical_first_call_reserve == 50
-    assert plan.work_input_limits == {item.work_id: 50 for item in items}
-    assert plan.critical_work_ids == tuple(item.work_id for item in items)
+    assert plan.work_input_limits == {
+        items[0].work_id: 101,
+        items[1].work_id: 100,
+    }
+    assert plan.critical_work_ids == (items[0].work_id,)
 
 
 def test_budget_controller_refuses_calls_after_deadline() -> None:
@@ -1044,7 +1060,7 @@ def test_full_router_prevalidates_dense_targets_without_truncation() -> None:
         for index, signal in enumerate(signals)
     )
 
-    def route(*, reverse: bool) -> HunterRoutingPlan:
+    def route(*, reverse: bool, snapshot: str = HASH_A) -> HunterRoutingPlan:
         ordered_signals = tuple(reversed(signals)) if reverse else signals
         ordered_slices = tuple(reversed(slices)) if reverse else slices
         graph = CAnalysisGraph(
@@ -1065,7 +1081,7 @@ def test_full_router_prevalidates_dense_targets_without_truncation() -> None:
         )
         return build_routing_plan(
             run_id="run-dense",
-            source_snapshot=HASH_A,
+            source_snapshot=snapshot,
             selected_files=[node.path],
             enabled_hunters=["c-bounds-integers"],
             analysis={
@@ -1077,6 +1093,7 @@ def test_full_router_prevalidates_dense_targets_without_truncation() -> None:
 
     first = route(reverse=False)
     second = route(reverse=True)
+    other_snapshot = route(reverse=False, snapshot=HASH_B)
 
     assert first == second
     assert first.policy_version == "c-signal-router-v3"
@@ -1101,9 +1118,32 @@ def test_full_router_prevalidates_dense_targets_without_truncation() -> None:
             covered_sink_ids=tuple(signal.signal_id for signal in signals),
         ).model_dump(mode="json"),
     })
+    bounded_other_snapshot = build_slice_work_items(other_snapshot, {
+        "coverage_plan": CoveragePlan(
+            slices=slices,
+            selected_files=(node.path,),
+            covered_entrypoint_ids=(node.node_id,),
+            covered_sink_ids=tuple(signal.signal_id for signal in signals),
+        ).model_dump(mode="json"),
+    })
     assert len(bounded) == 49
     assert all(item.planning_policy == "c-slice-work-v4" for item in bounded)
     assert all(len(item.target_signal_ids) <= 6 for item in bounded)
+    assert [
+        {
+            key: value
+            for key, value in item.model_dump(mode="json").items()
+            if key not in {"work_id", "run_id", "source_snapshot"}
+        }
+        for item in bounded
+    ] == [
+        {
+            key: value
+            for key, value in item.model_dump(mode="json").items()
+            if key not in {"work_id", "run_id", "source_snapshot"}
+        }
+        for item in bounded_other_snapshot
+    ]
     assert {
         signal_id
         for item in bounded

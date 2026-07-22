@@ -27,7 +27,7 @@ capacity_summary = "c-capacity-summary-v2"
 capacity_risk_chain = "c-capacity-risk-chain-v3"
 slice_work = "c-slice-work-v4"
 context = "c-context-v6"
-admission = "c-budget-v6"
+admission = "c-budget-v7"
 evidence = "native-evidence-v2"
 model_protocol = "strict-tool-json-v3"
 

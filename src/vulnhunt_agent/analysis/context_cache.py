@@ -897,6 +897,7 @@ def _compact_capacity_risk_chain(chain: dict) -> dict:
         "guard_state": chain.get("guard_state", "unknown"),
         "missing_elements": list(chain.get("missing_elements") or ()),
         "evidence_lines": evidence_lines,
+        "evidence_facts": list(chain.get("evidence_facts") or ())[:8],
         "priority_class": chain.get("priority_class", ""),
         "score": int(chain.get("score", 0)),
         "confidence": chain.get("confidence", ""),

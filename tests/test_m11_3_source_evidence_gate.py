@@ -146,6 +146,66 @@ async def test_final_answer_without_focused_read_fails_closed_after_one_retry(
     assert result.target_dispositions[0]["status"] == "deferred"
 
 
+class CapacityNegativeRecheckClient:
+    def __init__(self) -> None:
+        self.calls = 0
+        self.messages: list[list[dict]] = []
+
+    async def chat(self, *, messages, **kwargs) -> LLMResponse:
+        self.calls += 1
+        self.messages.append(list(messages))
+        if self.calls == 1:
+            return _response(tool={
+                "toolUseId": "read-capacity",
+                "name": "read_file",
+                "input": {"path": "target.c", "start": 1, "end": 2},
+            })
+        return _response(_final("no_finding"))
+
+
+async def test_complete_unchecked_no_finding_gets_one_adversarial_recheck(
+    tmp_path,
+) -> None:
+    (tmp_path / "target.c").write_text(
+        "void target(char *dst, int n) {\n  copy(dst, n);\n}\n"
+    )
+    client = CapacityNegativeRecheckClient()
+    context = {
+        "focus_chain_ids": ["capacity_risk_" + "a" * 20],
+        "change_focus": {"target_signal_ids": ["sig-focus"]},
+        "risk_chains": [],
+        "capacity_risk_chains": [{
+            "chain_id": "capacity_risk_" + "a" * 20,
+            "priority_class": "complete_unchecked_capacity_path",
+            "base": "dst",
+            "element_count": "capacity",
+            "guard_state": "absent",
+            "evidence_lines": {"target.c": [1, 2]},
+            "evidence_facts": [{
+                "kind": "write",
+                "write_extent": "rounded_width",
+                "evidence": "copy writes rounded_width bytes",
+            }],
+        }],
+    }
+
+    result = await HunterAgent(
+        client=cast(Any, client),
+        tools=HunterTools(tmp_path),
+        arch={"language": "c", "environment": "c:gcc-13"},
+        hunter_prompt="Review the capacity chain.",
+        max_iterations=4,
+    ).hunt("target.c", context)
+
+    assert client.calls == 3
+    assert result.stopped == "final_json"
+    assert result.capacity_negative_rechecks == 1
+    recheck_prompt = client.messages[2][-1]["content"][0]["text"]
+    assert "Capacity negative-result gate" in recheck_prompt
+    assert "rounded_width" in recheck_prompt
+    assert "normalized enum/category" in recheck_prompt
+
+
 async def test_hunter_tools_record_only_successful_unique_source_reads(tmp_path) -> None:
     (tmp_path / "target.c").write_text("line one\nline two\n")
     tools = HunterTools(tmp_path)

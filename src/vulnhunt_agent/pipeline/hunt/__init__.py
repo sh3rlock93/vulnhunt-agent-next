@@ -951,9 +951,20 @@ def _save_summary(
         ),
         "tasks": [asdict(t) for t in final.tasks],
     }
-    summary["target_completion"] = _target_completion(qstore, final.tasks)
-    summary["protocol_metrics"] = _protocol_metrics(qstore, final.tasks)
     plan = store.load_step("hunt_plan") or {}
+    planned_targets = {
+        str(item.get("work_id", "")): tuple(
+            item.get("target_signal_ids") or item.get("target_node_ids") or ()
+        )
+        for item in plan.get("work_items", [])
+        if item.get("work_id")
+    }
+    summary["target_completion"] = _target_completion(
+        qstore,
+        final.tasks,
+        planned_targets=planned_targets,
+    )
+    summary["protocol_metrics"] = _protocol_metrics(qstore, final.tasks)
     snapshot = store.load_step("source_snapshot") or {}
     summary["run_outcome"] = classify_run_outcome(
         summary,
@@ -973,7 +984,12 @@ def _save_summary(
     )
 
 
-def _target_completion(qstore, tasks: list[HuntTask]) -> dict:
+def _target_completion(
+    qstore,
+    tasks: list[HuntTask],
+    *,
+    planned_targets: dict[str, tuple[str, ...]] | None = None,
+) -> dict:
     counts = {
         "finding": 0,
         "no_finding": 0,
@@ -982,7 +998,9 @@ def _target_completion(qstore, tasks: list[HuntTask]) -> dict:
     }
     incomplete: list[dict[str, str]] = []
     for task in tasks:
-        expected = task.target_signal_ids or task.target_node_ids
+        expected = (planned_targets or {}).get(task.work_id)
+        if expected is None:
+            expected = tuple(task.target_signal_ids or task.target_node_ids)
         if not expected:
             continue
         dispositions: dict[str, str] = {}

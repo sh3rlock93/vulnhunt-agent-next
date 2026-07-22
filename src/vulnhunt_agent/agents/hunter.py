@@ -18,6 +18,8 @@ from .tools import HunterTools, tool_specs
 TARGET_COMPLETION_POLICY = "c-target-completion-v1"
 SOURCE_EVIDENCE_POLICY = "c-source-read-evidence-v1"
 SOURCE_EVIDENCE_RETRY_LIMIT = 1
+CAPACITY_NEGATIVE_RECHECK_POLICY = "c-capacity-negative-recheck-v1"
+CAPACITY_NEGATIVE_RECHECK_LIMIT = 1
 
 
 FINAL_REPORT_INSTRUCTIONS = """VERIFY WITH A PoC.
@@ -157,6 +159,7 @@ class HuntResult:
     protocol_repair_successes: int = 0
     transient_retries: int = 0
     source_evidence_retries: int = 0
+    capacity_negative_rechecks: int = 0
     model_failures: dict[str, int] = field(default_factory=dict)
     stopped: str = ""   # "final_json" | "max_iter" | "error"
     budget_reason: str = ""
@@ -422,6 +425,32 @@ class HunterAgent:
                             self._attach_tool_ledger(result)
                             self._checkpoint(result)
                             return result
+                    if (
+                        _needs_capacity_negative_recheck(
+                            analysis_context,
+                            findings=findings,
+                            dispositions=dispositions,
+                        )
+                        and result.capacity_negative_rechecks
+                        < CAPACITY_NEGATIVE_RECHECK_LIMIT
+                        and i + 1 < self.max_iterations
+                    ):
+                        result.capacity_negative_rechecks += 1
+                        messages.append({
+                            "role": "user",
+                            "content": [{"text": _capacity_negative_recheck_message(
+                                analysis_context or {},
+                                dispositions,
+                            )}],
+                        })
+                        self.on_event(
+                            "capacity_negative_recheck",
+                            policy=CAPACITY_NEGATIVE_RECHECK_POLICY,
+                            retry=result.capacity_negative_rechecks,
+                        )
+                        self._attach_tool_ledger(result)
+                        self._checkpoint(result)
+                        continue
                     result.findings = findings
                     result.target_dispositions = dispositions
                     result.incomplete_target_ids = incomplete
@@ -526,6 +555,8 @@ def _result_with_initial_metrics(raw: dict) -> HuntResult:
         "protocol_repairs",
         "protocol_repair_successes",
         "transient_retries",
+        "source_evidence_retries",
+        "capacity_negative_rechecks",
     )
     for name in integer_fields:
         value = raw.get(name, 0)
@@ -669,6 +700,59 @@ def _source_evidence_retry_message(
         f"Suggested reads: {json.dumps(reads, ensure_ascii=False)}. "
         "Focused immutable context shard: "
         + json.dumps(context, ensure_ascii=False, separators=(",", ":"))
+    )
+
+
+def _needs_capacity_negative_recheck(
+    context: dict | None,
+    *,
+    findings: list[dict],
+    dispositions: list[dict],
+) -> bool:
+    if findings or not dispositions:
+        return False
+    if any(item.get("status") != "no_finding" for item in dispositions):
+        return False
+    focus_ids = set((context or {}).get("focus_chain_ids") or ())
+    return any(
+        str(chain.get("chain_id", "")) in focus_ids
+        and chain.get("priority_class") == "complete_unchecked_capacity_path"
+        for chain in (context or {}).get("capacity_risk_chains") or ()
+    )
+
+
+def _capacity_negative_recheck_message(
+    context: dict,
+    dispositions: list[dict],
+) -> str:
+    focus_ids = set(context.get("focus_chain_ids") or ())
+    chains = [
+        {
+            "chain_id": chain.get("chain_id", ""),
+            "base": chain.get("base", ""),
+            "element_count": chain.get("element_count", ""),
+            "guard_state": chain.get("guard_state", "unknown"),
+            "evidence_facts": chain.get("evidence_facts") or [],
+        }
+        for chain in context.get("capacity_risk_chains") or ()
+        if str(chain.get("chain_id", "")) in focus_ids
+        and chain.get("priority_class") == "complete_unchecked_capacity_path"
+    ]
+    return (
+        "Capacity negative-result gate requires one adversarial recheck before "
+        "accepting no_finding. Equal argument names do not prove that allocation "
+        "and write formulas are equal. Compare the exact allocation extent, plane "
+        "offsets/strides, and final write extent; test small boundary values around "
+        "rounding, alignment, scaling, and division. If a helper sizes the allocation "
+        "but a different local formula controls writes, transcribe both formulas "
+        "independently from source in the PoC; do not reuse one formula for both. "
+        "For parsed formats, do not assume a normalized enum/category uniquely "
+        "determines raw header factors: vary parser-accepted noncanonical factor "
+        "combinations independently unless validation proves canonicalization. "
+        "If equality cannot be proved, "
+        "report an unverified finding and attempt a PoC. Return revised final JSON. "
+        f"Focused facts: {json.dumps(chains, ensure_ascii=False)}. "
+        f"Prior dispositions: {json.dumps(dispositions, ensure_ascii=False)}."
     )
 
 

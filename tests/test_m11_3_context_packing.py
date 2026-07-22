@@ -146,6 +146,14 @@ def test_packet_fit_compacts_one_large_focus_capacity_chain_before_source() -> N
             "score": 100,
             "confidence": "high",
             "entrypoint_reachable": True,
+            "evidence_facts": [{
+                "fact_id": "capacity_" + "3" * 20,
+                "kind": "write",
+                "path": "write.c",
+                "line": 20,
+                "write_extent": "row_width",
+                "evidence": "memcpy writes row_width bytes",
+            }],
             "rationale": "complete cross-file capacity path",
         }],
         "slices": [],
@@ -174,6 +182,7 @@ def test_packet_fit_compacts_one_large_focus_capacity_chain_before_source() -> N
     assert chain["paths"] == ["decode.c", "write.c"]
     assert chain["evidence_lines"] == {"decode.c": [10], "write.c": [20]}
     assert chain["write_count"] == 1
+    assert chain["evidence_facts"][0]["write_extent"] == "row_width"
     assert "fact_ids" not in chain
     assert len(fitted["source_excerpts"][0]["content"]) == 4_000
     assert fitted["truncation"]["compacted_capacity_risk_chains"] == 1

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 from tests.factories import HASH_A
 from vulnhunt_agent.analysis import build_c_analysis_graph, build_coverage_plan
 from vulnhunt_agent.domain.schemas import BudgetPolicy
@@ -58,6 +60,59 @@ def test_native_plan_contract_ignores_run_identity(tmp_path) -> None:
     ]
     assert {item.run_id for item in first.work_items} == {"deterministic"}
     assert {item.run_id for item in second.work_items} == {"authenticated"}
+
+
+def test_normalized_plan_contract_ignores_snapshot_specific_ids(tmp_path) -> None:
+    coverage, analysis = _analysis(tmp_path)
+    inputs = {
+        "run_id": "same-run",
+        "selected_files": list(coverage.selected_files),
+        "enabled_hunters": ["c-bounds-integers", "c-memory-lifetime"],
+        "analysis": analysis,
+    }
+    first_work = build_native_work_plan(source_snapshot=HASH_A, **inputs)
+    second_work = build_native_work_plan(
+        source_snapshot="sha256:" + "b" * 64,
+        **inputs,
+    )
+    policy = BudgetPolicy(max_hunter_sessions=4, max_retries_per_work_item=1)
+
+    first = allocate_native_work_plan(first_work, policy)
+    second = allocate_native_work_plan(second_work, policy)
+
+    assert first.contract["semantic_sha256"] != second.contract["semantic_sha256"]
+    assert first.contract["normalized_semantic_sha256"] == (
+        second.contract["normalized_semantic_sha256"]
+    )
+    assert first.allocation.admitted_work_ids != second.allocation.admitted_work_ids
+
+
+def test_normalized_plan_contract_ignores_scope_identity_digest(tmp_path) -> None:
+    coverage, analysis = _analysis(tmp_path)
+    inputs = {
+        "run_id": "same-run",
+        "source_snapshot": HASH_A,
+        "selected_files": list(coverage.selected_files),
+        "enabled_hunters": ["c-bounds-integers"],
+        "analysis": analysis,
+    }
+    first_work = build_native_work_plan(**inputs)
+    second_work = replace(
+        first_work,
+        work_items=tuple(
+            item.model_copy(update={"scan_scope_digest": "sha256:" + "b" * 64})
+            for item in first_work.work_items
+        ),
+    )
+    policy = BudgetPolicy(max_hunter_sessions=4, max_retries_per_work_item=0)
+
+    first = allocate_native_work_plan(first_work, policy)
+    second = allocate_native_work_plan(second_work, policy)
+
+    assert first.contract["semantic_sha256"] != second.contract["semantic_sha256"]
+    assert first.contract["normalized_semantic_sha256"] == (
+        second.contract["normalized_semantic_sha256"]
+    )
 
 
 def test_native_plan_contract_records_hunter_selection(tmp_path) -> None:

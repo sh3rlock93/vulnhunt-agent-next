@@ -16,13 +16,13 @@ from ..analysis.models import CapacityPriorityClass, CapacityRiskChain, RiskChai
 from ..domain.schemas import BudgetPolicy, BudgetUsage, HunterWorkItem
 
 LEGACY_BUDGET_POLICY = "hunter-budget-allocation-v1"
-NATIVE_DIVERSE_POLICY = "c-budget-v6"
+NATIVE_DIVERSE_POLICY = "c-budget-v7"
 NATIVE_CHAIN_SHARE = 0.50
 NATIVE_SEED_DIVERSITY_SHARE = 0.25
 NATIVE_HIGH_RISK_SHARE = 1 / 6
 NATIVE_EARLY_SEED_CAP = 2
 CAPACITY_ADMISSION_UNIT_POLICY = "capacity-admission-unit-v1"
-WORK_INPUT_FAIRNESS_POLICY = "work-input-fairness-v1"
+WORK_INPUT_FAIRNESS_POLICY = "work-input-fairness-v2"
 
 
 class BudgetExceededError(RuntimeError):
@@ -406,6 +406,8 @@ def allocate_work_items(
 def apply_admission_focus(
     work_items: tuple[HunterWorkItem, ...],
     allocation: BudgetAllocation,
+    *,
+    capacity_chains: tuple[CapacityRiskChain, ...] = (),
 ) -> tuple[HunterWorkItem, ...]:
     """Attach auditable ranking chains without changing stable work identities."""
     ranked_chain_ids = {
@@ -413,15 +415,54 @@ def apply_admission_focus(
         for record in allocation.ranking
         if record.chain_ids
     }
+    capacity_by_id = {chain.chain_id: chain for chain in capacity_chains}
+    representative_chains: dict[str, list[CapacityRiskChain]] = {}
+    for unit in allocation.capacity_units:
+        chain = capacity_by_id.get(unit.representative_chain_id)
+        if chain is not None:
+            representative_chains.setdefault(
+                unit.representative_work_id, []
+            ).append(chain)
     focused = []
     for item in work_items:
-        chain_ids = ranked_chain_ids.get(item.work_id, item.focus_chain_ids)
-        if chain_ids == item.focus_chain_ids:
+        primary_capacity = min(
+            representative_chains.get(item.work_id, ()),
+            key=lambda chain: (
+                _capacity_priority_rank(chain.priority_class.value),
+                -chain.score,
+                chain.chain_id,
+            ),
+            default=None,
+        )
+        chain_ids = (
+            (primary_capacity.chain_id,)
+            if primary_capacity is not None
+            else ranked_chain_ids.get(item.work_id, item.focus_chain_ids)
+        )
+        target_signal_ids = item.target_signal_ids
+        if primary_capacity is not None:
+            capacity_signal_ids = {
+                *primary_capacity.source_signal_ids,
+                *primary_capacity.allocation_signal_ids,
+                *primary_capacity.write_signal_ids,
+            }
+            narrowed = tuple(
+                signal_id
+                for signal_id in item.target_signal_ids
+                if signal_id in capacity_signal_ids
+            )
+            if narrowed:
+                target_signal_ids = narrowed
+        if (
+            chain_ids == item.focus_chain_ids
+            and target_signal_ids == item.target_signal_ids
+        ):
             focused.append(item)
             continue
         focused.append(HunterWorkItem.model_validate({
             **item.model_dump(mode="python"),
             "focus_chain_ids": chain_ids,
+            "target_signal_ids": target_signal_ids,
         }))
     return tuple(focused)
 
@@ -431,23 +472,42 @@ def build_work_input_budget(
     allocation: BudgetAllocation,
     policy: BudgetPolicy,
 ) -> WorkInputBudgetPlan:
-    """Divide input budget fairly and protect every admitted critical first call."""
+    """Protect every critical first call and allow critical-chain completion."""
     admitted = tuple(allocation.admitted_work_ids)
-    per_work_limit = max(
+    base_share = max(
         1,
         policy.max_input_tokens // max(1, len(admitted)),
     )
+    critical_chain_work_ids = {
+        decision.work_id
+        for decision in allocation.decisions
+        if decision.quota == "chain_critical"
+    }
+    work_input_limits = {
+        work_id: min(
+            policy.max_input_tokens,
+            base_share * (6 if work_id in critical_chain_work_ids else 2),
+        )
+        for work_id in admitted
+    }
+    per_work_limit = max(work_input_limits.values(), default=base_share)
     by_work_id = {item.work_id: item for item in work_items}
-    critical_work_ids = tuple(
+    protected_work_ids = critical_chain_work_ids or {
         work_id
         for work_id in admitted
         if by_work_id.get(work_id) is not None and by_work_id[work_id].required
+    }
+    critical_work_ids = tuple(
+        work_id for work_id in admitted if work_id in protected_work_ids
     )
     return WorkInputBudgetPlan(
         policy_version=WORK_INPUT_FAIRNESS_POLICY,
         per_work_input_limit=per_work_limit,
-        critical_first_call_reserve=per_work_limit,
-        work_input_limits={work_id: per_work_limit for work_id in admitted},
+        critical_first_call_reserve=min(
+            base_share,
+            max(32_000, base_share // 2),
+        ),
+        work_input_limits=work_input_limits,
         critical_work_ids=critical_work_ids,
     )
 
@@ -1105,7 +1165,7 @@ def _candidate_order(
         -int(candidate.entrypoint_reachable),
         candidate.component,
         candidate.seed_family,
-        candidate.item.work_id,
+        _work_tie_key(candidate.item),
     )
 
 
@@ -1117,6 +1177,23 @@ def _capacity_evidence_score(chain: CapacityRiskChain) -> int:
     score += 20 if chain.pointer_advance_fact_ids else 0
     score += 10 if chain.write_fact_ids else 0
     return score
+
+
+def _work_tie_key(item: HunterWorkItem) -> str:
+    canonical = json.dumps(
+        {
+            "planning_policy": item.planning_policy,
+            "slice_ids": item.slice_ids,
+            "target_node_ids": item.target_node_ids,
+            "target_signal_ids": item.target_signal_ids,
+            "seed_file": item.seed_file,
+            "files": item.files,
+            "hunter": item.hunter,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical.encode()).hexdigest()
 
 
 def _is_chain_critical(candidate: _AdmissionCandidate) -> bool:
