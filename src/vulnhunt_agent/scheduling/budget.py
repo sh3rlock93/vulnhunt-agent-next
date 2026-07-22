@@ -16,7 +16,7 @@ from ..analysis.models import CapacityPriorityClass, CapacityRiskChain, RiskChai
 from ..domain.schemas import BudgetPolicy, BudgetUsage, HunterWorkItem
 
 LEGACY_BUDGET_POLICY = "hunter-budget-allocation-v1"
-NATIVE_DIVERSE_POLICY = "c-budget-v5"
+NATIVE_DIVERSE_POLICY = "c-budget-v6"
 NATIVE_CHAIN_SHARE = 0.50
 NATIVE_SEED_DIVERSITY_SHARE = 0.25
 NATIVE_HIGH_RISK_SHARE = 1 / 6
@@ -42,6 +42,7 @@ class BudgetAllocation:
     general_slots: int
     policy_version: str = LEGACY_BUDGET_POLICY
     chain_critical_slots: int = 0
+    chain_revisit_slots: int = 0
     component_diverse_slots: int = 0
     seed_diverse_slots: int = 0
     high_risk_non_chain_slots: int = 0
@@ -620,6 +621,7 @@ def _allocate_native_diverse(
         capacity,
         max(1, math.ceil(policy.max_hunter_sessions * NATIVE_CHAIN_SHARE)),
     )
+    seed_capped_critical: list[_AdmissionCandidate] = []
     for candidate in ordered:
         if chain_slots >= chain_target:
             break
@@ -629,6 +631,7 @@ def _allocate_native_diverse(
         at_cap = seed_counts.get(candidate.seed_family, 0) >= NATIVE_EARLY_SEED_CAP
         only_eligible_seed = len(eligible_critical_seeds) <= 1
         if before_diversity and at_cap and not only_eligible_seed:
+            seed_capped_critical.append(candidate)
             continue
         exception = before_diversity and at_cap and only_eligible_seed
         if admit(
@@ -661,6 +664,21 @@ def _allocate_native_diverse(
             reason="first admitted critical work from a distinct seed file",
         ):
             seed_slots += 1
+
+    chain_revisit_slots = 0
+    for candidate in seed_capped_critical:
+        if chain_slots >= chain_target or len(selected) >= capacity:
+            break
+        if admit(
+            candidate,
+            quota="chain_critical_revisit",
+            reason=(
+                "uncovered critical root cause revisited after seed diversity"
+            ),
+            cap_exception=True,
+        ):
+            chain_slots += 1
+            chain_revisit_slots += 1
 
     high_slots = 0
     high_target = min(
@@ -739,6 +757,7 @@ def _allocate_native_diverse(
         general_slots=len(selected) - critical_slots - total_high,
         policy_version=NATIVE_DIVERSE_POLICY,
         chain_critical_slots=chain_slots,
+        chain_revisit_slots=chain_revisit_slots,
         seed_diverse_slots=seed_slots,
         high_risk_non_chain_slots=high_slots,
         borrowed_slots=borrowed_slots,

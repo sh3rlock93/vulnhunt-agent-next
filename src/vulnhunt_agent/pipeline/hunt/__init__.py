@@ -278,6 +278,7 @@ async def run_hunt(store: RunStore, bus: EventBus) -> None:
         "policy_version": allocation.policy_version,
         "admitted_sessions": len(allocation.admitted_work_ids),
         "chain_critical_slots": allocation.chain_critical_slots,
+        "chain_revisit_slots": allocation.chain_revisit_slots,
         "component_diverse_slots": allocation.component_diverse_slots,
         "seed_diverse_slots": allocation.seed_diverse_slots,
         "high_risk_non_chain_slots": allocation.high_risk_non_chain_slots,
