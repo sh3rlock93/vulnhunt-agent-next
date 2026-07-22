@@ -86,6 +86,7 @@ async def run_analysis_graph(store: RunStore, bus: EventBus) -> None:
             "critical_sinks": len(graph.critical_sink_ids),
             "risk_chains": len(graph.risk_chains),
             "constraint_facts": len(graph.constraint_facts),
+            "capacity_facts": len(graph.capacity_facts),
             "critical_risk_chains": sum(
                 item.score >= 80 and item.guard_state.value != "dominates"
                 for item in graph.risk_chains
