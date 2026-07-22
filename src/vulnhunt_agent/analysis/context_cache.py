@@ -618,6 +618,13 @@ def _fit_packet(packet: dict) -> dict:
     truncation.setdefault("minimum_evidence_excerpt_bytes", MIN_EVIDENCE_EXCERPT_BYTES)
     truncation.setdefault("evidence_excerpt_guaranteed", False)
     focus_ids = set(packet.get("focus_chain_ids") or ())
+    if not focus_ids:
+        focus_ids.update(
+            str(chains[0].get("chain_id", ""))
+            for field in ("risk_chains", "capacity_risk_chains")
+            if (chains := packet.get(field) or [])
+            and chains[0].get("chain_id")
+        )
     focus_paths = _focus_evidence_paths(packet)
     excerpts = packet.get("source_excerpts") or []
     had_source_evidence = any(str(item.get("content", "")) for item in excerpts)

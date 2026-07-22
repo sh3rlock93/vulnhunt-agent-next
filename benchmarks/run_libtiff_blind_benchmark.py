@@ -37,6 +37,7 @@ from vulnhunt_agent.reproduction.provenance import (
 from vulnhunt_agent.sandbox import ContainerExecutor
 from vulnhunt_agent.scheduling import (
     allocate_work_items,
+    apply_admission_focus,
     build_routing_plan,
     build_slice_work_items,
 )
@@ -362,6 +363,7 @@ def _run_deterministic_discovery(
         entrypoint_ids=graph.entrypoint_ids,
         native_full_scan=True,
     )
+    work = apply_admission_focus(work, allocation)
     admitted = set(allocation.admitted_work_ids)
     cache = SharedContextCache(
         output / "contexts",

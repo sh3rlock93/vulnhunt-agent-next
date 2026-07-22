@@ -91,7 +91,11 @@ def test_packet_fit_discards_supporting_metadata_before_focus_source() -> None:
 def test_packet_fit_falls_back_to_nonempty_target_without_focus_chain() -> None:
     packet = {
         "focus_chain_ids": [],
-        "risk_chains": [],
+        "risk_chains": [{
+            "chain_id": "risk_cccccccccccccccccccc",
+            "path": "target.c",
+            "rationale": "legacy direct-call focus",
+        }],
         "capacity_risk_chains": [],
         "slices": [{"rationale": "X" * 30_000}],
         "related_nodes": [],
@@ -108,4 +112,5 @@ def test_packet_fit_falls_back_to_nonempty_target_without_focus_chain() -> None:
     fitted = _fit_packet(packet)
 
     assert fitted["source_excerpts"][0]["content"] == "int main(void) { return 0; }"
+    assert fitted["risk_chains"][0]["chain_id"] == "risk_cccccccccccccccccccc"
     assert fitted["truncation"]["evidence_excerpt_guaranteed"] is True
