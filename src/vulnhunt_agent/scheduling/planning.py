@@ -69,6 +69,7 @@ def allocate_native_work_plan(
     eligible_work_ids: set[str] | None = None,
     consumed_sessions: int = 0,
     native_full_scan: bool = True,
+    include_capacity_chains: bool = True,
 ) -> NativeAdmissionPlan:
     """Allocate native work and persist a run-independent semantic contract."""
     graph = CAnalysisGraph.model_validate(plan.analysis.get("graph") or {})
@@ -84,7 +85,7 @@ def allocate_native_work_plan(
         policy,
         consumed_sessions=consumed_sessions,
         risk_chains=graph.risk_chains,
-        capacity_chains=graph.capacity_risk_chains,
+        capacity_chains=(graph.capacity_risk_chains if include_capacity_chains else ()),
         entrypoint_ids=graph.entrypoint_ids,
         native_full_scan=native_full_scan,
     )
@@ -97,6 +98,7 @@ def allocate_native_work_plan(
         eligible_work_ids={item.work_id for item in eligible},
         consumed_sessions=consumed_sessions,
         native_full_scan=native_full_scan,
+        include_capacity_chains=include_capacity_chains,
     )
     return NativeAdmissionPlan(
         work_items=focused,
@@ -114,6 +116,7 @@ def _plan_contract(
     eligible_work_ids: set[str],
     consumed_sessions: int,
     native_full_scan: bool,
+    include_capacity_chains: bool,
 ) -> dict[str, Any]:
     graph = plan.analysis.get("graph") or {}
     semantic = {
@@ -125,6 +128,7 @@ def _plan_contract(
         "budget": policy.model_dump(mode="json"),
         "consumed_sessions": consumed_sessions,
         "native_full_scan": native_full_scan,
+        "include_capacity_chains": include_capacity_chains,
         "eligible_work_ids": sorted(eligible_work_ids),
         "work_items": [
             _semantic_work_item(item)

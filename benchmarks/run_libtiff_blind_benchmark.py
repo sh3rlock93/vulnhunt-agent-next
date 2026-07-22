@@ -353,6 +353,9 @@ def _run_deterministic_discovery(
         native_work_plan,
         budget,
         native_full_scan=True,
+        include_capacity_chains=bool(
+            manifest["policies"].get("capacity_risk_chain")
+        ),
     )
     allocation = admission_plan.allocation
     work = admission_plan.work_items

@@ -83,3 +83,24 @@ def test_native_plan_contract_records_hunter_selection(tmp_path) -> None:
         "c-memory-lifetime",
     ]
     assert bounds["semantic_sha256"] != both["semantic_sha256"]
+
+
+def test_native_plan_contract_records_capacity_policy(tmp_path) -> None:
+    coverage, analysis = _analysis(tmp_path)
+    work = build_native_work_plan(
+        run_id="same-run",
+        source_snapshot=HASH_A,
+        selected_files=list(coverage.selected_files),
+        enabled_hunters=["c-bounds-integers"],
+        analysis=analysis,
+    )
+    policy = BudgetPolicy(max_hunter_sessions=4, max_retries_per_work_item=0)
+
+    enabled = allocate_native_work_plan(work, policy)
+    disabled = allocate_native_work_plan(
+        work,
+        policy,
+        include_capacity_chains=False,
+    )
+
+    assert enabled.contract["semantic_sha256"] != disabled.contract["semantic_sha256"]
