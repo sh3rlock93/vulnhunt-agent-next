@@ -207,14 +207,15 @@ def _usage_for_result(
     *,
     wall_time_ms: int,
 ) -> BudgetUsage:
+    started_calls = int(getattr(client, "started_calls", result.iterations or 1))
     return with_estimated_cost(BudgetUsage(
         run_id=work_item.run_id,
         work_id=work_item.work_id,
         scope="hunter",
         model_id=str(getattr(client, "model_id", "unknown")),
         transport=str(getattr(client, "transport", "bedrock_converse")),
-        sessions=1,
-        calls=result.iterations,
+        sessions=int(started_calls > 0),
+        calls=max(result.iterations, started_calls),
         iterations=result.iterations,
         input_tokens=result.input_tokens,
         output_tokens=result.output_tokens,

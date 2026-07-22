@@ -141,6 +141,22 @@ class DurableHuntQueueStore(HuntQueueStore):
         self.mark_hunt_deferred(task, task.hunters[0].name, reason)
         self.mark_file_deferred(task, reason)
 
+    def requeue_budget_deferred(self, task: HuntTask) -> None:
+        with SqliteRepository(self.database) as repository:
+            repository.requeue_budget_deferred_task(
+                self.run_id,
+                "hunter",
+                task.work_id,
+            )
+        task.status = "pending"
+        task.error = ""
+        task.finished_at = ""
+        for subtask in task.hunters:
+            if subtask.status == "budget_deferred":
+                subtask.status = "pending"
+                subtask.error = ""
+        self._rewrite(task)
+
     def reset_failed(self) -> int:
         count = 0
         with SqliteRepository(self.database) as repository:

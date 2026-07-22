@@ -37,6 +37,7 @@ from ...sandbox import base_image_for, language_of
 from ...scheduling import (
     BudgetController,
     BudgetedLLMClient,
+    RecyclableAdmissionLedger,
     adaptive_iteration_limit,
     adaptive_output_token_limit,
     allocate_work_items,
@@ -256,6 +257,7 @@ async def run_hunt(store: RunStore, bus: EventBus) -> None:
             and scan_scope.get("mode", "full") == "full"
         ),
     )
+    admission_ledger = RecyclableAdmissionLedger(allocation)
     admitted_ids = set(allocation.admitted_work_ids)
     task_by_id = {task.work_id: task for task in queue.tasks}
     for work_id, reason in allocation.deferred.items():
@@ -267,7 +269,11 @@ async def run_hunt(store: RunStore, bus: EventBus) -> None:
         "admitted_sessions": len(allocation.admitted_work_ids),
         "chain_critical_slots": allocation.chain_critical_slots,
         "component_diverse_slots": allocation.component_diverse_slots,
+        "seed_diverse_slots": allocation.seed_diverse_slots,
         "high_risk_non_chain_slots": allocation.high_risk_non_chain_slots,
+        "borrowed_slots": allocation.borrowed_slots,
+        "duplicate_coverage_deferred": allocation.duplicate_coverage_deferred,
+        "seed_cap_exceptions": allocation.seed_cap_exceptions,
         "critical_slots": allocation.critical_slots,
         "high_risk_slots": allocation.high_risk_slots,
         "general_slots": allocation.general_slots,
@@ -326,10 +332,6 @@ async def run_hunt(store: RunStore, bus: EventBus) -> None:
 
     if hunter_client is None or reviewer_client is None:
         raise RuntimeError("provider clients missing after successful preflight")
-    budgeted_hunter_client = BudgetedLLMClient(
-        hunter_client,
-        budget_controller,
-    )
     bus.emit(
         "model_transport",
         scope="hunter",
@@ -354,9 +356,9 @@ async def run_hunt(store: RunStore, bus: EventBus) -> None:
         budget_policy.max_retries_per_work_item + 1,
     )
 
-    async def run_work(task: HuntTask) -> None:
+    async def run_work(task: HuntTask) -> str | None:
         if task.status in {"done", "failed", "budget_deferred"}:
-            return
+            return None
         item = by_work_id.get(task.work_id)
         if item is None:
             raise RuntimeError(f"durable queue returned unknown work: {task.work_id}")
@@ -368,7 +370,7 @@ async def run_hunt(store: RunStore, bus: EventBus) -> None:
         )
         if lease is None:
             bus.emit("hunter_lease_unavailable", work_id=task.work_id)
-            return
+            return None
         heartbeat_stop = asyncio.Event()
         heartbeat_errors: list[Exception] = []
         heartbeat = asyncio.create_task(_heartbeat_lease(
@@ -378,6 +380,7 @@ async def run_hunt(store: RunStore, bus: EventBus) -> None:
             stop=heartbeat_stop,
             errors=heartbeat_errors,
         ))
+        usage_items: list[BudgetUsage] = []
         try:
             qstore.mark_file_running(task)
             analysis_context = analysis_contexts[item.work_id]
@@ -391,8 +394,15 @@ async def run_hunt(store: RunStore, bus: EventBus) -> None:
                 item,
                 configured_cap=int(cfg.get("hunter_max_output_tokens_per_call", 4_000)),
             )
+            work_client = BudgetedLLMClient(
+                hunter_client,
+                budget_controller,
+                on_call_started=lambda: admission_ledger.mark_provider_started(
+                    item.work_id
+                ),
+            )
             findings_by_cat, usage_items, deferred = await run_hunters(
-                task, qstore, repo, budgeted_hunter_client, hunter_image,
+                task, qstore, repo, work_client, hunter_image,
                 arch, analysis_context, sandbox_info, iteration_limit, hunter_sem, bus,
                 sandbox_enabled,
                 {item.hunter: item},
@@ -422,7 +432,13 @@ async def run_hunt(store: RunStore, bus: EventBus) -> None:
                     work_id=task.work_id,
                     reason=reason,
                 )
-                return
+                admission_ledger.finish(
+                    task.work_id,
+                    status="budget_deferred",
+                    reason=reason,
+                    usage=usage_items[0] if usage_items else None,
+                )
+                return None
             failed = [sub.error for sub in task.hunters if sub.status == "failed"]
             if failed:
                 raise RuntimeError(failed[0] or "Hunter work failed")
@@ -433,7 +449,12 @@ async def run_hunt(store: RunStore, bus: EventBus) -> None:
                     raise heartbeat_errors[0]
                 qstore.finish(lease, status="done")
                 qstore.mark_file_done(task)
-                return
+                admission_ledger.finish(
+                    task.work_id,
+                    status="done",
+                    usage=usage_items[0] if usage_items else None,
+                )
+                return None
 
             qstore.mark_file_phase(task, "clustering")
             await run_clusterer(
@@ -444,6 +465,12 @@ async def run_hunt(store: RunStore, bus: EventBus) -> None:
                 raise heartbeat_errors[0]
             qstore.finish(lease, status="done")
             qstore.mark_file_done(task)
+            admission_ledger.finish(
+                task.work_id,
+                status="done",
+                usage=usage_items[0] if usage_items else None,
+            )
+            return None
         except Exception as e:
             await _stop_heartbeat(heartbeat_stop, heartbeat)
             try:
@@ -454,7 +481,7 @@ async def run_hunt(store: RunStore, bus: EventBus) -> None:
                     work_id=task.work_id,
                     error=str(e),
                 )
-                return
+                return None
             qstore.mark_file_failed(task, error=str(e))
             bus.emit(
                 "file_failed",
@@ -462,14 +489,57 @@ async def run_hunt(store: RunStore, bus: EventBus) -> None:
                 work_id=task.work_id,
                 error=str(e),
             )
+            return admission_ledger.finish(
+                task.work_id,
+                status="failed",
+                reason=str(e),
+                recyclable=True,
+                usage=usage_items[0] if usage_items else None,
+            )
 
-    await asyncio.gather(*[
-        run_work(task)
-        for task in _tasks_in_admission_order(
-            queue.tasks,
-            allocation.admitted_work_ids,
-        )
-    ])
+    batch = _tasks_in_admission_order(
+        queue.tasks,
+        allocation.admitted_work_ids,
+    )
+    recycled_work_ids: list[str] = []
+    while batch:
+        promoted = [
+            work_id
+            for work_id in await asyncio.gather(*(run_work(task) for task in batch))
+            if work_id
+        ]
+        if not promoted:
+            borrowed_retry = admission_ledger.borrow_unused_retry()
+            if borrowed_retry:
+                promoted.append(borrowed_retry)
+        batch = []
+        for work_id in promoted:
+            task = task_by_id[work_id]
+            qstore.requeue_budget_deferred(task)
+            item = by_work_id[work_id]
+            analysis_contexts[work_id] = context_cache.get(item)
+            admitted_ids.add(work_id)
+            recycled_work_ids.append(work_id)
+            batch.append(task)
+            bus.emit("hunter_admission_recycled", work_id=work_id)
+
+    context_cache_stats = context_cache.stats()
+    final_deferred_ids = sorted(
+        work_id for work_id in allocation.deferred if work_id not in admitted_ids
+    )
+    hunt_plan["budget_allocation"]["recycled_slots"] = len(recycled_work_ids)
+    hunt_plan["budget_allocation"]["recycled_work_ids"] = recycled_work_ids
+    hunt_plan["budget_allocation"]["admission_ledger"] = admission_ledger.snapshot()
+    hunt_plan["budget_deferred_work_ids"] = final_deferred_ids
+    hunt_plan["budget_deferred_critical_work_ids"] = [
+        work_id for work_id in final_deferred_ids if by_work_id[work_id].required
+    ]
+    hunt_plan["context_cache"] = context_cache_stats
+    hunt_plan["context_cache_keys"] = {
+        work_id: context["cache_key"]
+        for work_id, context in sorted(analysis_contexts.items())
+    }
+    store.save_step("hunt_plan", hunt_plan)
     with SqliteRepository(store.dir / "state.db", read_only=True) as repository:
         persisted_usage = repository.list_budget_usage(
             store.dir.name, scope="hunter"

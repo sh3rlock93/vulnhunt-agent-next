@@ -2,11 +2,13 @@
 
 from .budget import (
     AdmissionDecision,
+    AdmissionEvent,
     BudgetAllocation,
     BudgetController,
     BudgetedLLMClient,
     BudgetExceededError,
     NATIVE_DIVERSE_POLICY,
+    RecyclableAdmissionLedger,
     adaptive_iteration_limit,
     adaptive_output_token_limit,
     allocate_work_items,
@@ -23,11 +25,13 @@ from .slices import (
 
 __all__ = [
     "AdmissionDecision",
+    "AdmissionEvent",
     "BudgetAllocation",
     "BudgetController",
     "BudgetedLLMClient",
     "BudgetExceededError",
     "NATIVE_DIVERSE_POLICY",
+    "RecyclableAdmissionLedger",
     "ROUTER_POLICY",
     "MAX_CONTEXT_FILES",
     "SLICE_WORK_POLICY",
