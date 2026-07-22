@@ -46,6 +46,7 @@ from ...scheduling import (
     total_usage,
 )
 from .. import finalize
+from ..outcome import classify_run_outcome
 from ..registry import Step, register
 from .cluster import run_clusterer
 from .hunters import flatten, run_hunters
@@ -471,6 +472,14 @@ async def run_hunt(store: RunStore, bus: EventBus) -> None:
                 usage=usage_items[0] if usage_items else None,
             )
             return None
+        except asyncio.CancelledError:
+            await _stop_heartbeat(heartbeat_stop, heartbeat)
+            bus.emit(
+                "hunter_interrupted",
+                file=task.file,
+                work_id=task.work_id,
+            )
+            raise
         except Exception as e:
             await _stop_heartbeat(heartbeat_stop, heartbeat)
             try:
@@ -502,26 +511,64 @@ async def run_hunt(store: RunStore, bus: EventBus) -> None:
         allocation.admitted_work_ids,
     )
     recycled_work_ids: list[str] = []
-    while batch:
-        promoted = [
-            work_id
-            for work_id in await asyncio.gather(*(run_work(task) for task in batch))
-            if work_id
-        ]
-        if not promoted:
-            borrowed_retry = admission_ledger.borrow_unused_retry()
-            if borrowed_retry:
-                promoted.append(borrowed_retry)
-        batch = []
-        for work_id in promoted:
-            task = task_by_id[work_id]
-            qstore.requeue_budget_deferred(task)
-            item = by_work_id[work_id]
-            analysis_contexts[work_id] = context_cache.get(item)
-            admitted_ids.add(work_id)
-            recycled_work_ids.append(work_id)
-            batch.append(task)
-            bus.emit("hunter_admission_recycled", work_id=work_id)
+    try:
+        while batch:
+            promoted = [
+                work_id
+                for work_id in await asyncio.gather(
+                    *(run_work(task) for task in batch)
+                )
+                if work_id
+            ]
+            if not promoted:
+                borrowed_retry = admission_ledger.borrow_unused_retry()
+                if borrowed_retry:
+                    promoted.append(borrowed_retry)
+            batch = []
+            for work_id in promoted:
+                task = task_by_id[work_id]
+                qstore.requeue_budget_deferred(task)
+                item = by_work_id[work_id]
+                analysis_contexts[work_id] = context_cache.get(item)
+                admitted_ids.add(work_id)
+                recycled_work_ids.append(work_id)
+                batch.append(task)
+                bus.emit("hunter_admission_recycled", work_id=work_id)
+    except asyncio.CancelledError:
+        hunt_plan["budget_allocation"]["recycled_slots"] = len(recycled_work_ids)
+        hunt_plan["budget_allocation"]["recycled_work_ids"] = recycled_work_ids
+        hunt_plan["budget_allocation"][
+            "admission_ledger"
+        ] = admission_ledger.snapshot()
+        hunt_plan["context_cache"] = context_cache.stats()
+        hunt_plan["context_cache_keys"] = {
+            work_id: context["cache_key"]
+            for work_id, context in sorted(analysis_contexts.items())
+        }
+        store.save_step("hunt_plan", hunt_plan)
+        with SqliteRepository(store.dir / "state.db", read_only=True) as repository:
+            interrupted_usage = repository.list_budget_usage(
+                store.dir.name, scope="hunter"
+            )
+        interrupted_usage.extend(_checkpoint_budget_usage(
+            qstore,
+            qstore.load().tasks,
+            run_id=store.dir.name,
+            persisted_work_ids={item.work_id for item in interrupted_usage},
+        ))
+        _save_summary(
+            store,
+            qstore,
+            bus,
+            hunter_image,
+            total_usage(interrupted_usage),
+            budget_policy,
+            budget_controller.snapshot(),
+            context_cache.stats(),
+            scan_scope,
+            interrupted=True,
+        )
+        raise
 
     context_cache_stats = context_cache.stats()
     final_deferred_ids = sorted(
@@ -743,6 +790,17 @@ def _save_invalid_preflight_summary(
         },
         "tasks": [],
     }
+    plan = store.load_step("hunt_plan") or {}
+    scope = plan.get("scan_scope") or {}
+    snapshot = store.load_step("source_snapshot") or {}
+    summary["run_outcome"] = classify_run_outcome(
+        summary,
+        plan=plan,
+        scan_scope=scope,
+        source_snapshot=snapshot.get("snapshot_artifact"),
+        invalid_reason="provider_preflight_failed",
+    )
+    summary["zero_finding_label"] = ""
     store.save_step("hunt", summary)
     bus.emit(
         "provider_preflight_failed",
@@ -809,6 +867,8 @@ def _save_summary(
     budget_state: dict[str, int | float | bool],
     context_cache: dict[str, int | str],
     scan_scope: dict,
+    *,
+    interrupted: bool = False,
 ) -> None:
     final = qstore.load()
     summary = {
@@ -819,6 +879,11 @@ def _save_summary(
             1 for t in final.tasks if t.status == "budget_deferred"
         ),
         "pending": sum(1 for t in final.tasks if t.status == "pending"),
+        "running": sum(
+            1
+            for task in final.tasks
+            if task.status in {"hunting", "clustering", "reviewing"}
+        ),
         "total_findings": sum(
             sum(s.findings_count for s in t.hunters) for t in final.tasks
         ),
@@ -849,8 +914,24 @@ def _save_summary(
     }
     summary["target_completion"] = _target_completion(qstore, final.tasks)
     summary["protocol_metrics"] = _protocol_metrics(qstore, final.tasks)
+    plan = store.load_step("hunt_plan") or {}
+    snapshot = store.load_step("source_snapshot") or {}
+    summary["run_outcome"] = classify_run_outcome(
+        summary,
+        plan=plan,
+        scan_scope=scan_scope,
+        source_snapshot=snapshot.get("snapshot_artifact"),
+        interrupted=interrupted,
+    )
+    summary["outcome"] = summary["run_outcome"]["outcome"]
+    summary["zero_findings"] = summary["run_outcome"]["zero_findings"]
+    summary["zero_finding_label"] = summary["run_outcome"]["zero_finding_label"]
     store.save_step("hunt", summary)
-    bus.emit("step_done", step="hunt", **{k: v for k, v in summary.items() if k != "tasks"})
+    bus.emit(
+        "step_interrupted" if interrupted else "step_done",
+        step="hunt",
+        **{k: v for k, v in summary.items() if k != "tasks"},
+    )
 
 
 def _target_completion(qstore, tasks: list[HuntTask]) -> dict:

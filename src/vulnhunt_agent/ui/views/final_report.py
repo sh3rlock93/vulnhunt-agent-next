@@ -18,7 +18,35 @@ _SEVERITY_BADGE = {
 
 def render_final_report(store: RunStore) -> None:
     hunt = store.load_step("hunt") or {}
+    outcome = hunt.get("outcome")
+    outcome_detail = hunt.get("run_outcome") or {}
+    if outcome == "invalid_execution":
+        st.error(
+            "This run is invalid and cannot be presented as a clean scan: "
+            + str(outcome_detail.get("reason") or "execution setup failed")
+        )
+    elif outcome == "interrupted":
+        st.warning("This run was interrupted and has resumable unfinished work.")
+    elif outcome == "valid_budget_limited":
+        st.warning(
+            outcome_detail.get("zero_finding_label")
+            or "This valid run is incomplete because declared work was deferred."
+        )
     scan_scope = hunt.get("scan_scope") or {}
+    target_completion = hunt.get("target_completion") or {}
+    outcome_work = outcome_detail.get("work") or {}
+    st.caption(
+        "Scope accounting · "
+        f"mode: {scan_scope.get('mode', 'full')} · "
+        f"selected files: {len(scan_scope.get('selected_files', []))} · "
+        "scope-deferred critical targets: "
+        f"{len(scan_scope.get('scope_deferred_critical_sink_ids', []))} · "
+        "unadmitted budget-deferred work: "
+        f"{int(outcome_work.get('unadmitted_budget_deferred', 0) or 0)} · "
+        "admitted deferred work: "
+        f"{int(outcome_work.get('admitted_deferred', 0) or 0)} · "
+        f"deferred targets: {int(target_completion.get('deferred', 0) or 0)}"
+    )
     if scan_scope.get("mode", "full") != "full":
         st.warning(
             f"This is a bounded {scan_scope.get('mode')} result, not a repository-wide "
@@ -43,10 +71,15 @@ def render_final_report(store: RunStore) -> None:
     st.divider()
     st.header("Final Report")
     if not entries:
-        st.info(
-            "No strict reports yet — findings require two clean reproductions "
-            "and evidence-aware review."
-        )
+        if hunt.get("zero_findings") and hunt.get("zero_finding_label"):
+            st.info(hunt["zero_finding_label"])
+        elif outcome in {"invalid_execution", "interrupted"}:
+            st.error("No trustworthy zero-finding conclusion is available.")
+        else:
+            st.info(
+                "No strict reports yet — findings require two clean reproductions "
+                "and evidence-aware review."
+            )
         return
 
     entries.sort(key=lambda e: (-e["score"], e["finished_at"] or "9999"))

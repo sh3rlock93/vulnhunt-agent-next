@@ -283,6 +283,8 @@ async def _run_scan(args) -> int:
         "run_id": run_id,
         "run_dir": str(store.dir),
         "mode": "complete",
+        "outcome": (store.load_step("hunt") or {}).get("outcome"),
+        "run_outcome": (store.load_step("hunt") or {}).get("run_outcome") or {},
         "incremental_scope": analysis.get("incremental_scope") or {},
         "scan_scope": analysis.get("scan_scope") or {},
         "hunt": store.load_step("hunt") or {},

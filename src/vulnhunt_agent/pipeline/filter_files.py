@@ -43,6 +43,14 @@ def _walk(repo: Path, exts: set[str]) -> list[Path]:
     return files
 
 
+def collect_source_files(repo: Path, language: str) -> tuple[list[str], list[str]]:
+    """Return the exact source/test partition used by deterministic pipeline runs."""
+    all_files = _walk(repo, LANG_EXTENSIONS[language])
+    source_files = sorted(str(path) for path in all_files if not _is_test_path(path))
+    test_files = sorted(str(path) for path in all_files if _is_test_path(path))
+    return source_files, test_files
+
+
 async def run_filter(store: RunStore, bus: EventBus) -> None:
     cfg = store.load_config() or {}
     repo = Path(cfg["repo_path"])
@@ -51,15 +59,13 @@ async def run_filter(store: RunStore, bus: EventBus) -> None:
     bus.emit("step_start", step="filter", language=lang)
 
     exts = LANG_EXTENSIONS[lang]
-    all_files = _walk(repo, exts)
-    source_files = [str(p) for p in all_files if not _is_test_path(p)]
-    test_files   = [str(p) for p in all_files if _is_test_path(p)]
+    source_files, test_files = collect_source_files(repo, lang)
 
     result = {
         "extensions": sorted(exts),
-        "total_matched": len(all_files),
+        "total_matched": len(source_files) + len(test_files),
         "test_files_excluded": len(test_files),
-        "source_files": sorted(source_files),
+        "source_files": source_files,
     }
     store.save_step("filtered_files", result)
     bus.emit("step_done", step="filter", kept=len(source_files), excluded=len(test_files))

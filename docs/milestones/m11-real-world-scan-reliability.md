@@ -1,6 +1,6 @@
 # M11 — Reliable bounded scans and candidate falsification on live repositories
 
-Status: PR 1–6 implemented and verified; PR 7 pending
+Status: PR 1–6 merged; PR 7 implemented and release gates verified, pending merge
 
 ## Goal
 
@@ -359,14 +359,44 @@ Expected changes:
 
 ### PR 7 acceptance gates
 
-- [ ] Deterministic CI requires no provider credentials or network access.
-- [ ] Safe symlink, provider failure, scope, fairness, and feasibility fixtures pass.
-- [ ] The real-tree plan uses the pinned source and contains no CVE or patch oracle.
-- [ ] The authenticated run respects 12 sessions and all token/time ceilings.
-- [ ] Every admitted target has one terminal disposition.
-- [ ] Invalid and interrupted runs cannot be presented as clean scans.
-- [ ] The report always shows exact scope and all deferred categories.
-- [ ] M8–M10, Docker, evidence-provenance, and legacy-artifact regressions remain green.
+- [x] Deterministic CI requires no provider credentials or network access.
+- [x] Safe symlink, provider failure, scope, fairness, and feasibility fixtures pass.
+- [x] The real-tree plan uses the pinned source and contains no CVE or patch oracle.
+- [x] The authenticated run respects 12 sessions and all token/time ceilings.
+- [x] Every admitted target has one terminal disposition.
+- [x] Invalid and interrupted runs cannot be presented as clean scans.
+- [x] The report always shows exact scope and all deferred categories.
+- [x] M8–M10, Docker, evidence-provenance, and legacy-artifact regressions remain green.
+
+### PR 7 release evidence
+
+The credential-free tier ran directly against the pinned upstream tree. It
+selected the same 19 files as the authenticated pipeline, produced 61 bounded
+work items, admitted 11 sessions across three seed files, routed every critical
+signal to admission or explicit budget deferral, kept every context packet
+under 24,000 bytes, and generated one source-cited logical infeasibility proof.
+All deterministic checks and the closed freeze-manifest verification passed.
+
+Authenticated run
+`libexpat-live-native-v1-20260722T031652Z-91b96b5f` used the logged-in Codex
+subscription adapter with `gpt-5.6-sol`. Provider preflight completed with zero
+billable probe calls. Observed Hunter usage was 11 sessions, 24 calls, 820,437
+input tokens, 59,904 cache-read tokens, 12,238 output tokens, 67 tool calls,
+and 389,785 ms of aggregate work time. This stayed within every manifest
+ceiling. The run completed 30 target dispositions, left no missing admitted
+target, and classified itself as `valid_budget_limited` with 50 work items
+unadmitted by the fixed budget and eight admitted work items ending in typed
+deferral. Those admissions represented 66 target dispositions: 30 completed
+and 36 explicitly deferred. The other 229 target dispositions belonged to
+unadmitted work. Including cache traffic, the run used 29,752.6 model tokens
+per completed target and reached its first verification-supported candidate in
+198,258 ms.
+
+One candidate from `gennmtab.c` reached verification and was terminally
+classified as `reproduction_rejected`; it was not promoted to a vulnerability
+report. The benchmark records zero confirmed, zero refuted, one rejected, and
+zero deferred candidates. This outcome is operational evidence only and is not
+a claim that the pinned libexpat revision contains no unknown vulnerabilities.
 
 ## Verification matrix
 

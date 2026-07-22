@@ -180,6 +180,20 @@ def _hunt(store: RunStore, d: dict) -> None:
                 "Redacted diagnostic fingerprint: "
                 f"`{failed['diagnostic_fingerprint']}`"
             )
+        return
+    outcome = d.get("outcome")
+    detail = d.get("run_outcome") or {}
+    if outcome == "valid_complete":
+        st.success(detail.get("zero_finding_label") or "In-scope work completed.")
+    elif outcome == "valid_budget_limited":
+        st.warning(
+            detail.get("zero_finding_label")
+            or "Execution was valid, but declared work was budget-deferred."
+        )
+    elif outcome == "interrupted":
+        st.warning("Analysis was interrupted; remaining work is resumable.")
+    elif outcome:
+        st.error("Analysis execution was not trustworthy; no clean result is available.")
 
 
 def _verify(store: RunStore, d: dict) -> None:
