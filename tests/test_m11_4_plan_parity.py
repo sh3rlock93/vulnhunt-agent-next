@@ -104,3 +104,19 @@ def test_native_plan_contract_records_capacity_policy(tmp_path) -> None:
     )
 
     assert enabled.contract["semantic_sha256"] != disabled.contract["semantic_sha256"]
+    assert enabled.contract["capacity_units"] == [
+        {
+            "unit_id": unit.unit_id,
+            "policy_version": unit.policy_version,
+            "root_cause_group": unit.root_cause_group,
+            "priority_class": unit.priority_class,
+            "representative_chain_id": unit.representative_chain_id,
+            "representative_work_id": unit.representative_work_id,
+            "chain_ids": unit.chain_ids,
+            "work_ids": unit.work_ids,
+            "required_paths": unit.required_paths,
+            "evidence_lines": unit.evidence_lines,
+        }
+        for unit in enabled.allocation.capacity_units
+    ]
+    assert disabled.contract["capacity_units"] == []

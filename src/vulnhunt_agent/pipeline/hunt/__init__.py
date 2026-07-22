@@ -291,6 +291,7 @@ async def run_hunt(store: RunStore, bus: EventBus) -> None:
         "deferred_sessions": len(allocation.deferred),
         "decisions": [asdict(item) for item in allocation.decisions],
         "ranking": [asdict(item) for item in allocation.ranking],
+        "capacity_units": [asdict(item) for item in allocation.capacity_units],
     }
     hunt_plan["plan_contract"] = admission_plan.contract
     hunt_plan["budget_deferred_work_ids"] = sorted(allocation.deferred)
