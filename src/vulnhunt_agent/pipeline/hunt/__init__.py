@@ -294,6 +294,8 @@ async def run_hunt(store: RunStore, bus: EventBus) -> None:
         "ranking": [asdict(item) for item in allocation.ranking],
         "capacity_units": [asdict(item) for item in allocation.capacity_units],
     }
+    work_input_budget = admission_plan.input_budget
+    hunt_plan["budget_allocation"]["input_fairness"] = asdict(work_input_budget)
     hunt_plan["plan_contract"] = admission_plan.contract
     hunt_plan["budget_deferred_work_ids"] = sorted(allocation.deferred)
     hunt_plan["budget_deferred_critical_work_ids"] = sorted(
@@ -333,7 +335,11 @@ async def run_hunt(store: RunStore, bus: EventBus) -> None:
              total=len(admitted_ids), parallel=max_parallel, max_iter=max_iter,
              image=hunter_image, hunters=hunters)
 
-    budget_controller = BudgetController(budget_policy, persisted_usage)
+    budget_controller = BudgetController(
+        budget_policy,
+        persisted_usage,
+        work_input_budget=work_input_budget,
+    )
     if not admitted_ids:
         _save_summary(
             store,
@@ -420,6 +426,7 @@ async def run_hunt(store: RunStore, bus: EventBus) -> None:
             work_client = BudgetedLLMClient(
                 hunter_client,
                 budget_controller,
+                work_id=item.work_id,
                 on_call_started=lambda: admission_ledger.mark_provider_started(
                     item.work_id
                 ),
@@ -896,7 +903,7 @@ def _save_summary(
     image: str,
     usage: dict[str, int | float | None],
     policy: BudgetPolicy,
-    budget_state: dict[str, int | float | bool],
+    budget_state: dict[str, object],
     context_cache: dict[str, int | str],
     scan_scope: dict,
     *,

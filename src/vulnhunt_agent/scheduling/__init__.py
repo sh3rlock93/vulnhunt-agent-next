@@ -12,10 +12,13 @@ from .budget import (
     CapacityAdmissionUnit,
     NATIVE_DIVERSE_POLICY,
     RecyclableAdmissionLedger,
+    WORK_INPUT_FAIRNESS_POLICY,
+    WorkInputBudgetPlan,
     adaptive_iteration_limit,
     adaptive_output_token_limit,
     allocate_work_items,
     apply_admission_focus,
+    build_work_input_budget,
 )
 from .metrics import estimate_cost_usd, total_usage
 from .planning import (
@@ -49,6 +52,8 @@ __all__ = [
     "NativeAdmissionPlan",
     "NativeWorkPlan",
     "RecyclableAdmissionLedger",
+    "WORK_INPUT_FAIRNESS_POLICY",
+    "WorkInputBudgetPlan",
     "ROUTER_POLICY",
     "MAX_CONTEXT_FILES",
     "SLICE_WORK_POLICY",
@@ -57,6 +62,7 @@ __all__ = [
     "allocate_work_items",
     "allocate_native_work_plan",
     "apply_admission_focus",
+    "build_work_input_budget",
     "build_slice_work_items",
     "build_native_work_plan",
     "build_routing_plan",

@@ -22,6 +22,7 @@ NATIVE_SEED_DIVERSITY_SHARE = 0.25
 NATIVE_HIGH_RISK_SHARE = 1 / 6
 NATIVE_EARLY_SEED_CAP = 2
 CAPACITY_ADMISSION_UNIT_POLICY = "capacity-admission-unit-v1"
+WORK_INPUT_FAIRNESS_POLICY = "work-input-fairness-v1"
 
 
 class BudgetExceededError(RuntimeError):
@@ -68,6 +69,17 @@ class CapacityAdmissionUnit:
     work_ids: tuple[str, ...]
     required_paths: tuple[str, ...]
     evidence_lines: dict[str, tuple[int, ...]]
+
+
+@dataclass(frozen=True)
+class WorkInputBudgetPlan:
+    """Deterministic per-work caps and protected first-call input budget."""
+
+    policy_version: str
+    per_work_input_limit: int
+    critical_first_call_reserve: int
+    work_input_limits: dict[str, int]
+    critical_work_ids: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -273,6 +285,7 @@ class _CallReservation:
     reservation_id: str
     input_tokens: int
     output_tokens: int
+    work_id: str = ""
 
 
 def allocate_work_items(
@@ -411,6 +424,32 @@ def apply_admission_focus(
             "focus_chain_ids": chain_ids,
         }))
     return tuple(focused)
+
+
+def build_work_input_budget(
+    work_items: tuple[HunterWorkItem, ...],
+    allocation: BudgetAllocation,
+    policy: BudgetPolicy,
+) -> WorkInputBudgetPlan:
+    """Divide input budget fairly and protect every admitted critical first call."""
+    admitted = tuple(allocation.admitted_work_ids)
+    per_work_limit = max(
+        1,
+        policy.max_input_tokens // max(1, len(admitted)),
+    )
+    by_work_id = {item.work_id: item for item in work_items}
+    critical_work_ids = tuple(
+        work_id
+        for work_id in admitted
+        if by_work_id.get(work_id) is not None and by_work_id[work_id].required
+    )
+    return WorkInputBudgetPlan(
+        policy_version=WORK_INPUT_FAIRNESS_POLICY,
+        per_work_input_limit=per_work_limit,
+        critical_first_call_reserve=per_work_limit,
+        work_input_limits={work_id: per_work_limit for work_id in admitted},
+        critical_work_ids=critical_work_ids,
+    )
 
 
 def _allocate_native_diverse(
@@ -1163,6 +1202,7 @@ class BudgetController:
         policy: BudgetPolicy,
         usage: list[BudgetUsage] | None = None,
         *,
+        work_input_budget: WorkInputBudgetPlan | None = None,
         clock: Callable[[], float] = time.monotonic,
     ):
         self.policy = policy
@@ -1174,6 +1214,24 @@ class BudgetController:
             for item in prior
         )
         self._output_tokens = sum(item.output_tokens for item in prior)
+        self._work_input_budget = work_input_budget
+        self._work_input_tokens: dict[str, int] = {}
+        for item in prior:
+            self._work_input_tokens[item.work_id] = (
+                self._work_input_tokens.get(item.work_id, 0)
+                + item.input_tokens
+                + item.cache_read_tokens
+                + item.cache_write_tokens
+            )
+        critical_work_ids = (
+            set(work_input_budget.critical_work_ids)
+            if work_input_budget is not None else set()
+        )
+        self._pending_critical_work_ids = critical_work_ids - {
+            item.work_id
+            for item in prior
+            if item.sessions > 0 or item.calls > 0
+        }
         prior_seconds = sum(item.wall_time_ms for item in prior) / 1000
         allowance = max(0.0, policy.max_wall_clock_minutes * 60 - prior_seconds)
         self._deadline = clock() + allowance
@@ -1184,6 +1242,7 @@ class BudgetController:
         *,
         input_upper_bound: int,
         requested_output_tokens: int,
+        work_id: str = "",
     ) -> _CallReservation:
         input_upper_bound = max(1, input_upper_bound)
         requested_output_tokens = max(1, requested_output_tokens)
@@ -1198,6 +1257,27 @@ class BudgetController:
             remaining_output = (
                 self.policy.max_output_tokens - self._output_tokens - reserved_output
             )
+            if self._work_input_budget is not None and work_id:
+                work_limit = self._work_input_budget.work_input_limits.get(work_id)
+                if work_limit is not None:
+                    work_reserved = sum(
+                        item.input_tokens
+                        for item in self._reservations.values()
+                        if item.work_id == work_id
+                    )
+                    work_remaining = (
+                        work_limit
+                        - self._work_input_tokens.get(work_id, 0)
+                        - work_reserved
+                    )
+                    if input_upper_bound > work_remaining:
+                        raise BudgetExceededError("max_input_tokens_per_work")
+                protected_critical = (
+                    len(self._pending_critical_work_ids - {work_id})
+                    * self._work_input_budget.critical_first_call_reserve
+                )
+                if input_upper_bound > remaining_input - protected_critical:
+                    raise BudgetExceededError("critical_input_reserve")
             if input_upper_bound > remaining_input:
                 raise BudgetExceededError("max_input_tokens")
             if remaining_output <= 0:
@@ -1206,8 +1286,10 @@ class BudgetController:
                 reservation_id=uuid.uuid4().hex,
                 input_tokens=input_upper_bound,
                 output_tokens=min(requested_output_tokens, remaining_output),
+                work_id=work_id,
             )
             self._reservations[reservation.reservation_id] = reservation
+            self._pending_critical_work_ids.discard(work_id)
             return reservation
 
     def complete_call(
@@ -1224,13 +1306,20 @@ class BudgetController:
                 + response.cache_read_tokens
                 + response.cache_write_tokens
             )
+            if reservation.work_id:
+                self._work_input_tokens[reservation.work_id] = (
+                    self._work_input_tokens.get(reservation.work_id, 0)
+                    + response.input_tokens
+                    + response.cache_read_tokens
+                    + response.cache_write_tokens
+                )
             self._output_tokens += response.output_tokens
 
     def remaining_seconds(self) -> float:
         with self._lock:
             return max(0.0, self._deadline - self._clock())
 
-    def snapshot(self) -> dict[str, int | float | bool]:
+    def snapshot(self) -> dict[str, object]:
         with self._lock:
             reserved_input = sum(item.input_tokens for item in self._reservations.values())
             reserved_output = sum(item.output_tokens for item in self._reservations.values())
@@ -1239,6 +1328,23 @@ class BudgetController:
                 "output_tokens": self._output_tokens,
                 "reserved_input_tokens": reserved_input,
                 "reserved_output_tokens": reserved_output,
+                "input_fairness_policy": (
+                    self._work_input_budget.policy_version
+                    if self._work_input_budget is not None else "disabled"
+                ),
+                "per_work_input_limit": (
+                    self._work_input_budget.per_work_input_limit
+                    if self._work_input_budget is not None else 0
+                ),
+                "protected_critical_input_tokens": (
+                    len(self._pending_critical_work_ids)
+                    * self._work_input_budget.critical_first_call_reserve
+                    if self._work_input_budget is not None else 0
+                ),
+                "pending_critical_work_ids": sorted(
+                    self._pending_critical_work_ids
+                ),
+                "work_input_tokens": dict(sorted(self._work_input_tokens.items())),
                 "remaining_seconds": max(0.0, self._deadline - self._clock()),
                 "exhausted": (
                     self._input_tokens >= self.policy.max_input_tokens
@@ -1256,12 +1362,14 @@ class BudgetedLLMClient:
         delegate,
         controller: BudgetController,
         *,
+        work_id: str = "",
         on_call_started: Callable[[], None] | None = None,
     ):
         self.delegate = delegate
         self.controller = controller
         self.model_id = str(getattr(delegate, "model_id", "unknown"))
         self.transport = str(getattr(delegate, "transport", "bedrock_converse"))
+        self.work_id = work_id
         self.on_call_started = on_call_started or (lambda: None)
         self.started_calls = 0
 
@@ -1270,6 +1378,7 @@ class BudgetedLLMClient:
         reservation = self.controller.reserve_call(
             input_upper_bound=_input_token_upper_bound(kwargs),
             requested_output_tokens=requested,
+            work_id=self.work_id,
         )
         kwargs["max_tokens"] = reservation.output_tokens
         timeout = self.controller.remaining_seconds()
