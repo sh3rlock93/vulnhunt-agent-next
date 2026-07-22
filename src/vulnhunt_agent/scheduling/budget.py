@@ -16,7 +16,7 @@ from ..analysis.models import CapacityPriorityClass, CapacityRiskChain, RiskChai
 from ..domain.schemas import BudgetPolicy, BudgetUsage, HunterWorkItem
 
 LEGACY_BUDGET_POLICY = "hunter-budget-allocation-v1"
-NATIVE_DIVERSE_POLICY = "c-budget-v4"
+NATIVE_DIVERSE_POLICY = "c-budget-v5"
 NATIVE_CHAIN_SHARE = 0.50
 NATIVE_SEED_DIVERSITY_SHARE = 0.25
 NATIVE_HIGH_RISK_SHARE = 1 / 6
@@ -63,6 +63,8 @@ class AdmissionDecision:
     reason: str
     seed_family: str = ""
     coverage_group: str = ""
+    logical_chain_group: str = ""
+    logical_chain_groups: tuple[str, ...] = ()
     cap_exception: bool = False
 
 
@@ -85,6 +87,8 @@ class AdmissionRankingRecord:
     reason: str
     seed_family: str = ""
     coverage_group: str = ""
+    logical_chain_group: str = ""
+    logical_chain_groups: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -225,6 +229,8 @@ class _AdmissionCandidate:
     entrypoint_reachable: bool
     seed_family: str
     coverage_group: str
+    logical_chain_group: str
+    logical_chain_groups: tuple[str, ...]
     chain_ids: tuple[str, ...]
     missing_chain_elements: tuple[str, ...]
     guard_states: tuple[str, ...]
@@ -405,6 +411,21 @@ def _allocate_native_diverse(
             key=_capacity_priority_rank,
             default="unclassified",
         )
+        best_capacity = min(
+            matching_capacity.values(),
+            key=lambda chain: (
+                _capacity_priority_rank(chain.priority_class.value),
+                -chain.score,
+                chain.chain_id,
+            ),
+            default=None,
+        )
+        logical_chain_group = (
+            best_capacity.root_cause_group if best_capacity is not None else ""
+        )
+        logical_chain_groups = tuple(sorted({
+            chain.root_cause_group for chain in matching_capacity.values()
+        }))
         missing = set(_missing_chain_elements(tuple(matching.values())))
         if matching_capacity:
             missing.discard("risk_chain")
@@ -425,7 +446,9 @@ def _allocate_native_diverse(
                 chain.node_id in entrypoints for chain in matching.values()
             ) or any(chain.entrypoint_reachable for chain in matching_capacity.values()),
             seed_family=_seed_family(item.seed_file),
-            coverage_group=_coverage_group(item),
+            coverage_group=logical_chain_group or _coverage_group(item),
+            logical_chain_group=logical_chain_group,
+            logical_chain_groups=logical_chain_groups,
             chain_ids=tuple(sorted((*matching, *matching_capacity))),
             missing_chain_elements=tuple(sorted(missing)),
             guard_states=tuple(sorted({
@@ -450,6 +473,7 @@ def _allocate_native_diverse(
     selected_components: set[str] = set()
     selected_seed_families: set[str] = set()
     selected_coverage_groups: set[str] = set()
+    selected_logical_chain_groups: set[str] = set()
     seed_counts: dict[str, int] = {}
     decisions: list[AdmissionDecision] = []
     cap_exceptions = 0
@@ -472,7 +496,13 @@ def _allocate_native_diverse(
             return False
         if (
             not allow_duplicate_group
+            and not candidate.logical_chain_groups
             and candidate.coverage_group in selected_coverage_groups
+        ):
+            return False
+        if (
+            candidate.logical_chain_groups
+            and set(candidate.logical_chain_groups) <= selected_logical_chain_groups
         ):
             return False
         novelty = 10 if candidate.component not in selected_components else 0
@@ -491,6 +521,7 @@ def _allocate_native_diverse(
         selected_components.add(candidate.component)
         selected_seed_families.add(candidate.seed_family)
         selected_coverage_groups.add(candidate.coverage_group)
+        selected_logical_chain_groups.update(candidate.logical_chain_groups)
         seed_counts[candidate.seed_family] = (
             seed_counts.get(candidate.seed_family, 0) + 1
         )
@@ -506,6 +537,8 @@ def _allocate_native_diverse(
             reason=reason,
             seed_family=candidate.seed_family,
             coverage_group=candidate.coverage_group,
+            logical_chain_group=candidate.logical_chain_group,
+            logical_chain_groups=candidate.logical_chain_groups,
             cap_exception=cap_exception,
         ))
         return True
@@ -518,7 +551,7 @@ def _allocate_native_diverse(
     for candidate in ordered:
         if chain_slots >= chain_target:
             break
-        if candidate.chain_score < 80:
+        if not _is_chain_critical(candidate):
             continue
         before_diversity = len(selected_seed_families) < diversity_goal
         at_cap = seed_counts.get(candidate.seed_family, 0) >= NATIVE_EARLY_SEED_CAP
@@ -532,7 +565,7 @@ def _allocate_native_diverse(
             reason=(
                 "single eligible critical seed owns every chain; early cap exception"
                 if exception else
-                "capacity or risk chain score is at least 80 under the early seed cap"
+                "complete capacity class or general critical risk chain"
             ),
             cap_exception=exception,
         ):
@@ -565,7 +598,7 @@ def _allocate_native_diverse(
     for candidate in ordered:
         if high_slots >= high_target:
             break
-        if candidate.chain_score >= 80 or candidate.item.risk < 4:
+        if _is_chain_critical(candidate) or candidate.item.risk < 4:
             continue
         if (
             len(selected_seed_families) < diversity_goal
@@ -608,7 +641,12 @@ def _allocate_native_diverse(
 
     deferred = {
         candidate.item.work_id: (
-            "duplicate_coverage_group"
+            "duplicate_capacity_chain"
+            if (
+                candidate.logical_chain_groups
+                and set(candidate.logical_chain_groups) <= selected_logical_chain_groups
+            )
+            else "duplicate_coverage_group"
             if candidate.item.work_id in duplicate_work_ids
             else "max_hunter_sessions"
         )
@@ -632,7 +670,10 @@ def _allocate_native_diverse(
         seed_diverse_slots=seed_slots,
         high_risk_non_chain_slots=high_slots,
         borrowed_slots=borrowed_slots,
-        duplicate_coverage_deferred=len(duplicate_work_ids),
+        duplicate_coverage_deferred=sum(
+            reason in {"duplicate_coverage_group", "duplicate_capacity_chain"}
+            for reason in deferred.values()
+        ),
         seed_cap_exceptions=cap_exceptions,
         decisions=tuple(decisions),
         ranking=_native_ranking_records(
@@ -686,6 +727,8 @@ def _native_ranking_records(
             reason=reason,
             seed_family=candidate.seed_family,
             coverage_group=candidate.coverage_group,
+            logical_chain_group=candidate.logical_chain_group,
+            logical_chain_groups=candidate.logical_chain_groups,
         ))
     return tuple(records)
 
@@ -722,6 +765,8 @@ def _legacy_ranking_record(
         reason=reason,
         seed_family=_seed_family(item.seed_file),
         coverage_group=_coverage_group(item),
+        logical_chain_group="",
+        logical_chain_groups=(),
     )
 
 
@@ -747,10 +792,11 @@ def _ranking_record_id(work_id: str) -> str:
 
 def _candidate_order(
     candidate: _AdmissionCandidate,
-) -> tuple[int, int, int, int, int, str, str, str]:
+) -> tuple[int, int, int, int, int, int, str, str, str]:
     return (
         _capacity_priority_rank(candidate.priority_class),
         -candidate.chain_score,
+        _hunter_priority(candidate.item.hunter),
         -int(candidate.item.required),
         -candidate.item.risk,
         -int(candidate.entrypoint_reachable),
@@ -758,6 +804,17 @@ def _candidate_order(
         candidate.seed_family,
         candidate.item.work_id,
     )
+
+
+def _is_chain_critical(candidate: _AdmissionCandidate) -> bool:
+    return candidate.priority_class in {
+        CapacityPriorityClass.COMPLETE_UNCHECKED.value,
+        CapacityPriorityClass.COMPLETE_UNKNOWN_GUARD.value,
+    } or candidate.risk_chain_score >= 80
+
+
+def _hunter_priority(hunter: str) -> int:
+    return 0 if hunter == "c-bounds-integers" else 1
 
 
 def _capacity_priority_rank(priority: str) -> int:

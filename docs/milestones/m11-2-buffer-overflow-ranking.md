@@ -1,6 +1,6 @@
 # M11.2 — Capacity-aware buffer-overflow ranking
 
-Status: in progress; PR 5 of 7 implemented
+Status: in progress; PR 6 of 7 implemented
 
 ## Goal
 
@@ -74,6 +74,16 @@ input. Existing LibTIFF and synthetic ranking regressions must remain green.
 - [x] Non-dominating or directionally ambiguous comparisons remain unknown, not safe.
 - [x] Unrelated parser, metadata, and public-limit checks do not mask a capacity path.
 - [x] Relevant guard and safe-growth fact IDs remain auditable in chain artifacts.
+
+## PR 6 acceptance gates
+
+- [x] One capacity root-cause group is one admission unit across files and signals.
+- [x] Bounds work is selected before lifetime work for the same capacity chain.
+- [x] Equivalent allocation/write work is explicitly duplicate-deferred.
+- [x] Complete capacity classes qualify without a fixed numeric threshold.
+- [x] Partial capacity evidence cannot become chain-critical from raw score alone.
+- [x] The 12-session, 24k context, retry, seed-cap, and parallelism limits are unchanged.
+- [x] Libwebp affected work remains top six and existing LibTIFF gates remain green.
 
 ## Non-goals
 
