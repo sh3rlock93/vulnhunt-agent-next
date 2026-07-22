@@ -36,10 +36,8 @@ from vulnhunt_agent.reproduction.provenance import (
 )
 from vulnhunt_agent.sandbox import ContainerExecutor
 from vulnhunt_agent.scheduling import (
-    allocate_work_items,
-    apply_admission_focus,
-    build_routing_plan,
-    build_slice_work_items,
+    allocate_native_work_plan,
+    build_native_work_plan,
 )
 
 BLIND_POLICY = "blind-oracle-v1"
@@ -332,14 +330,14 @@ def _run_deterministic_discovery(
         "coverage_plan": coverage.model_dump(mode="json"),
         "incremental_scope": {"mode": "full"},
     }
-    routing = build_routing_plan(
+    native_work_plan = build_native_work_plan(
         run_id=manifest["benchmark"]["id"],
         source_snapshot=snapshot,
         selected_files=list(coverage.selected_files),
         enabled_hunters=list(manifest["scan"]["hunters"]),
         analysis=analysis,
     )
-    work = build_slice_work_items(routing, analysis)
+    routing = native_work_plan.routing
     budget = BudgetPolicy(
         max_hunter_sessions=int(manifest["budget"]["max_hunter_sessions"]),
         max_input_tokens=int(manifest["budget"]["max_input_tokens"]),
@@ -351,19 +349,16 @@ def _run_deterministic_discovery(
             manifest["budget"]["max_retries_per_work_item"]
         ),
     )
-    allocation = allocate_work_items(
-        work,
+    admission_plan = allocate_native_work_plan(
+        native_work_plan,
         budget,
-        risk_chains=graph.risk_chains,
-        capacity_chains=(
-            graph.capacity_risk_chains
-            if manifest["policies"].get("capacity_risk_chain")
-            else ()
-        ),
-        entrypoint_ids=graph.entrypoint_ids,
         native_full_scan=True,
+        include_capacity_chains=bool(
+            manifest["policies"].get("capacity_risk_chain")
+        ),
     )
-    work = apply_admission_focus(work, allocation)
+    allocation = admission_plan.allocation
+    work = admission_plan.work_items
     admitted = set(allocation.admitted_work_ids)
     cache = SharedContextCache(
         output / "contexts",
@@ -399,6 +394,7 @@ def _run_deterministic_discovery(
             **asdict(allocation),
             "decisions": [asdict(item) for item in allocation.decisions],
         },
+        "plan_contract": admission_plan.contract,
         "contexts": context_records,
         "terminal_routes": terminal,
     }
@@ -487,6 +483,11 @@ async def _run_authenticated_discovery(
     # RunStore directory name.  Keep the benchmark ID and repository ID equal.
     run_dir = output / run_id
     store = RunStore(run_dir)
+    store.save_step("hunter_selection", {
+        "policy_version": "benchmark-hunter-selection-v1",
+        "source": "scan_manifest",
+        "hunters": list(manifest["scan"]["hunters"]),
+    })
     chosen_model = model_id or app_settings.DEFAULT_MODEL.model_id
     store.save_config({
         "repo_source": manifest["source"]["repository"],
