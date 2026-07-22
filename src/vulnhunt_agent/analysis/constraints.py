@@ -19,12 +19,11 @@ _REVERSE_BOUND = re.compile(
     rf"(?P<operator>>=|<=|>|<)\s*(?P<subject>{_SUBJECT})"
 )
 _POINTER_LOOP = re.compile(
-    r"for\s*\([^;]{0,200}?\b(?P<pointer>[A-Za-z_]\w*)\s*\+=\s*"
-    r"(?P<step>[^;]{1,80});[^;]{0,200};[^)]{0,200}?\b(?P=pointer)\s*\+=\s*"
-    r"(?P=step)\)",
+    r"for\s*\(\s*(?P<pointer>[A-Za-z_]\w*)\s*\+=\s*"
+    r"(?P<step>.+?)\s*;\s*;\s*(?P=pointer)\s*\+=\s*(?P=step)\s*\)",
     re.DOTALL,
 )
-_COUNTER_INCREMENT = re.compile(r"\b(?P<counter>[A-Za-z_]\w*)\s*(?:\+\+|\+=\s*1)\b")
+_COUNTER_INCREMENT = re.compile(r"\b(?P<counter>[A-Za-z_]\w*)\s*(?:\+\+|\+=\s*1)")
 _REJECT = re.compile(r"\b(?:return|goto|break)\b")
 
 

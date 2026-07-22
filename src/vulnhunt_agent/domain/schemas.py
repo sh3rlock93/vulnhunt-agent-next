@@ -54,6 +54,121 @@ class Precondition(DomainModel):
     required: bool = True
 
 
+class FeasibilityStatus(StrEnum):
+    FEASIBLE = "feasible"
+    LOGICALLY_INFEASIBLE = "logically_infeasible"
+    ENVIRONMENTALLY_EXTREME = "environmentally_extreme"
+    UNKNOWN = "unknown"
+
+
+class FeasibilityBoundKind(StrEnum):
+    TRIGGER_MINIMUM = "trigger_minimum"
+    INPUT_MINIMUM = "input_minimum"
+    REACHABLE_MAXIMUM = "reachable_maximum"
+    TYPE_LIMIT = "type_limit"
+    RESOURCE_LIMIT = "resource_limit"
+
+
+class ResolutionDisposition(StrEnum):
+    CONFIRMED = "confirmed"
+    STATICALLY_REFUTED = "statically_refuted"
+    RESOURCE_INFEASIBLE = "resource_infeasible"
+    REPRODUCTION_REJECTED = "reproduction_rejected"
+    VERIFICATION_DEFERRED = "verification_deferred"
+
+
+class VerificationDeferredReason(StrEnum):
+    RECIPE_UNAVAILABLE = "recipe_unavailable"
+    PREPARED_TARGET_UNAVAILABLE = "prepared_target_unavailable"
+    TARGET_PROVENANCE_MISSING = "target_provenance_missing"
+    REVIEW_INCONCLUSIVE = "review_inconclusive"
+    EXECUTION_ERROR = "execution_error"
+    HUMAN_REVIEW_REQUIRED = "human_review_required"
+
+
+class ImmutableSourceRange(DomainModel):
+    source_snapshot: str = Field(pattern=SHA256_PATTERN)
+    path: str = Field(min_length=1)
+    line: int = Field(ge=1)
+    end_line: int = Field(ge=1)
+    content_sha256: str = Field(pattern=SHA256_PATTERN)
+    excerpt: str = Field(min_length=1, max_length=4000)
+
+    @model_validator(mode="after")
+    def validate_range(self) -> "ImmutableSourceRange":
+        CodeLocation(path=self.path, line=self.line, end_line=self.end_line)
+        if self.end_line < self.line:
+            raise ValueError("source range end must not precede its start")
+        return self
+
+
+class FeasibilityBound(DomainModel):
+    bound_id: str = Field(pattern=r"^bound_[0-9a-f]{20}$")
+    kind: FeasibilityBoundKind
+    subject: str = Field(min_length=1)
+    relation: str = Field(pattern=r"^(?:<=|<|>=|>|==)$")
+    value: int = Field(ge=0)
+    unit: str = Field(min_length=1)
+    expression: str = Field(min_length=1, max_length=500)
+    sources: tuple[ImmutableSourceRange, ...] = Field(min_length=1, max_length=8)
+
+
+class CheckedArithmetic(DomainModel):
+    operation: str = Field(pattern=r"^(?:add|multiply|compare_gt)$")
+    operands: tuple[int, ...] = Field(min_length=2, max_length=8)
+    result: int
+    expression: str = Field(min_length=1, max_length=500)
+    bound_ids: tuple[str, ...] = Field(min_length=1, max_length=8)
+
+
+class FeasibilityAssessment(DomainModel):
+    policy_version: str = "native-feasibility-v1"
+    candidate_id: str = Field(min_length=1)
+    source_snapshot: str = Field(pattern=SHA256_PATTERN)
+    status: FeasibilityStatus
+    bounds: tuple[FeasibilityBound, ...] = ()
+    arithmetic: tuple[CheckedArithmetic, ...] = ()
+    rationale: tuple[str, ...] = Field(min_length=1)
+    confidence_adjustment: float = Field(default=0.0, ge=-1.0, le=0.0)
+
+    @model_validator(mode="after")
+    def validate_proof(self) -> "FeasibilityAssessment":
+        known = {item.bound_id for item in self.bounds}
+        cited = {item for step in self.arithmetic for item in step.bound_ids}
+        if not cited.issubset(known):
+            raise ValueError("checked arithmetic cites an unknown bound")
+        if self.status is FeasibilityStatus.LOGICALLY_INFEASIBLE:
+            if not self.bounds or not self.arithmetic:
+                raise ValueError("logical infeasibility requires cited checked arithmetic")
+            if not any(
+                step.operation == "compare_gt" and step.result == 1
+                for step in self.arithmetic
+            ):
+                raise ValueError("logical infeasibility requires a proven contradiction")
+        return self
+
+
+class CandidateResolution(DomainModel):
+    policy_version: str = "candidate-resolution-v1"
+    disposition: ResolutionDisposition
+    feasibility_status: FeasibilityStatus
+    synthesis_attempts: int = Field(default=0, ge=0, le=1)
+    reason: str = Field(min_length=1, max_length=1000)
+    deferred_reason: VerificationDeferredReason | None = None
+    remaining_requirement: str = Field(default="", max_length=1000)
+
+    @model_validator(mode="after")
+    def validate_deferred_fields(self) -> "CandidateResolution":
+        deferred = self.disposition is ResolutionDisposition.VERIFICATION_DEFERRED
+        if deferred and (self.deferred_reason is None or not self.remaining_requirement):
+            raise ValueError("verification_deferred requires a typed reason and requirement")
+        if not deferred and (
+            self.deferred_reason is not None or self.remaining_requirement
+        ):
+            raise ValueError("only verification_deferred carries deferred fields")
+        return self
+
+
 class OracleResult(DomainModel):
     type: str = Field(min_length=1)
     expression: str | None = None
@@ -324,6 +439,8 @@ class CandidateFinding(DomainModel):
     impact: tuple[str, ...] = Field(min_length=1)
     evidence_ids: tuple[str, ...] = ()
     poc: PocSpec | None = None
+    feasibility: FeasibilityAssessment | None = None
+    resolution: CandidateResolution | None = None
     confidence: float = Field(ge=0.0, le=1.0)
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)

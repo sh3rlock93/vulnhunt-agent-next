@@ -14,6 +14,8 @@ from ..domain.schemas import (
     ArtifactRef,
     BudgetUsage,
     CandidateFinding,
+    CandidateResolution,
+    FeasibilityAssessment,
     Evidence,
     PocSpec,
     ReviewVerdict,
@@ -779,6 +781,56 @@ class SqliteRepository:
             )
             return updated
 
+    def attach_candidate_feasibility(
+        self,
+        candidate_id: str,
+        assessment: FeasibilityAssessment,
+    ) -> CandidateFinding:
+        assessment = FeasibilityAssessment.model_validate(assessment)
+        with self._write_transaction():
+            finding = self._required_candidate(candidate_id)
+            if assessment.candidate_id != candidate_id:
+                raise ValueError("feasibility assessment belongs to another candidate")
+            if finding.feasibility is not None:
+                if finding.feasibility != assessment:
+                    raise RepositoryConflictError(
+                        "candidate feasibility is immutable once attached"
+                    )
+                return finding
+            updated = CandidateFinding.model_validate(finding.model_copy(update={
+                "feasibility": assessment,
+                "updated_at": datetime.now(UTC),
+            }))
+            self.connection.execute(
+                "UPDATE findings SET payload_json = ? WHERE candidate_id = ?",
+                (_dump(updated), candidate_id),
+            )
+            return updated
+
+    def attach_candidate_resolution(
+        self,
+        candidate_id: str,
+        resolution: CandidateResolution,
+    ) -> CandidateFinding:
+        resolution = CandidateResolution.model_validate(resolution)
+        with self._write_transaction():
+            finding = self._required_candidate(candidate_id)
+            if finding.resolution is not None:
+                if finding.resolution != resolution:
+                    raise RepositoryConflictError(
+                        "candidate resolution is immutable once attached"
+                    )
+                return finding
+            updated = CandidateFinding.model_validate(finding.model_copy(update={
+                "resolution": resolution,
+                "updated_at": datetime.now(UTC),
+            }))
+            self.connection.execute(
+                "UPDATE findings SET payload_json = ? WHERE candidate_id = ?",
+                (_dump(updated), candidate_id),
+            )
+            return updated
+
     def save_evidence(self, evidence: Evidence) -> Evidence:
         evidence = Evidence.model_validate(evidence)
         self._required_run(evidence.run_id)
@@ -1122,7 +1174,15 @@ def _dump_json(value: object) -> str:
 
 
 def _candidate_seed(finding: CandidateFinding) -> dict:
-    return finding.model_dump(exclude={"state", "created_at", "updated_at"})
+    return finding.model_dump(exclude={
+        "state",
+        "evidence_ids",
+        "poc",
+        "feasibility",
+        "resolution",
+        "created_at",
+        "updated_at",
+    })
 
 
 def _as_utc(value: datetime | None) -> datetime:

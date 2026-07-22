@@ -34,6 +34,9 @@ class FindingState(StrEnum):
     UNCLEAR = "unclear"
     ENVIRONMENT_BLOCKED = "environment_blocked"
     POLICY_BLOCKED = "policy_blocked"
+    STATICALLY_REFUTED = "statically_refuted"
+    RESOURCE_INFEASIBLE = "resource_infeasible"
+    VERIFICATION_DEFERRED = "verification_deferred"
 
 
 class StateTransitionError(ValueError):
@@ -65,7 +68,13 @@ RUN_TRANSITIONS.update(
     }
 )
 
-_FINDING_TERMINALS = frozenset({FindingState.REJECTED, FindingState.UNCLEAR})
+_FINDING_TERMINALS = frozenset({
+    FindingState.REJECTED,
+    FindingState.UNCLEAR,
+    FindingState.STATICALLY_REFUTED,
+    FindingState.RESOURCE_INFEASIBLE,
+    FindingState.VERIFICATION_DEFERRED,
+})
 FINDING_TRANSITIONS: dict[FindingState, frozenset[FindingState]] = {
     FindingState.HYPOTHESIS: frozenset(
         {FindingState.STATICALLY_SUPPORTED, FindingState.ENVIRONMENT_BLOCKED}
@@ -89,11 +98,17 @@ FINDING_TRANSITIONS: dict[FindingState, frozenset[FindingState]] = {
         {FindingState.REPORTABLE, FindingState.POLICY_BLOCKED}
     )
     | _FINDING_TERMINALS,
-    FindingState.ENVIRONMENT_BLOCKED: frozenset({FindingState.REPRODUCTION_PENDING}),
+    FindingState.ENVIRONMENT_BLOCKED: frozenset({
+        FindingState.REPRODUCTION_PENDING,
+        FindingState.VERIFICATION_DEFERRED,
+    }),
     FindingState.POLICY_BLOCKED: frozenset({FindingState.REVIEWER_VERIFIED}),
     FindingState.REPORTABLE: frozenset(),
     FindingState.REJECTED: frozenset(),
     FindingState.UNCLEAR: frozenset(),
+    FindingState.STATICALLY_REFUTED: frozenset(),
+    FindingState.RESOURCE_INFEASIBLE: frozenset(),
+    FindingState.VERIFICATION_DEFERRED: frozenset(),
 }
 
 

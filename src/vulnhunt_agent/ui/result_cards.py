@@ -190,6 +190,20 @@ def _verify(store: RunStore, d: dict) -> None:
     states = d.get("states") or {}
     if states:
         st.caption(" · ".join(f"{key}: {value}" for key, value in states.items()))
+    feasibility = d.get("feasibility") or {}
+    resolutions = d.get("resolutions") or {}
+    if feasibility:
+        st.caption(
+            "Feasibility · "
+            + " · ".join(f"{key}: {value}" for key, value in feasibility.items())
+        )
+    if resolutions:
+        st.caption(
+            "Resolution · "
+            + " · ".join(f"{key}: {value}" for key, value in resolutions.items())
+        )
+    if d.get("synthesis_attempts"):
+        st.caption(f"Bounded recipe synthesis attempts: {d['synthesis_attempts']}")
     errors = d.get("errors") or []
     if errors:
         st.warning(f"{len(errors)} candidate operation(s) need attention.")

@@ -94,6 +94,16 @@ def build_canonical_report(
             "cvss_score": score,
             "severity": cvss.severity(score),
         },
+        "verification": {
+            "feasibility": (
+                finding.feasibility.model_dump(mode="json")
+                if finding.feasibility is not None else None
+            ),
+            "resolution": (
+                finding.resolution.model_dump(mode="json")
+                if finding.resolution is not None else None
+            ),
+        },
         "reproduction": reproductions,
         "reviews": [
             {

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict
+from pathlib import Path
 
 from ..core.events import EventBus
 from ..core.llm import LLMClient
@@ -56,6 +57,8 @@ async def run_verify(store: RunStore, bus: EventBus) -> None:
             HardenedDockerBackend(),
             reviewers,
             output_root=store.dir / "verified",
+            source_root=Path(str(config["repo_path"])),
+            analysis=store.load_step("analysis_graph") or {},
         ).verify(
             run_id=store.dir.name,
             run_dir=store.dir,
@@ -71,6 +74,8 @@ async def run_verify(store: RunStore, bus: EventBus) -> None:
         variants_executed=summary.variants_executed,
         variants_failed=summary.variants_failed,
         automatic_rereviews=summary.automatic_rereviews,
+        synthesis_attempts=summary.synthesis_attempts,
+        resolutions=summary.resolutions,
         errors=len(summary.errors),
     )
 

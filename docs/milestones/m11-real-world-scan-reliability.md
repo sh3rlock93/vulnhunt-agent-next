@@ -1,6 +1,6 @@
 # M11 — Reliable bounded scans and candidate falsification on live repositories
 
-Status: PR 1–5 implemented and verified; PR 6 pending
+Status: PR 1–6 implemented and verified; PR 7 pending
 
 ## Goal
 
@@ -310,14 +310,14 @@ Expected changes:
 
 ### PR 6 acceptance gates
 
-- [ ] The libexpat `nAtts` candidate is refuted using caller and minimum-input bounds.
-- [ ] A nearby synthetic candidate with a reachable smaller limit remains feasible.
-- [ ] Large but logically possible resource-exhaustion findings are not auto-refuted.
-- [ ] Every inferred bound cites immutable source ranges and checked arithmetic.
-- [ ] A supported candidate gets one bounded recipe-synthesis attempt.
-- [ ] Standalone model code still cannot confirm prepared-target vulnerability.
-- [ ] No candidate remains silently terminal at `statically_supported`.
-- [ ] Legacy findings remain readable without retroactive confidence promotion.
+- [x] The libexpat `nAtts` candidate is refuted using caller and minimum-input bounds.
+- [x] A nearby synthetic candidate with a reachable smaller limit remains feasible.
+- [x] Large but logically possible resource-exhaustion findings are not auto-refuted.
+- [x] Every inferred bound cites immutable source ranges and checked arithmetic.
+- [x] A supported candidate gets one bounded recipe-synthesis attempt.
+- [x] Standalone model code still cannot confirm prepared-target vulnerability.
+- [x] No candidate remains silently terminal at `statically_supported`.
+- [x] Legacy findings remain readable without retroactive confidence promotion.
 
 ## PR 7 — Real-world benchmark and honest outcome reporting
 
