@@ -16,6 +16,8 @@ from ..scheduling.budget import BudgetExceededError
 from .tools import HunterTools, tool_specs
 
 TARGET_COMPLETION_POLICY = "c-target-completion-v1"
+SOURCE_EVIDENCE_POLICY = "c-source-read-evidence-v1"
+SOURCE_EVIDENCE_RETRY_LIMIT = 1
 
 
 FINAL_REPORT_INSTRUCTIONS = """VERIFY WITH A PoC.
@@ -57,6 +59,10 @@ or missing guard, the allocation, and the later copy/index/loop bound in that
 order. Compare the value that sizes the allocation with any independent value
 that controls the later write. Treat the chain as a prioritization hypothesis,
 not proof: verify reachability and the actual C types before reporting.
+
+When `focus_chain_ids` are present, use `read_file` on at least one matching
+chain evidence range before finalizing. The source-evidence gate will reject a
+finding, no-finding, or deferred result based only on packet excerpts.
 
 When done, STOP calling tools and output ONLY this JSON:
 {
@@ -136,6 +142,7 @@ class HuntResult:
     incomplete_target_ids: list[str] = field(default_factory=list)
     executions: list[dict] = field(default_factory=list)
     written_pocs: list[str] = field(default_factory=list)
+    source_reads: list[dict] = field(default_factory=list)
     iterations: int = 0
     input_tokens: int = 0
     output_tokens: int = 0
@@ -149,6 +156,7 @@ class HuntResult:
     protocol_repairs: int = 0
     protocol_repair_successes: int = 0
     transient_retries: int = 0
+    source_evidence_retries: int = 0
     model_failures: dict[str, int] = field(default_factory=dict)
     stopped: str = ""   # "final_json" | "max_iter" | "error"
     budget_reason: str = ""
@@ -183,9 +191,13 @@ class HunterAgent:
         self,
         target_file: str,
         analysis_context: dict | None = None,
+        *,
+        focused_retry_contexts: tuple[dict, ...] = (),
     ) -> HuntResult:
         result = _result_with_initial_metrics(self.initial_metrics)
         expected_targets = _expected_target_ids(analysis_context)
+        source_requirements = _focused_source_requirements(analysis_context)
+        retry_contexts = iter(focused_retry_contexts)
         completion_repairs = 0
         protocol_repair_pending = (
             result.protocol_repairs > result.protocol_repair_successes
@@ -360,6 +372,56 @@ class HunterAgent:
                         self._attach_tool_ledger(result)
                         self._checkpoint(result)
                         return result
+                    has_source_evidence = _has_focused_source_read(
+                        getattr(self.tools, "source_reads", []),
+                        source_requirements,
+                    )
+                    if source_requirements and (
+                        not has_source_evidence or incomplete
+                    ):
+                        if (
+                            result.source_evidence_retries
+                            < SOURCE_EVIDENCE_RETRY_LIMIT
+                            and i + 1 < self.max_iterations
+                        ):
+                            result.source_evidence_retries += 1
+                            retry_context = next(
+                                retry_contexts,
+                                analysis_context or {"slices": []},
+                            )
+                            source_requirements = (
+                                _focused_source_requirements(retry_context)
+                                or source_requirements
+                            )
+                            messages.append({
+                                "role": "user",
+                                "content": [{"text": _source_evidence_retry_message(
+                                    retry_context,
+                                    source_requirements,
+                                    incomplete,
+                                )}],
+                            })
+                            self.on_event(
+                                "source_evidence_retry",
+                                retry=result.source_evidence_retries,
+                                required_paths=sorted(source_requirements),
+                                incomplete_targets=incomplete,
+                            )
+                            self._attach_tool_ledger(result)
+                            self._checkpoint(result)
+                            continue
+                        if not has_source_evidence:
+                            result.findings = []
+                            result.target_dispositions = _deferred_dispositions(
+                                expected_targets,
+                                "focused source evidence was not read",
+                            )
+                            result.incomplete_target_ids = list(expected_targets)
+                            result.stopped = "source_evidence_missing"
+                            result.budget_reason = "source_evidence_missing"
+                            self._attach_tool_ledger(result)
+                            self._checkpoint(result)
+                            return result
                     result.findings = findings
                     result.target_dispositions = dispositions
                     result.incomplete_target_ids = incomplete
@@ -427,6 +489,9 @@ class HunterAgent:
         )
         result.written_pocs = list(
             getattr(self.tools, "written_pocs", [])
+        )
+        result.source_reads = list(
+            getattr(self.tools, "source_reads", [])
         )
         result.tool_calls = int(self.initial_metrics.get("tool_calls", 0)) + int(
             getattr(self.tools, "tool_calls", 0)
@@ -500,6 +565,111 @@ def _expected_target_ids(analysis_context: dict | None) -> tuple[str, ...]:
     if signal_ids:
         return signal_ids
     return tuple(dict.fromkeys(focus.get("target_node_ids") or ()))
+
+
+def _focused_source_requirements(
+    analysis_context: dict | None,
+) -> dict[str, tuple[int, ...]]:
+    context = analysis_context or {}
+    focus_ids = set(context.get("focus_chain_ids") or ())
+    if not focus_ids:
+        return {}
+    requirements: dict[str, set[int]] = {}
+    for chain in context.get("risk_chains") or ():
+        if str(chain.get("chain_id", "")) not in focus_ids:
+            continue
+        path = str(chain.get("path", ""))
+        if not path:
+            continue
+        requirements.setdefault(path, set()).update(
+            int(line)
+            for line in (
+                *chain.get("source_lines", ()),
+                *(step.get("line", 1) for step in chain.get("transform_steps", ())),
+                *chain.get("guard_lines", ()),
+                *chain.get("sink_lines", ()),
+            )
+        )
+    for chain in context.get("capacity_risk_chains") or ():
+        if str(chain.get("chain_id", "")) not in focus_ids:
+            continue
+        evidence_lines = chain.get("evidence_lines") or {}
+        if evidence_lines:
+            for path, lines in evidence_lines.items():
+                requirements.setdefault(str(path), set()).update(
+                    int(line) for line in lines
+                )
+            continue
+        for path in (
+            chain.get("root_path", ""),
+            *(chain.get("paths") or ()),
+        ):
+            if path:
+                requirements.setdefault(str(path), set())
+    if not requirements:
+        target = next(
+            (
+                item for item in context.get("source_excerpts") or ()
+                if item.get("kind") == "target" and item.get("path")
+            ),
+            None,
+        )
+        if target is not None:
+            requirements[str(target["path"])] = set()
+    return {
+        path: tuple(sorted(lines))
+        for path, lines in sorted(requirements.items())
+    }
+
+
+def _has_focused_source_read(
+    source_reads: object,
+    requirements: dict[str, tuple[int, ...]],
+) -> bool:
+    if not requirements or not isinstance(source_reads, list):
+        return not requirements
+    for record in source_reads:
+        if not isinstance(record, dict):
+            continue
+        path = str(record.get("path", ""))
+        if path not in requirements:
+            continue
+        if int(record.get("bytes", 0)) <= 0:
+            continue
+        lines = requirements[path]
+        if not lines:
+            return True
+        start = max(1, int(record.get("start", 1)))
+        end = record.get("end")
+        if end is None or any(start <= line <= int(end) for line in lines):
+            return True
+    return False
+
+
+def _source_evidence_retry_message(
+    context: dict,
+    requirements: dict[str, tuple[int, ...]],
+    incomplete_targets: list[str],
+) -> str:
+    reads = []
+    for path, lines in requirements.items():
+        if lines:
+            reads.append({
+                "path": path,
+                "start": max(1, lines[0] - 6),
+                "end": lines[0] + 6,
+            })
+        else:
+            reads.append({"path": path, "start": 1})
+    return (
+        "Source-evidence gate blocked finalization. Use read_file on at least one "
+        "focused evidence range below, then verify the allocation/write relationship "
+        "before returning final JSON. Do not defer merely because an excerpt is short. "
+        f"Incomplete targets: {json.dumps(incomplete_targets)}. "
+        f"Suggested reads: {json.dumps(reads, ensure_ascii=False)}. "
+        "Focused immutable context shard: "
+        + json.dumps(context, ensure_ascii=False, separators=(",", ":"))
+    )
 
 
 def _validate_dispositions(

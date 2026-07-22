@@ -19,7 +19,8 @@ from .. import finalize
 
 async def run_hunters(
     task, qstore, repo: Path, client, image: str,
-    arch: dict, analysis_context: dict, sandbox_info: str, max_iter: int, sem, bus,
+    arch: dict, analysis_context: dict | tuple[dict, ...], sandbox_info: str,
+    max_iter: int, sem, bus,
     sandbox_enabled: bool,
     work_items: dict[str, HunterWorkItem] | None = None,
     before_commit=None,
@@ -91,7 +92,16 @@ async def run_hunters(
                     initial_metrics=initial_metrics,
                     on_checkpoint=on_checkpoint,
                 )
-                result = await agent.hunt(task.file, analysis_context)
+                contexts = (
+                    analysis_context
+                    if isinstance(analysis_context, tuple)
+                    else (analysis_context,)
+                )
+                result = await agent.hunt(
+                    task.file,
+                    contexts[0],
+                    focused_retry_contexts=contexts[1:],
+                )
                 if result.findings:
                     finalize.rewrite_poc_paths(result.findings)
                 if before_commit is not None:

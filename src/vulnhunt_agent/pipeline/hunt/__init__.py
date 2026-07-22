@@ -15,7 +15,11 @@ from dataclasses import asdict
 from pathlib import Path
 
 from ...analysis import CAnalysisGraph, CONTEXT_SHARD_POLICY, SharedContextCache
-from ...agents.hunter import TARGET_COMPLETION_POLICY
+from ...agents.hunter import (
+    SOURCE_EVIDENCE_POLICY,
+    SOURCE_EVIDENCE_RETRY_LIMIT,
+    TARGET_COMPLETION_POLICY,
+)
 from ...agents.durable_queue import DurableHuntQueueStore
 from ...agents.queue import HuntTask
 from ...core.events import EventBus
@@ -139,6 +143,8 @@ async def run_hunt(store: RunStore, bus: EventBus) -> None:
         "execution_changed": True,
         "target_completion_policy": TARGET_COMPLETION_POLICY,
         "completion_repair_limit": 1,
+        "source_evidence_policy": SOURCE_EVIDENCE_POLICY,
+        "source_evidence_retry_limit": SOURCE_EVIDENCE_RETRY_LIMIT,
         "iteration_tiers": [6, 18, 40],
         "scan_mode": incremental.get("mode", "full"),
         "scan_scope": scan_scope,
@@ -404,7 +410,7 @@ async def run_hunt(store: RunStore, bus: EventBus) -> None:
         usage_items: list[BudgetUsage] = []
         try:
             qstore.mark_file_running(task)
-            analysis_context = analysis_contexts[item.work_id]
+            analysis_context = analysis_context_shards[item.work_id]
             iteration_limit = adaptive_iteration_limit(
                 item,
                 configured_cap=max_iter,
