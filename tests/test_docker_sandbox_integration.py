@@ -90,9 +90,17 @@ async def test_real_build_and_hunt_sandboxes_use_baked_source_without_mounts(
         assert inspect["Config"]["User"] == "65532:65532"
         assert "no-new-privileges" in host["SecurityOpt"]
         await hunt.write_file("proof.py", "print('POC_OK')\n")
+        await hunt.write_bytes("trigger.bin", b"\x00\xffPoC\n")
         result = await hunt.exec_argv(("python", "/workspace/proof.py"))
         assert result.exit_code == 0
         assert result.stdout.strip() == "POC_OK"
+        binary = await hunt.exec_argv((
+            "python",
+            "-c",
+            "from pathlib import Path; "
+            "assert Path('/workspace/trigger.bin').read_bytes() == b'\\x00\\xffPoC\\n'",
+        ))
+        assert binary.exit_code == 0, binary.stderr
 
         injection = await hunt.exec_argv(
             (

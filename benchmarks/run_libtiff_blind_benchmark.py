@@ -354,6 +354,11 @@ def _run_deterministic_discovery(
         work,
         budget,
         risk_chains=graph.risk_chains,
+        capacity_chains=(
+            graph.capacity_risk_chains
+            if manifest["policies"].get("capacity_risk_chain")
+            else ()
+        ),
         entrypoint_ids=graph.entrypoint_ids,
         native_full_scan=True,
     )
@@ -378,6 +383,11 @@ def _run_deterministic_discovery(
             "risk_chain_ids": [
                 chain["chain_id"] for chain in packet.get("risk_chains", [])
             ],
+            "capacity_risk_chain_ids": [
+                chain["chain_id"]
+                for chain in packet.get("capacity_risk_chains", [])
+            ],
+            "hydrated_context_files": packet.get("hydrated_context_files", []),
         })
     terminal = _terminal_routes(graph, work, allocation)
     plan = {
@@ -423,6 +433,7 @@ def _run_deterministic_discovery(
             "signals": len(graph.signals),
             "critical_signals": len(graph.critical_sink_ids),
             "risk_chains": len(graph.risk_chains),
+            "capacity_risk_chains": len(graph.capacity_risk_chains),
             "coverage_complete": coverage.complete,
             "work_items": len(work),
             "admitted_sessions": len(admitted),
@@ -548,6 +559,12 @@ async def _run_authenticated_discovery(
                 for item in packet.get("risk_chains", [])
                 if isinstance(item, dict) and isinstance(item.get("chain_id"), str)
             ],
+            "capacity_risk_chain_ids": [
+                item["chain_id"]
+                for item in packet.get("capacity_risk_chains", [])
+                if isinstance(item, dict) and isinstance(item.get("chain_id"), str)
+            ],
+            "hydrated_context_files": packet.get("hydrated_context_files", []),
         })
     plan["contexts"] = context_records
     _write_json(output / "analysis.json", analysis)
@@ -616,6 +633,9 @@ async def _run_authenticated_discovery(
         "usage": usage,
         "summary": {
             "risk_chains": len((analysis.get("graph") or {}).get("risk_chains", [])),
+            "capacity_risk_chains": len(
+                (analysis.get("graph") or {}).get("capacity_risk_chains", [])
+            ),
             "scheduled_sessions": plan.get("scheduled_sessions", 0),
             "admitted_sessions": (
                 plan.get("budget_allocation") or {}
