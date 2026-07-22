@@ -48,6 +48,7 @@ class BudgetAllocation:
     duplicate_coverage_deferred: int = 0
     seed_cap_exceptions: int = 0
     decisions: tuple["AdmissionDecision", ...] = ()
+    ranking: tuple["AdmissionRankingRecord", ...] = ()
 
 
 @dataclass(frozen=True)
@@ -63,6 +64,26 @@ class AdmissionDecision:
     seed_family: str = ""
     coverage_group: str = ""
     cap_exception: bool = False
+
+
+@dataclass(frozen=True)
+class AdmissionRankingRecord:
+    """Auditable pre-admission position and terminal scheduling disposition."""
+
+    record_id: str
+    work_id: str
+    pre_admission_rank: int
+    component: str
+    seed_file: str
+    score: int
+    score_components: dict[str, int]
+    chain_ids: tuple[str, ...]
+    missing_chain_elements: tuple[str, ...]
+    guard_states: tuple[str, ...]
+    disposition: str
+    reason: str
+    seed_family: str = ""
+    coverage_group: str = ""
 
 
 @dataclass(frozen=True)
@@ -201,6 +222,9 @@ class _AdmissionCandidate:
     entrypoint_reachable: bool
     seed_family: str
     coverage_group: str
+    chain_ids: tuple[str, ...]
+    missing_chain_elements: tuple[str, ...]
+    guard_states: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -308,6 +332,18 @@ def allocate_work_items(
             )
             for index, item in enumerate(picked, start=1)
         ),
+        ranking=tuple(
+            _legacy_ranking_record(
+                item,
+                pre_admission_rank=index,
+                disposition=("admitted" if item.work_id in admitted else "budget_deferred"),
+                reason=(
+                    "legacy 60/30/10 deterministic priority"
+                    if item.work_id in admitted else "max_hunter_sessions"
+                ),
+            )
+            for index, item in enumerate(ordered, start=1)
+        ),
     )
 
 
@@ -348,6 +384,11 @@ def _allocate_native_diverse(
             ),
             seed_family=_seed_family(item.seed_file),
             coverage_group=_coverage_group(item),
+            chain_ids=tuple(sorted(matching)),
+            missing_chain_elements=_missing_chain_elements(tuple(matching.values())),
+            guard_states=tuple(sorted({
+                chain.guard_state.value for chain in matching.values()
+            })),
         ))
     ordered = sorted(candidates, key=_candidate_order)
 
@@ -549,7 +590,110 @@ def _allocate_native_diverse(
         duplicate_coverage_deferred=len(duplicate_work_ids),
         seed_cap_exceptions=cap_exceptions,
         decisions=tuple(decisions),
+        ranking=_native_ranking_records(
+            ordered,
+            decisions=tuple(decisions),
+            deferred=deferred,
+        ),
     )
+
+
+def _native_ranking_records(
+    ordered: list[_AdmissionCandidate],
+    *,
+    decisions: tuple[AdmissionDecision, ...],
+    deferred: dict[str, str],
+) -> tuple[AdmissionRankingRecord, ...]:
+    admitted = {decision.work_id: decision for decision in decisions}
+    records = []
+    for rank, candidate in enumerate(ordered, start=1):
+        decision = admitted.get(candidate.item.work_id)
+        static_components = {
+            "risk_chain": candidate.chain_score,
+            "required": int(candidate.item.required) * 20,
+            "sink_severity": candidate.item.risk * 10,
+            "entrypoint_reachability": int(candidate.entrypoint_reachable) * 10,
+            "component_novelty": 0,
+            "seed_novelty": 0,
+        }
+        reason = decision.reason if decision else deferred[candidate.item.work_id]
+        disposition = (
+            "admitted"
+            if decision else
+            "duplicate_deferred"
+            if reason == "duplicate_coverage_group" else
+            "budget_deferred"
+        )
+        records.append(AdmissionRankingRecord(
+            record_id=_ranking_record_id(candidate.item.work_id),
+            work_id=candidate.item.work_id,
+            pre_admission_rank=rank,
+            component=candidate.component,
+            seed_file=candidate.item.seed_file,
+            score=sum(static_components.values()),
+            score_components=static_components,
+            chain_ids=candidate.chain_ids,
+            missing_chain_elements=candidate.missing_chain_elements,
+            guard_states=candidate.guard_states,
+            disposition=disposition,
+            reason=reason,
+            seed_family=candidate.seed_family,
+            coverage_group=candidate.coverage_group,
+        ))
+    return tuple(records)
+
+
+def _legacy_ranking_record(
+    item: HunterWorkItem,
+    *,
+    pre_admission_rank: int,
+    disposition: str,
+    reason: str,
+) -> AdmissionRankingRecord:
+    components = {
+        "risk_chain": 0,
+        "required": int(item.required) * 20,
+        "sink_severity": item.risk * 10,
+        "entrypoint_reachability": 0,
+        "component_novelty": 0,
+        "seed_novelty": 0,
+    }
+    return AdmissionRankingRecord(
+        record_id=_ranking_record_id(item.work_id),
+        work_id=item.work_id,
+        pre_admission_rank=pre_admission_rank,
+        component=_component_for(item.seed_file),
+        seed_file=item.seed_file,
+        score=sum(components.values()),
+        score_components=components,
+        chain_ids=(),
+        missing_chain_elements=("risk_chain",),
+        guard_states=(),
+        disposition=disposition,
+        reason=reason,
+        seed_family=_seed_family(item.seed_file),
+        coverage_group=_coverage_group(item),
+    )
+
+
+def _missing_chain_elements(chains: tuple[RiskChain, ...]) -> tuple[str, ...]:
+    if not chains:
+        return ("risk_chain",)
+    missing = set()
+    if not any(chain.source_variables for chain in chains):
+        missing.add("source")
+    if not any(chain.transform_steps for chain in chains):
+        missing.add("transform")
+    if not any(chain.allocation_signal_ids for chain in chains):
+        missing.add("allocation")
+    if not any(chain.sink_signal_ids for chain in chains):
+        missing.add("write_sink")
+    return tuple(sorted(missing))
+
+
+def _ranking_record_id(work_id: str) -> str:
+    canonical = f"{NATIVE_DIVERSE_POLICY}\0{work_id}"
+    return "ranking_" + hashlib.sha256(canonical.encode()).hexdigest()[:20]
 
 
 def _candidate_order(
