@@ -564,16 +564,24 @@ async def _run_authenticated_discovery(
         usage_items = repository.list_budget_usage(run_id)
     _write_json(output / "findings.json", findings)
     _write_json(output / "evidence.json", evidence)
+    costs = [item.estimated_cost_usd for item in usage_items]
     usage = {
         "sessions": sum(item.sessions for item in usage_items),
         "calls": sum(item.calls for item in usage_items),
+        "iterations": sum(item.iterations for item in usage_items),
         "input_tokens": sum(item.input_tokens for item in usage_items),
         "output_tokens": sum(item.output_tokens for item in usage_items),
         "cache_read_tokens": sum(item.cache_read_tokens for item in usage_items),
         "cache_write_tokens": sum(item.cache_write_tokens for item in usage_items),
+        "tool_calls": sum(item.tool_calls for item in usage_items),
+        "repeated_reads": sum(item.repeated_reads for item in usage_items),
+        "poc_writes": sum(item.poc_writes for item in usage_items),
+        "exec_calls": sum(item.exec_calls for item in usage_items),
         "wall_time_ms": sum(item.wall_time_ms for item in usage_items),
-        "estimated_cost_usd": sum(
-            item.estimated_cost_usd or 0.0 for item in usage_items
+        "estimated_cost_usd": (
+            sum(float(cost) for cost in costs if cost is not None)
+            if costs and all(cost is not None for cost in costs)
+            else None
         ),
     }
     transports = sorted({item.transport for item in usage_items})

@@ -1,0 +1,53 @@
+[benchmark]
+schema_version = 1
+id = "libexpat-live-native-v1"
+
+[source]
+repository = "https://github.com/libexpat/libexpat.git"
+commit = "7d93af0965eee44fde42d9e9ec8761ae2894e8e8"
+tree = "47d69feb0ab11908f74f53af86da533e864472f7"
+
+[scan]
+environment = "c:gcc-13"
+hunters = [
+  "c-bounds-integers",
+  "c-memory-lifetime",
+  "c-parser-state",
+  "c-injection-format",
+  "c-concurrency-state",
+  "c-error-contracts",
+]
+
+[scope]
+mode = "full"
+include_paths = []
+exclude_paths = []
+
+[policies]
+source_snapshot = "source-snapshot-v3"
+provider_preflight = "provider-preflight-v1"
+scan_scope = "scan-scope-v1"
+signal_router = "c-signal-router-v3"
+risk_chain = "c-risk-chain-v1"
+slice_work = "c-slice-work-v4"
+context = "c-context-v5"
+constraints = "c-constraint-v1"
+admission = "c-budget-v3"
+feasibility = "native-feasibility-v1"
+resolution = "candidate-resolution-v1"
+run_outcome = "run-outcome-v1"
+evidence = "native-evidence-v2"
+model_protocol = "strict-tool-json-v3"
+
+[budget]
+max_hunter_sessions = 12
+max_input_tokens = 1000000
+max_output_tokens = 100000
+max_wall_clock_minutes = 45
+max_retries_per_work_item = 1
+max_format_repairs_per_work_item = 1
+
+[limits]
+max_target_signals_per_work = 6
+max_context_bytes = 24000
+max_parallel_hunters = 2

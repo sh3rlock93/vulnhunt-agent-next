@@ -10,6 +10,7 @@ from pathlib import Path
 from ..domain.schemas import (
     CandidateFinding,
     CheckedArithmetic,
+    CodeLocation,
     FeasibilityAssessment,
     FeasibilityBound,
     FeasibilityBoundKind,
@@ -57,6 +58,93 @@ class _CounterClaim:
     increments: tuple[ImmutableSourceRange, ...]
     minimum_step: int
     progress: ImmutableSourceRange
+
+
+def discover_counter_feasibility_assessments(
+    *,
+    source_root: Path,
+    source_snapshot: str,
+    analysis: dict,
+    run_id: str = "deterministic-feasibility",
+    max_candidates: int = 64,
+) -> tuple[FeasibilityAssessment, ...]:
+    """Derive neutral counter-overflow hypotheses for deterministic benchmarks.
+
+    Selection is purely structural: a supported signed counter, an increment in
+    an advancing pointer loop, and use as an array subscript. No project symbol,
+    file, vulnerability identifier, diff, or fixed revision participates.
+    """
+    graph = analysis.get("graph") or {}
+    candidates: list[CandidateFinding] = []
+    for node in sorted(
+        graph.get("nodes", []),
+        key=lambda item: (str(item.get("path", "")), int(item.get("line", 0))),
+    ):
+        path = source_root / str(node.get("path", ""))
+        if not path.is_file():
+            continue
+        lines = path.read_text(errors="replace").splitlines()
+        start = int(node.get("line", 0))
+        end = min(int(node.get("end_line", 0)), len(lines))
+        if start < 1 or end < start:
+            continue
+        source = "\n".join(lines[start - 1 : end])
+        loop = _POINTER_LOOP.search(source)
+        if loop is None:
+            continue
+        for declaration in _DECLARATION.finditer(source):
+            name = declaration.group("name")
+            if re.search(rf"\[\s*{re.escape(name)}\s*\]", source) is None:
+                continue
+            increment = re.search(
+                rf"\b{re.escape(name)}\s*(?:\+\+|\+=\s*1)", source
+            )
+            if increment is None or increment.start() < loop.end():
+                continue
+            sink_line = start + source[: increment.start()].count("\n")
+            identity = "\0".join((
+                FEASIBILITY_POLICY,
+                source_snapshot,
+                str(node.get("node_id", "")),
+                name,
+                str(sink_line),
+            ))
+            candidates.append(CandidateFinding(
+                candidate_id=(
+                    "cand_feasibility_"
+                    + hashlib.sha256(identity.encode()).hexdigest()[:24]
+                ),
+                run_id=run_id,
+                task_key=f"deterministic:{node.get('node_id', '')}:{name}",
+                title=f"Signed input counter {name} may cross its type limit",
+                weakness="integer_overflow",
+                entrypoint=CodeLocation(
+                    path=str(node["path"]),
+                    line=start,
+                    symbol=str(node.get("symbol") or "") or None,
+                ),
+                sink=CodeLocation(
+                    path=str(node["path"]),
+                    line=sink_line,
+                    symbol=name,
+                ),
+                attacker_capability="Supply enough parsed items to advance the counter",
+                impact=("Counter wrap could invalidate an array-bound check",),
+                confidence=0.5,
+            ))
+            if len(candidates) >= max_candidates:
+                break
+        if len(candidates) >= max_candidates:
+            break
+    return tuple(
+        assess_native_feasibility(
+            candidate,
+            source_root=source_root,
+            source_snapshot=source_snapshot,
+            analysis=analysis,
+        )
+        for candidate in candidates
+    )
 
 
 def assess_native_feasibility(

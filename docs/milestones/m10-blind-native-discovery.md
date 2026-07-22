@@ -1,6 +1,6 @@
 # M10 — Blind native vulnerability discovery at repository scale
 
-Status: PR 7 implemented and release gates verified; pending merge
+Status: complete; PR 1–7 merged and release gates verified
 
 ## Goal
 

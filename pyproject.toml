@@ -86,6 +86,7 @@ files = [
     "src/vulnhunt_agent/reporting",
     "src/vulnhunt_agent/reproduction",
     "src/vulnhunt_agent/sandbox",
+    "benchmarks/run_libexpat_live_benchmark.py",
     "tests",
 ]
 check_untyped_defs = true

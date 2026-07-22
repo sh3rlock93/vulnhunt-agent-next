@@ -32,7 +32,7 @@ jobs:
       - name: Install project and development tools
         run: python -m pip install -e ".[dev]"
       - name: Lint
-        run: python -m ruff check src tests
+        run: python -m ruff check src tests benchmarks
       - name: Type check
         run: python -m mypy
       - name: Tests with coverage
@@ -197,3 +197,38 @@ jobs:
           --vulnerable-repo .benchmark/libtiff-vulnerable
           --fixed-repo .benchmark/libtiff-fixed
           --output .benchmark/m10-evaluation
+
+  m11-libexpat-operational:
+    name: M11 libexpat credential-free operational gates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install project
+        run: python -m pip install -e .
+      - name: Configure default model catalog
+        run: cp settings.example.toml settings.toml
+      - name: Checkout pinned live libexpat tree
+        uses: actions/checkout@v6
+        with:
+          repository: libexpat/libexpat
+          ref: 7d93af0965eee44fde42d9e9ec8761ae2894e8e8
+          fetch-depth: 0
+          path: .benchmark/libexpat-live
+      - name: Run deterministic tier without provider credentials
+        env:
+          OPENAI_API_KEY: ""
+          AWS_ACCESS_KEY_ID: ""
+          AWS_SECRET_ACCESS_KEY: ""
+        run: >-
+          python benchmarks/run_libexpat_live_benchmark.py deterministic
+          --repo .benchmark/libexpat-live
+          --manifest benchmarks/libexpat-live-scan.toml
+          --output .benchmark/m11-libexpat-operational
+      - name: Verify closed operational artifacts
+        run: >-
+          python benchmarks/run_libexpat_live_benchmark.py verify
+          --output .benchmark/m11-libexpat-operational

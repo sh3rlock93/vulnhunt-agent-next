@@ -153,6 +153,37 @@ Only the later `evaluate` command accepts
 authenticated procedure and fixed budgets are documented in
 [`docs/milestones/m10-blind-native-discovery.md`](docs/milestones/m10-blind-native-discovery.md).
 
+The M11 live-repository operational gate separately checks current libexpat
+intake, complete routing, fair 12-session admission, full-snapshot context,
+candidate falsification, and honest run outcomes without a vulnerability
+oracle. The deterministic tier makes no provider call:
+
+```bash
+python benchmarks/run_libexpat_live_benchmark.py deterministic \
+  --repo /path/to/pinned-libexpat \
+  --manifest benchmarks/libexpat-live-scan.toml \
+  --output /tmp/libexpat-operational
+python benchmarks/run_libexpat_live_benchmark.py verify \
+  --output /tmp/libexpat-operational
+```
+
+The optional authenticated tier uses the configured API credential when one is
+present, otherwise the logged-in Codex subscription adapter. It requires an
+already prepared target image and preserves the manifest's token, time, and
+12-session ceilings:
+
+```bash
+python benchmarks/run_libexpat_live_benchmark.py authenticated \
+  --repo /path/to/pinned-libexpat \
+  --manifest benchmarks/libexpat-live-scan.toml \
+  --image scanner/prepared:libexpat-7d93af0 \
+  --output /tmp/libexpat-authenticated
+```
+
+The benchmark emits a closed freeze manifest plus exact scope, deferral,
+provider, model, usage, candidate-resolution, and run-outcome metrics. It does
+not assert that the pinned upstream tree has no unknown vulnerability.
+
 The evidence-review and strict-export contract is documented in
 [`docs/milestones/m4-evidence-review-reporting.md`](docs/milestones/m4-evidence-review-reporting.md).
 For a populated V2 metadata store, export all consensus-verified findings with:
