@@ -19,6 +19,22 @@ from ...sandbox import language_of
 
 def render_hunt_view(store: RunStore) -> None:
     _render_hunter_picker(store)
+    preflight = store.load_step("provider_preflight") or {}
+    if preflight.get("status") == "failed":
+        failed = next(
+            (
+                item
+                for item in preflight.get("providers", [])
+                if not item.get("ready")
+            ),
+            {},
+        )
+        st.error(
+            "Provider readiness failed before any Hunter work was admitted: "
+            f"{failed.get('code', 'unknown')}"
+        )
+        if failed.get("remediation"):
+            st.info(failed["remediation"])
     plan = store.load_step("hunt_plan") or {}
     if plan:
         mode = plan.get("mode", "legacy")
