@@ -9,17 +9,22 @@ from pathlib import Path
 
 from ..domain.compat import candidate_from_legacy
 from ..domain.schemas import (
+    CandidateResolution,
     CandidateFinding,
     ConsensusStatus,
+    FeasibilityAssessment,
+    FeasibilityStatus,
     PocSpec,
     ReproductionSpec,
     ReproductionVariantRequest,
+    ResolutionDisposition,
+    VerificationDeferredReason,
 )
 from ..domain.states import RUN_SEQUENCE, FindingState, RunState
 from ..infrastructure.artifacts import ArtifactStore
 from ..infrastructure.sqlite_repository import SqliteRepository
 from ..reporting.service import StrictReportService
-from ..reproduction.service import ReproducerService
+from ..reproduction.service import ReproducerService, ReproductionStatus
 from ..reproduction.variants import (
     LLMVariantCompiler,
     ReproductionVariantExecutor,
@@ -29,6 +34,12 @@ from ..reviewing.agent import EvidenceReviewerAgent
 from ..reviewing.service import EvidenceReviewCoordinator
 from ..sandbox.base import SandboxBackend
 from .recipe import CompiledRecipe, RecipeDecision, validate_recorded_recipe
+from .feasibility import assess_native_feasibility
+from .synthesis import (
+    LLMRecipeSynthesizer,
+    RecipeSynthesizer,
+    SynthesisDecision,
+)
 
 
 @dataclass(frozen=True)
@@ -48,6 +59,9 @@ class VerificationSummary:
     variants_executed: int = 0
     variants_failed: int = 0
     automatic_rereviews: int = 0
+    synthesis_attempts: int = 0
+    feasibility: dict[str, int] | None = None
+    resolutions: dict[str, int] | None = None
     errors: tuple[str, ...] = ()
 
 
@@ -61,6 +75,9 @@ class VerifiedPipelineService:
         *,
         output_root: Path,
         variant_compiler: VariantCompiler | None = None,
+        source_root: Path | None = None,
+        analysis: dict | None = None,
+        recipe_synthesizer: RecipeSynthesizer | None = None,
     ):
         self.repository = repository
         self.artifacts = artifacts
@@ -68,6 +85,9 @@ class VerifiedPipelineService:
         self.reviewers = reviewers
         self.output_root = output_root
         self.variant_compiler = variant_compiler
+        self.source_root = source_root
+        self.analysis = analysis or {}
+        self.recipe_synthesizer = recipe_synthesizer
 
     async def verify(
         self,
@@ -87,28 +107,95 @@ class VerifiedPipelineService:
             if item.raw.get("status") == "confirmed" and item.recipe.recipe is None
         )
         errors: list[str] = []
+        synthesis_attempts = 0
+        synthesizer = self.recipe_synthesizer
+        if synthesizer is None and self.reviewers:
+            synthesizer = LLMRecipeSynthesizer(self.reviewers[0].client)
 
         self._advance_run(run_id, RunState.REPRODUCING)
         candidates = []
         for fingerprint, item in sorted(grouped.items()):
             finding = self._save_candidate(run_id, fingerprint, item)
             candidates.append(finding.candidate_id)
+            if finding.resolution is not None:
+                continue
+            assessment = finding.feasibility or assess_native_feasibility(
+                finding,
+                source_root=self.source_root,
+                source_snapshot=run.source_snapshot,
+                analysis=self.analysis,
+            )
+            finding = self.repository.attach_candidate_feasibility(
+                finding.candidate_id,
+                assessment,
+            )
+            if assessment.status is FeasibilityStatus.LOGICALLY_INFEASIBLE:
+                if finding.state is FindingState.STATICALLY_SUPPORTED:
+                    finding = self.repository.transition_finding(
+                        finding.candidate_id,
+                        FindingState.STATICALLY_REFUTED,
+                        idempotency_key="native-feasibility-v1:refuted",
+                        reason="source-cited feasibility bounds prove a contradiction",
+                    )
+                self.repository.attach_candidate_resolution(
+                    finding.candidate_id,
+                    CandidateResolution(
+                        disposition=ResolutionDisposition.STATICALLY_REFUTED,
+                        feasibility_status=assessment.status,
+                        reason="minimum trigger input exceeds the reachable source-backed maximum",
+                    ),
+                )
+                continue
             recipe = item.recipe.recipe
             if recipe is None:
-                continue
+                decision = SynthesisDecision(
+                    recipe=None,
+                    attempted=False,
+                    error="no recipe synthesizer is configured",
+                )
+                if synthesizer is not None and self.source_root is not None:
+                    decision = await self._synthesize_once(
+                        run_id,
+                        finding,
+                        assessment,
+                        synthesizer,
+                    )
+                    synthesis_attempts += int(decision.attempted)
+                recipe = decision.recipe
+                if recipe is None:
+                    self._defer(
+                        finding.candidate_id,
+                        assessment.status,
+                        reason=decision.error or "no valid reproduction recipe was produced",
+                        deferred_reason=VerificationDeferredReason.RECIPE_UNAVAILABLE,
+                        remaining_requirement=(
+                            "Provide one validated actual-target reproduction recipe."
+                        ),
+                        synthesis_attempts=self._synthesis_attempts(
+                            run_id, finding.candidate_id
+                        ),
+                    )
+                    continue
             try:
                 finding = self._attach_poc(finding.candidate_id, recipe)
                 if not image:
-                    if finding.state is FindingState.POC_READY:
-                        self.repository.transition_finding(
-                            finding.candidate_id,
-                            FindingState.ENVIRONMENT_BLOCKED,
-                            idempotency_key="verified:no-prepared-image",
-                            reason="no prepared image is available for reproduction",
-                        )
+                    self._defer(
+                        finding.candidate_id,
+                        assessment.status,
+                        reason="no prepared image is available for reproduction",
+                        deferred_reason=(
+                            VerificationDeferredReason.PREPARED_TARGET_UNAVAILABLE
+                        ),
+                        remaining_requirement=(
+                            "Prepare the immutable target image and rerun reproduction."
+                        ),
+                        synthesis_attempts=self._synthesis_attempts(
+                            run_id, finding.candidate_id
+                        ),
+                    )
                     continue
                 if finding.state is FindingState.POC_READY:
-                    await ReproducerService(
+                    outcome = await ReproducerService(
                         self.repository, self.artifacts, self.backend
                     ).reproduce(ReproductionSpec(
                         reproduction_id=f"repro-{finding.candidate_id}-v1",
@@ -125,6 +212,15 @@ class VerifiedPipelineService:
                         attempts=2,
                         timeout_seconds=recipe.timeout,
                     ))
+                    if outcome.status is not ReproductionStatus.REPRODUCED:
+                        self._resolve_reproduction_failure(
+                            finding.candidate_id,
+                            assessment.status,
+                            outcome.status,
+                            synthesis_attempts=self._synthesis_attempts(
+                                run_id, finding.candidate_id
+                            ),
+                        )
             except Exception as exc:
                 errors.append(f"{finding.candidate_id}: reproduction: {exc}")
 
@@ -183,6 +279,7 @@ class VerifiedPipelineService:
                 continue
             if finding.state is FindingState.REVIEWER_VERIFIED:
                 try:
+                    self._attach_confirmed_resolution(finding)
                     reporter.materialize(
                         self.output_root,
                         run_id=run_id,
@@ -192,12 +289,27 @@ class VerifiedPipelineService:
                 except Exception as exc:
                     errors.append(f"{candidate_id}: report: {exc}")
             elif finding.state is FindingState.REPORTABLE:
+                self._attach_confirmed_resolution(finding)
                 reports += 1
+
+        for candidate_id in candidates:
+            self._finalize_resolution(candidate_id)
 
         self._advance_run(run_id, RunState.COMPLETED)
         state_counts = Counter(
             item.state.value
             for item in self.repository.list_candidates(run_id)
+        )
+        final_candidates = self.repository.list_candidates(run_id)
+        feasibility_counts = Counter(
+            item.feasibility.status.value
+            for item in final_candidates
+            if item.feasibility is not None
+        )
+        resolution_counts = Counter(
+            item.resolution.disposition.value
+            for item in final_candidates
+            if item.resolution is not None
         )
         return VerificationSummary(
             candidates=len(candidates),
@@ -208,7 +320,222 @@ class VerifiedPipelineService:
             variants_executed=variants_executed,
             variants_failed=variants_failed,
             automatic_rereviews=automatic_rereviews,
+            synthesis_attempts=synthesis_attempts,
+            feasibility=dict(sorted(feasibility_counts.items())),
+            resolutions=dict(sorted(resolution_counts.items())),
             errors=tuple(errors),
+        )
+
+    async def _synthesize_once(
+        self,
+        run_id: str,
+        finding: CandidateFinding,
+        assessment: FeasibilityAssessment,
+        synthesizer: RecipeSynthesizer,
+    ) -> SynthesisDecision:
+        payload = {
+            "policy_version": "recipe-synthesis-v1",
+            "candidate_id": finding.candidate_id,
+            "source_snapshot": assessment.source_snapshot,
+        }
+        self.repository.ensure_task(
+            run_id,
+            "recipe_synthesis",
+            finding.candidate_id,
+            payload=payload,
+        )
+        lease = self.repository.acquire_task_lease(
+            run_id,
+            "recipe_synthesis",
+            finding.candidate_id,
+            worker_id="verified-recipe-synthesizer",
+            lease_seconds=600,
+            max_attempts=1,
+        )
+        if lease is None:
+            task = next(
+                item for item in self.repository.list_tasks(run_id)
+                if item["task_type"] == "recipe_synthesis"
+                and item["task_key"] == finding.candidate_id
+            )
+            return SynthesisDecision(
+                None,
+                False,
+                f"bounded recipe synthesis already ended as {task['status']}",
+            )
+        try:
+            assert self.source_root is not None
+            decision = await synthesizer.synthesize(
+                finding,
+                assessment,
+                source_root=self.source_root,
+                output_root=self.output_root,
+            )
+        except Exception as exc:
+            decision = SynthesisDecision(
+                recipe=None,
+                attempted=True,
+                error=f"recipe synthesis failed: {exc}",
+            )
+        self.repository.finish_task_lease(
+            lease,
+            status="accepted" if decision.recipe is not None else "rejected",
+            error=decision.error,
+        )
+        return decision
+
+    def _synthesis_attempts(self, run_id: str, candidate_id: str) -> int:
+        return int(any(
+            item["task_type"] == "recipe_synthesis"
+            and item["task_key"] == candidate_id
+            for item in self.repository.list_tasks(run_id)
+        ))
+
+    def _attach_confirmed_resolution(self, finding: CandidateFinding) -> None:
+        if finding.resolution is not None:
+            return
+        feasibility_status = (
+            finding.feasibility.status
+            if finding.feasibility is not None
+            else FeasibilityStatus.UNKNOWN
+        )
+        self.repository.attach_candidate_resolution(
+            finding.candidate_id,
+            CandidateResolution(
+                disposition=ResolutionDisposition.CONFIRMED,
+                feasibility_status=feasibility_status,
+                synthesis_attempts=self._synthesis_attempts(
+                    finding.run_id, finding.candidate_id
+                ),
+                reason="prepared-target reproduction and independent review passed",
+            ),
+        )
+
+    def _defer(
+        self,
+        candidate_id: str,
+        feasibility_status: FeasibilityStatus,
+        *,
+        reason: str,
+        deferred_reason: VerificationDeferredReason,
+        remaining_requirement: str,
+        synthesis_attempts: int,
+    ) -> None:
+        finding = self.repository.get_candidate(candidate_id)
+        if finding is None:
+            raise KeyError(candidate_id)
+        if finding.state is not FindingState.VERIFICATION_DEFERRED:
+            self.repository.transition_finding(
+                candidate_id,
+                FindingState.VERIFICATION_DEFERRED,
+                idempotency_key=f"candidate-resolution-v1:{deferred_reason.value}",
+                reason=reason,
+            )
+        self.repository.attach_candidate_resolution(
+            candidate_id,
+            CandidateResolution(
+                disposition=ResolutionDisposition.VERIFICATION_DEFERRED,
+                feasibility_status=feasibility_status,
+                synthesis_attempts=synthesis_attempts,
+                reason=reason[:1000],
+                deferred_reason=deferred_reason,
+                remaining_requirement=remaining_requirement,
+            ),
+        )
+
+    def _resolve_reproduction_failure(
+        self,
+        candidate_id: str,
+        feasibility_status: FeasibilityStatus,
+        status: ReproductionStatus,
+        *,
+        synthesis_attempts: int,
+    ) -> None:
+        finding = self.repository.get_candidate(candidate_id)
+        if finding is None or finding.resolution is not None:
+            return
+        if status in {
+            ReproductionStatus.UNVERIFIED,
+            ReproductionStatus.ENVIRONMENT_BLOCKED,
+        }:
+            deferred_reason = (
+                VerificationDeferredReason.TARGET_PROVENANCE_MISSING
+                if status is ReproductionStatus.UNVERIFIED
+                else VerificationDeferredReason.PREPARED_TARGET_UNAVAILABLE
+            )
+            self.repository.attach_candidate_resolution(
+                candidate_id,
+                CandidateResolution(
+                    disposition=ResolutionDisposition.VERIFICATION_DEFERRED,
+                    feasibility_status=feasibility_status,
+                    synthesis_attempts=synthesis_attempts,
+                    reason=f"reproduction ended as {status.value}",
+                    deferred_reason=deferred_reason,
+                    remaining_requirement=(
+                        "Produce two clean attempts with prepared-target provenance."
+                    ),
+                ),
+            )
+            return
+        self.repository.attach_candidate_resolution(
+            candidate_id,
+            CandidateResolution(
+                disposition=ResolutionDisposition.REPRODUCTION_REJECTED,
+                feasibility_status=feasibility_status,
+                synthesis_attempts=synthesis_attempts,
+                reason=f"independent reproduction ended as {status.value}",
+            ),
+        )
+
+    def _finalize_resolution(self, candidate_id: str) -> None:
+        finding = self.repository.get_candidate(candidate_id)
+        if finding is None or finding.resolution is not None:
+            return
+        feasibility_status = (
+            finding.feasibility.status
+            if finding.feasibility is not None
+            else FeasibilityStatus.UNKNOWN
+        )
+        if finding.state is FindingState.REPORTABLE:
+            self._attach_confirmed_resolution(finding)
+            return
+        if finding.state is FindingState.REJECTED:
+            self.repository.attach_candidate_resolution(
+                candidate_id,
+                CandidateResolution(
+                disposition=ResolutionDisposition.REPRODUCTION_REJECTED,
+                feasibility_status=feasibility_status,
+                synthesis_attempts=self._synthesis_attempts(
+                    finding.run_id, finding.candidate_id
+                ),
+                    reason="reproduction or evidence review rejected the candidate",
+                ),
+            )
+            return
+        reason = "candidate verification did not reach a reportable terminal result"
+        if finding.state not in {
+            FindingState.UNCLEAR,
+            FindingState.ENVIRONMENT_BLOCKED,
+            FindingState.POLICY_BLOCKED,
+        }:
+            self.repository.transition_finding(
+                candidate_id,
+                FindingState.VERIFICATION_DEFERRED,
+                idempotency_key="candidate-resolution-v1:incomplete",
+                reason=reason,
+            )
+        self.repository.attach_candidate_resolution(
+            candidate_id,
+            CandidateResolution(
+                disposition=ResolutionDisposition.VERIFICATION_DEFERRED,
+                feasibility_status=feasibility_status,
+                synthesis_attempts=self._synthesis_attempts(
+                    finding.run_id, finding.candidate_id
+                ),
+                reason=reason,
+                deferred_reason=VerificationDeferredReason.REVIEW_INCONCLUSIVE,
+                remaining_requirement="Resolve the remaining reproduction or review uncertainty.",
+            ),
         )
 
     def _variant_request(
@@ -348,6 +675,8 @@ def _immutable_candidate_data(finding: CandidateFinding) -> dict:
         "state",
         "evidence_ids",
         "poc",
+        "feasibility",
+        "resolution",
         "created_at",
         "updated_at",
     })

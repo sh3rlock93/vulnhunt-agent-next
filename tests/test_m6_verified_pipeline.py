@@ -261,6 +261,8 @@ async def test_verified_pipeline_reproduces_reviews_reports_and_resumes(
     report_path = next((store.dir / "verified").glob("reports/*/report.json"))
     report = json.loads(report_path.read_text())
     assert report["classification"]["cwe_id"] == "CWE-787"
+    assert report["verification"]["resolution"]["disposition"] == "confirmed"
+    assert report["verification"]["feasibility"]["status"] == "unknown"
     assert report["reproduction"][0]["setup_commands"]
     assert list((store.dir / "verified").glob("reports/*/report.sarif"))
 
