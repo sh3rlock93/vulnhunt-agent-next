@@ -102,6 +102,11 @@ def test_one_capacity_root_is_one_bounds_first_admission_unit() -> None:
     assert first.chain_critical_slots == 1
     assert len(first.admitted_work_ids) == 1
     assert set(first.deferred.values()) == {"duplicate_capacity_chain"}
+    assert all(
+        record.disposition == "duplicate_deferred"
+        for record in first.ranking
+        if record.work_id not in first.admitted_work_ids
+    )
     assert first.duplicate_coverage_deferred == 2
     assert len({record.logical_chain_group for record in first.ranking}) == 1
     assert first.ranking[0].logical_chain_group == chain.root_cause_group
@@ -177,3 +182,37 @@ def test_multi_chain_batch_is_admitted_when_any_group_is_uncovered() -> None:
         first_chain.root_cause_group,
         second_chain.root_cause_group,
     }
+
+
+def test_end_to_end_capacity_evidence_breaks_equal_class_and_score_ties() -> None:
+    local_chain = _chain().model_copy(update={
+        "paths": ("decode.c",),
+        "node_ids": ("decode.c::decode@1",),
+    })
+    linked_chain = _chain().model_copy(update={
+        "chain_id": "capacity_risk_" + "d" * 20,
+        "root_cause_group": "capacity_group_" + "e" * 20,
+        "allocation_fact_id": "capacity_" + "f" * 20,
+        "allocation_signal_ids": ("linked-allocation",),
+        "return_consumption_call_ids": ("capacity_call_" + "1" * 20,),
+        "pointer_advance_fact_ids": ("capacity_" + "2" * 20,),
+        "write_fact_ids": ("capacity_" + "3" * 20,),
+    })
+    local_work = _work(1, "decode.c", "allocation", "c-bounds-integers")
+    linked_work = _work(
+        2,
+        "decode.c",
+        "linked-allocation",
+        "c-bounds-integers",
+    )
+
+    allocation = allocate_work_items(
+        (local_work, linked_work),
+        BudgetPolicy(max_hunter_sessions=2, max_retries_per_work_item=0),
+        capacity_chains=(local_chain, linked_chain),
+        native_full_scan=True,
+    )
+
+    assert allocation.ranking[0].work_id == linked_work.work_id
+    assert allocation.ranking[0].score_components["capacity_evidence"] == 100
+    assert allocation.ranking[1].score_components["capacity_evidence"] == 0

@@ -1,6 +1,6 @@
 # M11.2 — Capacity-aware buffer-overflow ranking
 
-Status: in progress; PR 6 of 7 implemented
+Status: complete; all 7 PRs implemented and release-gated
 
 ## Goal
 
@@ -84,6 +84,67 @@ input. Existing LibTIFF and synthetic ranking regressions must remain green.
 - [x] Partial capacity evidence cannot become chain-critical from raw score alone.
 - [x] The 12-session, 24k context, retry, seed-cap, and parallelism limits are unchanged.
 - [x] Libwebp affected work remains top six and existing LibTIFF gates remain green.
+
+## PR 7 acceptance gates
+
+- [x] Discovery runs in a separate process without oracle, fixed tree, patch,
+  diff, CVE identifier, or PoC input.
+- [x] Discovery artifacts are closed with per-file and root SHA-256 hashes
+  before the evaluator opens withheld ground truth.
+- [x] Vulnerable and fixed source commits and trees are pinned independently.
+- [x] The affected complete unchecked capacity chain is admitted within the
+  first six positions under the unchanged 12-session budget.
+- [x] The admitted 24 KB context contains both the allocation and write files.
+- [x] The fixed tree has no equivalent unsafe capacity chain.
+- [x] Two clean vulnerable-image attempts reproduce the target ASan class and
+  two clean fixed-image attempts reject the same input without sanitizer output.
+- [x] An authenticated Codex-subscription blind run emits a model candidate
+  matching the withheld allocation-to-write root cause.
+- [x] CI repeats the credential-free discover, freeze, and evaluate gates.
+
+## Release evidence
+
+The release run used vulnerable commit
+`7ba44f80f3b94fc0138db159afea770ef06532a0` and fixed commit
+`902bc9190331343b2017211debcec8d2ab87e17a`. The scanner manifest contains
+neither the advisory identifier nor oracle locations.
+
+- Deterministic and authenticated evaluations both passed every gate.
+- The target chain ranked 3rd and its context was 23,457 bytes.
+- The authenticated `gpt-5.6-sol` Codex-subscription run used 6 Hunter
+  sessions, 773,173 input tokens, 96,256 cache-read tokens, and 15,101 output
+  tokens. It produced two candidates; the strict post-freeze matcher accepted
+  one as the target root cause.
+- The target PoC is fixed by SHA-256
+  `f2281261ab7c6426eab9e62ac569244994d2fa563d3e2b1de4a0c7abcc00b3e6`.
+  Both vulnerable attempts reported `heap-buffer-overflow` from
+  `ReplicateValue` at `src/utils/huffman_utils.c:59`, with allocation at
+  `src/dec/vp8l_dec.c:432`. Both fixed attempts returned `BITSTREAM_ERROR`
+  without a sanitizer failure.
+
+The first pre-gate run placed the target at rank 8 because equal categorical
+scores fell back to work identity. The released tie-break is repository-agnostic:
+it records and prefers cross-file capacity evidence, returned consumption,
+pointer advance, and a linked write. This moved the target to rank 3 without
+changing session, token, retry, context, or parallelism limits.
+
+Run the credential-free tier with:
+
+```bash
+python benchmarks/run_libwebp_capacity_benchmark.py discover \
+  --repo /path/to/pinned-vulnerable-libwebp \
+  --scan-manifest benchmarks/libwebp-blind-scan.toml \
+  --output /tmp/libwebp-discovery --mode deterministic
+python benchmarks/run_libwebp_capacity_benchmark.py freeze \
+  --discovery /tmp/libwebp-discovery --frozen /tmp/libwebp-frozen
+python benchmarks/run_libwebp_capacity_benchmark.py evaluate \
+  --frozen /tmp/libwebp-frozen \
+  --oracle benchmarks/oracles/libwebp-cve-2023-4863.toml \
+  --scan-manifest benchmarks/libwebp-blind-scan.toml \
+  --vulnerable-repo /path/to/pinned-vulnerable-libwebp \
+  --fixed-repo /path/to/pinned-fixed-libwebp \
+  --output /tmp/libwebp-evaluation
+```
 
 ## Non-goals
 

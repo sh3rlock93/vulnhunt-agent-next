@@ -225,6 +225,7 @@ class _AdmissionCandidate:
     component: str
     risk_chain_score: int
     capacity_chain_score: int
+    capacity_evidence_score: int
     priority_class: str
     entrypoint_reachable: bool
     seed_family: str
@@ -416,6 +417,7 @@ def _allocate_native_diverse(
             key=lambda chain: (
                 _capacity_priority_rank(chain.priority_class.value),
                 -chain.score,
+                -_capacity_evidence_score(chain),
                 chain.chain_id,
             ),
             default=None,
@@ -440,6 +442,10 @@ def _allocate_native_diverse(
             risk_chain_score=max((chain.score for chain in matching.values()), default=0),
             capacity_chain_score=max(
                 (chain.score for chain in matching_capacity.values()), default=0
+            ),
+            capacity_evidence_score=max(
+                (_capacity_evidence_score(chain) for chain in matching_capacity.values()),
+                default=0,
             ),
             priority_class=priority,
             entrypoint_reachable=any(
@@ -510,6 +516,7 @@ def _allocate_native_diverse(
         score_components = {
             "risk_chain": candidate.risk_chain_score,
             "capacity_chain": candidate.capacity_chain_score,
+            "capacity_evidence": candidate.capacity_evidence_score,
             "required": int(candidate.item.required) * 20,
             "sink_severity": candidate.item.risk * 10,
             "entrypoint_reachability": int(candidate.entrypoint_reachable) * 10,
@@ -697,6 +704,7 @@ def _native_ranking_records(
         static_components = {
             "risk_chain": candidate.risk_chain_score,
             "capacity_chain": candidate.capacity_chain_score,
+            "capacity_evidence": candidate.capacity_evidence_score,
             "required": int(candidate.item.required) * 20,
             "sink_severity": candidate.item.risk * 10,
             "entrypoint_reachability": int(candidate.entrypoint_reachable) * 10,
@@ -708,7 +716,7 @@ def _native_ranking_records(
             "admitted"
             if decision else
             "duplicate_deferred"
-            if reason == "duplicate_coverage_group" else
+            if reason in {"duplicate_coverage_group", "duplicate_capacity_chain"} else
             "budget_deferred"
         )
         records.append(AdmissionRankingRecord(
@@ -743,6 +751,7 @@ def _legacy_ranking_record(
     components = {
         "risk_chain": 0,
         "capacity_chain": 0,
+        "capacity_evidence": 0,
         "required": int(item.required) * 20,
         "sink_severity": item.risk * 10,
         "entrypoint_reachability": 0,
@@ -792,10 +801,11 @@ def _ranking_record_id(work_id: str) -> str:
 
 def _candidate_order(
     candidate: _AdmissionCandidate,
-) -> tuple[int, int, int, int, int, int, str, str, str]:
+) -> tuple[int, int, int, int, int, int, int, str, str, str]:
     return (
         _capacity_priority_rank(candidate.priority_class),
         -candidate.chain_score,
+        -candidate.capacity_evidence_score,
         _hunter_priority(candidate.item.hunter),
         -int(candidate.item.required),
         -candidate.item.risk,
@@ -804,6 +814,16 @@ def _candidate_order(
         candidate.seed_family,
         candidate.item.work_id,
     )
+
+
+def _capacity_evidence_score(chain: CapacityRiskChain) -> int:
+    """Break categorical ties with generic end-to-end capacity evidence."""
+    score = 0
+    score += 40 if len(chain.paths) > 1 else 0
+    score += 30 if chain.return_consumption_call_ids else 0
+    score += 20 if chain.pointer_advance_fact_ids else 0
+    score += 10 if chain.write_fact_ids else 0
+    return score
 
 
 def _is_chain_critical(candidate: _AdmissionCandidate) -> bool:

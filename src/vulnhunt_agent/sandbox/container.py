@@ -142,13 +142,17 @@ class ContainerExecutor:
 
     async def write_file(self, path: str, content: str) -> None:
         """Write a text file inside the container's /workspace (path is relative)."""
+        await self.write_bytes(path, content.encode())
+
+    async def write_bytes(self, path: str, content: bytes) -> None:
+        """Write arbitrary bytes inside the container's /workspace."""
         relative = _safe_relative_path(path)
         full = f"/workspace/{relative.as_posix()}"
         parent = PurePosixPath(full).parent.as_posix()
         mkdir = await self._run_cli("exec", self.name, "mkdir", "-p", parent)
         _check(mkdir, "create PoC directory")
         written = await self._run_cli_input(
-            content.encode(), "exec", "-i", self.name, "tee", full
+            content, "exec", "-i", self.name, "tee", full
         )
         _check(written, "write PoC file")
 
