@@ -470,6 +470,7 @@ async def test_hunter_budget_stop_is_deferred_instead_of_failed(
     assert deferred == {"c-bounds-integers": "max_input_tokens"}
     assert task.hunters[0].status == "budget_deferred"
     assert usage[0].calls == usage[0].iterations == 0
+    assert usage[0].sessions == 0
 
 
 def _native_router_fixture(tmp_path: Path) -> tuple[Path, list[str]]:

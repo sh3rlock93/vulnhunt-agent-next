@@ -566,6 +566,28 @@ class SqliteRepository:
                 f"{run_id}/{task_type}/{task_key}"
             )
 
+    def requeue_budget_deferred_task(
+        self,
+        run_id: str,
+        task_type: str,
+        task_key: str,
+    ) -> None:
+        """Return an unstarted budget deferral to pending without adding an attempt."""
+        cursor = self.connection.execute(
+            """
+            UPDATE tasks
+            SET status = 'pending', last_error = NULL, completed_at = NULL
+            WHERE run_id = ? AND task_type = ? AND task_key = ?
+              AND status = 'budget_deferred' AND lease_token IS NULL
+            """,
+            (run_id, task_type, task_key),
+        )
+        if cursor.rowcount != 1:
+            raise KeyError(
+                "unknown, active, or non-deferred task: "
+                f"{run_id}/{task_type}/{task_key}"
+            )
+
     def save_budget_usage(self, usage: BudgetUsage) -> BudgetUsage:
         usage = BudgetUsage.model_validate(usage)
         self._required_run(usage.run_id)

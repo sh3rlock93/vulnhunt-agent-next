@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import math
 import threading
@@ -15,7 +16,11 @@ from ..analysis.models import RiskChain
 from ..domain.schemas import BudgetPolicy, BudgetUsage, HunterWorkItem
 
 LEGACY_BUDGET_POLICY = "hunter-budget-allocation-v1"
-NATIVE_DIVERSE_POLICY = "c-diverse-admission-v1"
+NATIVE_DIVERSE_POLICY = "c-budget-v3"
+NATIVE_CHAIN_SHARE = 0.50
+NATIVE_SEED_DIVERSITY_SHARE = 0.25
+NATIVE_HIGH_RISK_SHARE = 1 / 6
+NATIVE_EARLY_SEED_CAP = 2
 
 
 class BudgetExceededError(RuntimeError):
@@ -37,7 +42,11 @@ class BudgetAllocation:
     policy_version: str = LEGACY_BUDGET_POLICY
     chain_critical_slots: int = 0
     component_diverse_slots: int = 0
+    seed_diverse_slots: int = 0
     high_risk_non_chain_slots: int = 0
+    borrowed_slots: int = 0
+    duplicate_coverage_deferred: int = 0
+    seed_cap_exceptions: int = 0
     decisions: tuple["AdmissionDecision", ...] = ()
 
 
@@ -51,6 +60,137 @@ class AdmissionDecision:
     score: int
     score_components: dict[str, int]
     reason: str
+    seed_family: str = ""
+    coverage_group: str = ""
+    cap_exception: bool = False
+
+
+@dataclass(frozen=True)
+class AdmissionEvent:
+    sequence: int
+    work_id: str
+    event: str
+    reason: str = ""
+    provider_started: bool = False
+    promoted_work_id: str = ""
+    usage: dict | None = None
+
+
+class RecyclableAdmissionLedger:
+    """Track admission slots without counting work that never reached a provider."""
+
+    def __init__(self, allocation: BudgetAllocation):
+        self._active = set(allocation.admitted_work_ids)
+        self._waiting = [
+            work_id for work_id, reason in allocation.deferred.items()
+            if reason == "max_hunter_sessions"
+        ]
+        self._started: set[str] = set()
+        self._terminal: set[str] = set()
+        self._events: list[AdmissionEvent] = []
+        self._retry_slots = allocation.retry_slots
+        self._retry_needed = False
+
+    def mark_provider_started(self, work_id: str) -> None:
+        if work_id not in self._active or work_id in self._terminal:
+            raise ValueError(f"provider start for inactive admission: {work_id}")
+        if work_id in self._started:
+            return
+        self._started.add(work_id)
+        self._record(work_id, "provider_started", provider_started=True)
+
+    def finish(
+        self,
+        work_id: str,
+        *,
+        status: str,
+        reason: str = "",
+        recyclable: bool = False,
+        usage: BudgetUsage | None = None,
+    ) -> str | None:
+        if work_id not in self._active or work_id in self._terminal:
+            return None
+        started = work_id in self._started
+        if started and status in {"failed", "budget_deferred", "cancelled"}:
+            self._retry_needed = True
+        promoted = ""
+        if recyclable and not started and self._waiting:
+            promoted = self._waiting.pop(0)
+            self._active.add(promoted)
+        self._terminal.add(work_id)
+        self._record(
+            work_id,
+            status,
+            reason=reason,
+            provider_started=started,
+            promoted_work_id=promoted,
+            usage=usage.model_dump(mode="json") if usage is not None else None,
+        )
+        return promoted or None
+
+    def borrow_unused_retry(self) -> str | None:
+        """Promote one waiting item after all initial work finishes without retry need."""
+        if (
+            self._retry_slots <= 0
+            or self._retry_needed
+            or not self._waiting
+            or self._active - self._terminal
+        ):
+            return None
+        promoted = self._waiting.pop(0)
+        self._active.add(promoted)
+        self._retry_slots -= 1
+        self._record(
+            promoted,
+            "retry_borrowed",
+            reason="unused retry reservation borrowed after initial work completed",
+            promoted_work_id=promoted,
+        )
+        return promoted
+
+    def snapshot(self) -> dict:
+        return {
+            "policy_version": "recyclable-admission-v1",
+            "active_work_ids": sorted(self._active - self._terminal),
+            "waiting_work_ids": list(self._waiting),
+            "provider_started_work_ids": sorted(self._started),
+            "terminal_work_ids": sorted(self._terminal),
+            "recycled_slots": sum(bool(item.promoted_work_id) for item in self._events),
+            "retry_slots_remaining": self._retry_slots,
+            "retry_needed": self._retry_needed,
+            "events": [
+                {
+                    "sequence": item.sequence,
+                    "work_id": item.work_id,
+                    "event": item.event,
+                    "reason": item.reason,
+                    "provider_started": item.provider_started,
+                    "promoted_work_id": item.promoted_work_id,
+                    "usage": item.usage,
+                }
+                for item in self._events
+            ],
+        }
+
+    def _record(
+        self,
+        work_id: str,
+        event: str,
+        *,
+        reason: str = "",
+        provider_started: bool = False,
+        promoted_work_id: str = "",
+        usage: dict | None = None,
+    ) -> None:
+        self._events.append(AdmissionEvent(
+            sequence=len(self._events) + 1,
+            work_id=work_id,
+            event=event,
+            reason=reason,
+            provider_started=provider_started,
+            promoted_work_id=promoted_work_id,
+            usage=usage,
+        ))
 
 
 @dataclass(frozen=True)
@@ -59,6 +199,8 @@ class _AdmissionCandidate:
     component: str
     chain_score: int
     entrypoint_reachable: bool
+    seed_family: str
+    coverage_group: str
 
 
 @dataclass(frozen=True)
@@ -177,7 +319,7 @@ def _allocate_native_diverse(
     risk_chains: tuple[RiskChain, ...],
     entrypoint_ids: tuple[str, ...],
 ) -> BudgetAllocation:
-    """Admit full native work with chain, component, and retry reservations."""
+    """Admit full native work with fair seed and recyclable class reservations."""
     remaining = max(0, policy.max_hunter_sessions - consumed_sessions)
     chain_by_signal: dict[str, list[RiskChain]] = {}
     chain_by_node: dict[str, list[RiskChain]] = {}
@@ -204,10 +346,15 @@ def _allocate_native_diverse(
             entrypoint_reachable=any(
                 chain.node_id in entrypoints for chain in matching.values()
             ),
+            seed_family=_seed_family(item.seed_file),
+            coverage_group=_coverage_group(item),
         ))
     ordered = sorted(candidates, key=_candidate_order)
 
-    nominal_retry = 2 if policy.max_retries_per_work_item else 0
+    nominal_retry = (
+        (1 if policy.max_hunter_sessions <= 12 else 2)
+        if policy.max_retries_per_work_item else 0
+    )
     retry_slots = (
         min(nominal_retry, max(0, remaining - 1))
         if len(ordered) > remaining else 0
@@ -216,26 +363,52 @@ def _allocate_native_diverse(
     selected: list[_AdmissionCandidate] = []
     selected_ids: set[str] = set()
     selected_components: set[str] = set()
+    selected_seed_families: set[str] = set()
+    selected_coverage_groups: set[str] = set()
     seed_counts: dict[str, int] = {}
     decisions: list[AdmissionDecision] = []
+    cap_exceptions = 0
 
-    def admit(candidate: _AdmissionCandidate, *, quota: str, reason: str) -> bool:
+    eligible_critical_seeds = {
+        candidate.seed_family for candidate in ordered if candidate.item.required
+    }
+    diversity_goal = min(3, len(eligible_critical_seeds), capacity)
+
+    def admit(
+        candidate: _AdmissionCandidate,
+        *,
+        quota: str,
+        reason: str,
+        allow_duplicate_group: bool = True,
+        cap_exception: bool = False,
+    ) -> bool:
+        nonlocal cap_exceptions
         if len(selected) >= capacity or candidate.item.work_id in selected_ids:
             return False
+        if (
+            not allow_duplicate_group
+            and candidate.coverage_group in selected_coverage_groups
+        ):
+            return False
         novelty = 10 if candidate.component not in selected_components else 0
+        seed_novelty = 15 if candidate.seed_family not in selected_seed_families else 0
         score_components = {
             "risk_chain": candidate.chain_score,
             "required": int(candidate.item.required) * 20,
             "sink_severity": candidate.item.risk * 10,
             "entrypoint_reachability": int(candidate.entrypoint_reachable) * 10,
             "component_novelty": novelty,
+            "seed_novelty": seed_novelty,
         }
         selected.append(candidate)
         selected_ids.add(candidate.item.work_id)
         selected_components.add(candidate.component)
-        seed_counts[candidate.item.seed_file] = (
-            seed_counts.get(candidate.item.seed_file, 0) + 1
+        selected_seed_families.add(candidate.seed_family)
+        selected_coverage_groups.add(candidate.coverage_group)
+        seed_counts[candidate.seed_family] = (
+            seed_counts.get(candidate.seed_family, 0) + 1
         )
+        cap_exceptions += int(cap_exception)
         decisions.append(AdmissionDecision(
             work_id=candidate.item.work_id,
             rank=len(selected),
@@ -245,52 +418,73 @@ def _allocate_native_diverse(
             score=sum(score_components.values()),
             score_components=score_components,
             reason=reason,
+            seed_family=candidate.seed_family,
+            coverage_group=candidate.coverage_group,
+            cap_exception=cap_exception,
         ))
         return True
 
     chain_slots = 0
+    chain_target = min(
+        capacity,
+        max(1, math.ceil(policy.max_hunter_sessions * NATIVE_CHAIN_SHARE)),
+    )
     for candidate in ordered:
-        if chain_slots >= min(14, capacity):
+        if chain_slots >= chain_target:
             break
         if candidate.chain_score < 80:
             continue
-        if seed_counts.get(candidate.item.seed_file, 0) >= 4:
+        before_diversity = len(selected_seed_families) < diversity_goal
+        at_cap = seed_counts.get(candidate.seed_family, 0) >= NATIVE_EARLY_SEED_CAP
+        only_eligible_seed = len(eligible_critical_seeds) <= 1
+        if before_diversity and at_cap and not only_eligible_seed:
             continue
+        exception = before_diversity and at_cap and only_eligible_seed
         if admit(
             candidate,
             quota="chain_critical",
-            reason="risk chain score is at least 80 without a dominating guard",
+            reason=(
+                "single eligible critical seed owns every chain; early cap exception"
+                if exception else
+                "risk chain score is at least 80 under the early seed cap"
+            ),
+            cap_exception=exception,
         ):
             chain_slots += 1
 
-    component_slots = 0
-    component_target = min(5, max(0, capacity - len(selected)))
-    diversity_seen: set[str] = set()
+    seed_slots = 0
+    seed_target = min(
+        max(0, capacity - len(selected)),
+        max(1, math.ceil(policy.max_hunter_sessions * NATIVE_SEED_DIVERSITY_SHARE)),
+    )
     for candidate in ordered:
-        if component_slots >= component_target:
+        if seed_slots >= seed_target:
             break
         if not candidate.item.required:
             continue
-        if candidate.component in selected_components or candidate.component in diversity_seen:
-            continue
-        if seed_counts.get(candidate.item.seed_file, 0) >= 4:
+        if candidate.seed_family in selected_seed_families:
             continue
         if admit(
             candidate,
-            quota="component_diverse",
-            reason="first admitted critical work from an uncovered top-level component",
+            quota="seed_diverse",
+            reason="first admitted critical work from a distinct seed file",
         ):
-            diversity_seen.add(candidate.component)
-            component_slots += 1
+            seed_slots += 1
 
     high_slots = 0
-    high_target = min(3, max(0, capacity - len(selected)))
+    high_target = min(
+        max(0, capacity - len(selected)),
+        max(1, math.ceil(policy.max_hunter_sessions * NATIVE_HIGH_RISK_SHARE)),
+    )
     for candidate in ordered:
         if high_slots >= high_target:
             break
         if candidate.chain_score >= 80 or candidate.item.risk < 4:
             continue
-        if seed_counts.get(candidate.item.seed_file, 0) >= 4:
+        if (
+            len(selected_seed_families) < diversity_goal
+            and seed_counts.get(candidate.seed_family, 0) >= NATIVE_EARLY_SEED_CAP
+        ):
             continue
         if admit(
             candidate,
@@ -299,17 +493,39 @@ def _allocate_native_diverse(
         ):
             high_slots += 1
 
+    borrowed_slots = 0
+    duplicate_work_ids: set[str] = set()
     for candidate in ordered:
         if len(selected) >= capacity:
             break
-        admit(
+        if candidate.coverage_group in selected_coverage_groups:
+            duplicate_work_ids.add(candidate.item.work_id)
+            continue
+        before_diversity = len(selected_seed_families) < diversity_goal
+        at_cap = seed_counts.get(candidate.seed_family, 0) >= NATIVE_EARLY_SEED_CAP
+        only_eligible_seed = len(eligible_critical_seeds) <= 1
+        if before_diversity and at_cap and not only_eligible_seed:
+            continue
+        exception = before_diversity and at_cap and only_eligible_seed
+        if admit(
             candidate,
             quota="borrowed",
-            reason="unused native quota borrowed in deterministic risk order",
-        )
+            reason=(
+                "unused quota borrowed with single-seed cap exception"
+                if exception else
+                "unused class reservation borrowed in deterministic risk order"
+            ),
+            allow_duplicate_group=False,
+            cap_exception=exception,
+        ):
+            borrowed_slots += 1
 
     deferred = {
-        candidate.item.work_id: "max_hunter_sessions"
+        candidate.item.work_id: (
+            "duplicate_coverage_group"
+            if candidate.item.work_id in duplicate_work_ids
+            else "max_hunter_sessions"
+        )
         for candidate in ordered
         if candidate.item.work_id not in selected_ids
     }
@@ -327,25 +543,53 @@ def _allocate_native_diverse(
         general_slots=len(selected) - critical_slots - total_high,
         policy_version=NATIVE_DIVERSE_POLICY,
         chain_critical_slots=chain_slots,
-        component_diverse_slots=component_slots,
+        seed_diverse_slots=seed_slots,
         high_risk_non_chain_slots=high_slots,
+        borrowed_slots=borrowed_slots,
+        duplicate_coverage_deferred=len(duplicate_work_ids),
+        seed_cap_exceptions=cap_exceptions,
         decisions=tuple(decisions),
     )
 
 
-def _candidate_order(candidate: _AdmissionCandidate) -> tuple[int, int, int, int, str, str]:
+def _candidate_order(
+    candidate: _AdmissionCandidate,
+) -> tuple[int, int, int, int, str, str, str]:
     return (
         -candidate.chain_score,
         -int(candidate.item.required),
         -candidate.item.risk,
         -int(candidate.entrypoint_reachable),
         candidate.component,
+        candidate.seed_family,
         candidate.item.work_id,
     )
 
 
 def _component_for(path: str) -> str:
     return path.split("/", 1)[0] if "/" in path else "(root)"
+
+
+def _seed_family(path: str) -> str:
+    return path.replace("\\", "/").casefold()
+
+
+def _coverage_group(item: HunterWorkItem) -> str:
+    targets = tuple(sorted(
+        item.target_signal_ids
+        or item.target_node_ids
+        or item.slice_ids
+        or (item.seed_file,)
+    ))
+    canonical = json.dumps(
+        {
+            "hunter": item.hunter,
+            "targets": targets,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return "coverage_" + hashlib.sha256(canonical.encode()).hexdigest()[:20]
 
 
 def adaptive_iteration_limit(
@@ -472,11 +716,19 @@ class BudgetController:
 class BudgetedLLMClient:
     """Drop-in client that reserves shared budget before every provider call."""
 
-    def __init__(self, delegate, controller: BudgetController):
+    def __init__(
+        self,
+        delegate,
+        controller: BudgetController,
+        *,
+        on_call_started: Callable[[], None] | None = None,
+    ):
         self.delegate = delegate
         self.controller = controller
         self.model_id = str(getattr(delegate, "model_id", "unknown"))
         self.transport = str(getattr(delegate, "transport", "bedrock_converse"))
+        self.on_call_started = on_call_started or (lambda: None)
+        self.started_calls = 0
 
     async def chat(self, **kwargs) -> LLMResponse:
         requested = int(kwargs.get("max_tokens") or 1)
@@ -490,6 +742,8 @@ class BudgetedLLMClient:
             self.controller.complete_call(reservation, None)
             raise BudgetExceededError("max_wall_clock_minutes")
         try:
+            self.started_calls += 1
+            self.on_call_started()
             response = await asyncio.wait_for(
                 self.delegate.chat(**kwargs),
                 timeout=timeout,

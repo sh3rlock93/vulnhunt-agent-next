@@ -1,6 +1,6 @@
 # M11 — Reliable bounded scans and candidate falsification on live repositories
 
-Status: PR 1–4 implemented and verified; PR 5 pending
+Status: PR 1–5 implemented and verified; PR 6 pending
 
 ## Goal
 
@@ -265,14 +265,14 @@ Expected changes:
 
 ### PR 5 acceptance gates
 
-- [ ] A 12-session libexpat plan admits at least three distinct critical seed files when eligible.
-- [ ] `xmlparse.c` cannot consume all useful sessions before diversity admission.
-- [ ] Unused retry and class reservations are borrowed deterministically.
-- [ ] Unstarted cancelled work returns its reservation without inventing usage.
-- [ ] Started or cancelled provider calls retain their actual token and time usage.
-- [ ] Duplicate coverage groups do not consume multiple general slots.
-- [ ] Admission remains identical under input and filesystem reordering.
-- [ ] M8 and M10 budget behavior remains compatible outside the new policy version.
+- [x] A 12-session libexpat plan admits at least three distinct critical seed files when eligible.
+- [x] `xmlparse.c` cannot consume all useful sessions before diversity admission.
+- [x] Unused retry and class reservations are borrowed deterministically.
+- [x] Unstarted cancelled work returns its reservation without inventing usage.
+- [x] Started or cancelled provider calls retain their actual token and time usage.
+- [x] Duplicate coverage groups do not consume multiple general slots.
+- [x] Admission remains identical under input and filesystem reordering.
+- [x] M8 and M10 budget behavior remains compatible outside the new policy version.
 
 ## PR 6 — Resource-feasibility proofs and terminal candidate resolution
 

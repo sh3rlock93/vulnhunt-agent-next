@@ -126,7 +126,7 @@ def test_parameter_derived_size_is_tracked_without_a_source_call(tmp_path) -> No
     assert chain.allocation_signal_ids
 
 
-def test_full_native_admission_prioritizes_chain_and_component_diversity() -> None:
+def test_full_native_admission_uses_versioned_seed_fairness() -> None:
     paths = ["tools/dense.c"] * 20 + [
         "libtiff/codec.c",
         "archive/decoder.c",
@@ -205,12 +205,12 @@ def test_full_native_admission_prioritizes_chain_and_component_diversity() -> No
     )
 
     assert first == second
-    assert first.policy_version == "c-diverse-admission-v1"
+    assert first.policy_version == "c-budget-v3"
     assert len(first.admitted_work_ids) == 22
     assert first.retry_slots == 2
     assert first.chain_critical_slots == 1
-    assert first.component_diverse_slots == 5
-    assert first.high_risk_non_chain_slots == 3
+    assert first.seed_diverse_slots == 6
+    assert first.high_risk_non_chain_slots == 4
     assert first.admitted_work_ids[0] == target.work_id
     assert first.decisions[0].quota == "chain_critical"
     assert first.decisions[0].score_components["risk_chain"] == 95
