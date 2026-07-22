@@ -12,6 +12,10 @@ from .capacity_summaries import (
     MAX_CAPACITY_CALL_DEPTH,
     propagate_capacity_summaries,
 )
+from .capacity_chains import (
+    CAPACITY_RISK_CHAIN_POLICY,
+    build_capacity_risk_chains,
+)
 from .context import context_for_file, context_for_work_item
 from .context_cache import (
     CONTEXT_CACHE_POLICY,
@@ -27,6 +31,8 @@ from .models import (
     CapacityFact,
     CapacityFactKind,
     CapacityCallSite,
+    CapacityPriorityClass,
+    CapacityRiskChain,
     CapacityReturnKind,
     ConstraintFact,
     ConstraintKind,
@@ -52,6 +58,8 @@ __all__ = [
     "CapacityFact",
     "CapacityFactKind",
     "CapacityCallSite",
+    "CapacityPriorityClass",
+    "CapacityRiskChain",
     "CapacityReturnKind",
     "ConstraintFact",
     "ConstraintKind",
@@ -88,4 +96,6 @@ __all__ = [
     "CAPACITY_SUMMARY_POLICY",
     "MAX_CAPACITY_CALL_DEPTH",
     "propagate_capacity_summaries",
+    "CAPACITY_RISK_CHAIN_POLICY",
+    "build_capacity_risk_chains",
 ]

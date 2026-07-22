@@ -249,6 +249,9 @@ async def run_hunt(store: RunStore, bus: EventBus) -> None:
         risk_chains=CAnalysisGraph.model_validate(
             analysis.get("graph") or {}
         ).risk_chains,
+        capacity_chains=CAnalysisGraph.model_validate(
+            analysis.get("graph") or {}
+        ).capacity_risk_chains,
         entrypoint_ids=tuple(
             (analysis.get("graph") or {}).get("entrypoint_ids", ())
         ),

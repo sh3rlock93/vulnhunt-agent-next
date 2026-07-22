@@ -12,11 +12,11 @@ from dataclasses import dataclass
 from typing import Callable
 
 from ..core.llm import LLMResponse
-from ..analysis.models import RiskChain
+from ..analysis.models import CapacityPriorityClass, CapacityRiskChain, RiskChain
 from ..domain.schemas import BudgetPolicy, BudgetUsage, HunterWorkItem
 
 LEGACY_BUDGET_POLICY = "hunter-budget-allocation-v1"
-NATIVE_DIVERSE_POLICY = "c-budget-v3"
+NATIVE_DIVERSE_POLICY = "c-budget-v4"
 NATIVE_CHAIN_SHARE = 0.50
 NATIVE_SEED_DIVERSITY_SHARE = 0.25
 NATIVE_HIGH_RISK_SHARE = 1 / 6
@@ -80,6 +80,7 @@ class AdmissionRankingRecord:
     chain_ids: tuple[str, ...]
     missing_chain_elements: tuple[str, ...]
     guard_states: tuple[str, ...]
+    priority_class: str
     disposition: str
     reason: str
     seed_family: str = ""
@@ -218,13 +219,19 @@ class RecyclableAdmissionLedger:
 class _AdmissionCandidate:
     item: HunterWorkItem
     component: str
-    chain_score: int
+    risk_chain_score: int
+    capacity_chain_score: int
+    priority_class: str
     entrypoint_reachable: bool
     seed_family: str
     coverage_group: str
     chain_ids: tuple[str, ...]
     missing_chain_elements: tuple[str, ...]
     guard_states: tuple[str, ...]
+
+    @property
+    def chain_score(self) -> int:
+        return max(self.risk_chain_score, self.capacity_chain_score)
 
 
 @dataclass(frozen=True)
@@ -240,6 +247,7 @@ def allocate_work_items(
     *,
     consumed_sessions: int = 0,
     risk_chains: tuple[RiskChain, ...] = (),
+    capacity_chains: tuple[CapacityRiskChain, ...] = (),
     entrypoint_ids: tuple[str, ...] = (),
     native_full_scan: bool = False,
 ) -> BudgetAllocation:
@@ -255,6 +263,7 @@ def allocate_work_items(
             policy,
             consumed_sessions=consumed_sessions,
             risk_chains=risk_chains,
+            capacity_chains=capacity_chains,
             entrypoint_ids=entrypoint_ids,
         )
 
@@ -353,6 +362,7 @@ def _allocate_native_diverse(
     *,
     consumed_sessions: int,
     risk_chains: tuple[RiskChain, ...],
+    capacity_chains: tuple[CapacityRiskChain, ...],
     entrypoint_ids: tuple[str, ...],
 ) -> BudgetAllocation:
     """Admit full native work with fair seed and recyclable class reservations."""
@@ -363,6 +373,13 @@ def _allocate_native_diverse(
         for signal_id in (*chain.allocation_signal_ids, *chain.sink_signal_ids):
             chain_by_signal.setdefault(signal_id, []).append(chain)
         chain_by_node.setdefault(chain.node_id, []).append(chain)
+    capacity_by_signal: dict[str, list[CapacityRiskChain]] = {}
+    capacity_by_node: dict[str, list[CapacityRiskChain]] = {}
+    for chain in capacity_chains:
+        for signal_id in (*chain.allocation_signal_ids, *chain.write_signal_ids):
+            capacity_by_signal.setdefault(signal_id, []).append(chain)
+        for node_id in chain.node_ids:
+            capacity_by_node.setdefault(node_id, []).append(chain)
     entrypoints = set(entrypoint_ids)
 
     candidates = []
@@ -375,19 +392,46 @@ def _allocate_native_diverse(
         for node_id in item.target_node_ids:
             for chain in chain_by_node.get(node_id, ()):
                 matching[chain.chain_id] = chain
+        matching_capacity = {
+            chain.chain_id: chain
+            for signal_id in item.target_signal_ids
+            for chain in capacity_by_signal.get(signal_id, ())
+        }
+        for node_id in item.target_node_ids:
+            for chain in capacity_by_node.get(node_id, ()):
+                matching_capacity[chain.chain_id] = chain
+        priority = min(
+            (chain.priority_class.value for chain in matching_capacity.values()),
+            key=_capacity_priority_rank,
+            default="unclassified",
+        )
+        missing = set(_missing_chain_elements(tuple(matching.values())))
+        if matching_capacity:
+            missing.discard("risk_chain")
+            missing.update(
+                element
+                for chain in matching_capacity.values()
+                for element in chain.missing_elements
+            )
         candidates.append(_AdmissionCandidate(
             item=item,
             component=_component_for(item.seed_file),
-            chain_score=max((chain.score for chain in matching.values()), default=0),
+            risk_chain_score=max((chain.score for chain in matching.values()), default=0),
+            capacity_chain_score=max(
+                (chain.score for chain in matching_capacity.values()), default=0
+            ),
+            priority_class=priority,
             entrypoint_reachable=any(
                 chain.node_id in entrypoints for chain in matching.values()
-            ),
+            ) or any(chain.entrypoint_reachable for chain in matching_capacity.values()),
             seed_family=_seed_family(item.seed_file),
             coverage_group=_coverage_group(item),
-            chain_ids=tuple(sorted(matching)),
-            missing_chain_elements=_missing_chain_elements(tuple(matching.values())),
+            chain_ids=tuple(sorted((*matching, *matching_capacity))),
+            missing_chain_elements=tuple(sorted(missing)),
             guard_states=tuple(sorted({
                 chain.guard_state.value for chain in matching.values()
+            } | {
+                chain.guard_state.value for chain in matching_capacity.values()
             })),
         ))
     ordered = sorted(candidates, key=_candidate_order)
@@ -434,7 +478,8 @@ def _allocate_native_diverse(
         novelty = 10 if candidate.component not in selected_components else 0
         seed_novelty = 15 if candidate.seed_family not in selected_seed_families else 0
         score_components = {
-            "risk_chain": candidate.chain_score,
+            "risk_chain": candidate.risk_chain_score,
+            "capacity_chain": candidate.capacity_chain_score,
             "required": int(candidate.item.required) * 20,
             "sink_severity": candidate.item.risk * 10,
             "entrypoint_reachability": int(candidate.entrypoint_reachable) * 10,
@@ -487,7 +532,7 @@ def _allocate_native_diverse(
             reason=(
                 "single eligible critical seed owns every chain; early cap exception"
                 if exception else
-                "risk chain score is at least 80 under the early seed cap"
+                "capacity or risk chain score is at least 80 under the early seed cap"
             ),
             cap_exception=exception,
         ):
@@ -609,7 +654,8 @@ def _native_ranking_records(
     for rank, candidate in enumerate(ordered, start=1):
         decision = admitted.get(candidate.item.work_id)
         static_components = {
-            "risk_chain": candidate.chain_score,
+            "risk_chain": candidate.risk_chain_score,
+            "capacity_chain": candidate.capacity_chain_score,
             "required": int(candidate.item.required) * 20,
             "sink_severity": candidate.item.risk * 10,
             "entrypoint_reachability": int(candidate.entrypoint_reachable) * 10,
@@ -635,6 +681,7 @@ def _native_ranking_records(
             chain_ids=candidate.chain_ids,
             missing_chain_elements=candidate.missing_chain_elements,
             guard_states=candidate.guard_states,
+            priority_class=candidate.priority_class,
             disposition=disposition,
             reason=reason,
             seed_family=candidate.seed_family,
@@ -652,6 +699,7 @@ def _legacy_ranking_record(
 ) -> AdmissionRankingRecord:
     components = {
         "risk_chain": 0,
+        "capacity_chain": 0,
         "required": int(item.required) * 20,
         "sink_severity": item.risk * 10,
         "entrypoint_reachability": 0,
@@ -669,6 +717,7 @@ def _legacy_ranking_record(
         chain_ids=(),
         missing_chain_elements=("risk_chain",),
         guard_states=(),
+        priority_class="unclassified",
         disposition=disposition,
         reason=reason,
         seed_family=_seed_family(item.seed_file),
@@ -698,8 +747,9 @@ def _ranking_record_id(work_id: str) -> str:
 
 def _candidate_order(
     candidate: _AdmissionCandidate,
-) -> tuple[int, int, int, int, str, str, str]:
+) -> tuple[int, int, int, int, int, str, str, str]:
     return (
+        _capacity_priority_rank(candidate.priority_class),
         -candidate.chain_score,
         -int(candidate.item.required),
         -candidate.item.risk,
@@ -708,6 +758,16 @@ def _candidate_order(
         candidate.seed_family,
         candidate.item.work_id,
     )
+
+
+def _capacity_priority_rank(priority: str) -> int:
+    return {
+        CapacityPriorityClass.COMPLETE_UNCHECKED.value: 0,
+        CapacityPriorityClass.COMPLETE_UNKNOWN_GUARD.value: 1,
+        CapacityPriorityClass.PARTIAL.value: 2,
+        CapacityPriorityClass.ISOLATED.value: 3,
+        "unclassified": 4,
+    }.get(priority, 4)
 
 
 def _component_for(path: str) -> str:

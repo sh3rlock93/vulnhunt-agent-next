@@ -72,6 +72,7 @@ def context_for_work_item(
     related_nodes = _related_nodes(graph, work_item)
     constraint_facts = _constraint_facts(graph, work_item, related_nodes)
     risk_chains = _matching_risk_chains(graph, work_item)
+    capacity_chains = matching_capacity_risk_chains(graph, work_item)
     selected_ids = set(work_item.slice_ids)
     matching = [
         item for item in plan.get("slices", [])
@@ -120,6 +121,10 @@ def context_for_work_item(
         "risk_chains": [
             _compact_risk_chain(item) for item in risk_chains[:6]
         ],
+        "capacity_risk_chain_policy_version": (
+            capacity_chains[0].get("policy_version", "") if capacity_chains else ""
+        ),
+        "capacity_risk_chains": capacity_chains[:3],
         "change_focus": {
             "target_node_ids": list(work_item.target_node_ids),
             "target_signal_ids": list(work_item.target_signal_ids),
@@ -138,6 +143,49 @@ def matching_risk_chains(graph: dict, work_item: HunterWorkItem) -> list[dict]:
         graph,
         target_signal_ids=set(work_item.target_signal_ids),
         target_node_ids=set(work_item.target_node_ids),
+    )
+
+
+def matching_capacity_risk_chains(
+    graph: dict,
+    work_item: HunterWorkItem,
+) -> list[dict]:
+    return matching_capacity_risk_chains_for_targets(
+        graph,
+        target_signal_ids=set(work_item.target_signal_ids),
+        target_node_ids=set(work_item.target_node_ids),
+    )
+
+
+def matching_capacity_risk_chains_for_targets(
+    graph: dict,
+    *,
+    target_signal_ids: set[str],
+    target_node_ids: set[str],
+) -> list[dict]:
+    matching = []
+    for chain in graph.get("capacity_risk_chains", []):
+        chain_signals = set(chain.get("allocation_signal_ids", ())) | set(
+            chain.get("write_signal_ids", ())
+        )
+        if (
+            target_signal_ids & chain_signals
+            or target_node_ids & set(chain.get("node_ids", ()))
+        ):
+            matching.append(chain)
+    priority = {
+        "complete_unchecked_capacity_path": 0,
+        "complete_unknown_guard_path": 1,
+        "partial_capacity_path": 2,
+        "isolated_allocation_or_write": 3,
+    }
+    return sorted(
+        matching,
+        key=lambda item: (
+            priority.get(str(item.get("priority_class", "")), 4),
+            -int(item.get("score", 0)),
+            str(item.get("chain_id", "")),
+        ),
     )
 
 
