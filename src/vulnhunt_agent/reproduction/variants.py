@@ -18,6 +18,13 @@ from ..domain.schemas import (
 from ..infrastructure.artifacts import ArtifactStore
 from ..infrastructure.sqlite_repository import SqliteRepository
 from ..sandbox.base import SandboxBackend
+from .planning import (
+    CapabilityAwareExperimentPlanner,
+    ExperimentPlan,
+    ExperimentPlanner,
+    ExperimentPlanStatus,
+    validate_compiled_experiment,
+)
 from .service import ReproductionOutcome, ReproductionStatus, ReproducerService
 
 VARIANT_POLICY = "reproduction-variant-v1"
@@ -148,6 +155,7 @@ def compile_variant_spec(
 class VariantExecutionResult:
     request_id: str
     outcome: ReproductionOutcome
+    plan: ExperimentPlan | None = None
 
 
 class ReproductionVariantExecutor:
@@ -158,6 +166,7 @@ class ReproductionVariantExecutor:
         backend: SandboxBackend,
         compiler: VariantCompiler,
         *,
+        planner: ExperimentPlanner | None = None,
         worker_id: str | None = None,
         lease_seconds: int = 900,
     ):
@@ -165,6 +174,7 @@ class ReproductionVariantExecutor:
         self.artifacts = artifacts
         self.backend = backend
         self.compiler = compiler
+        self.planner = planner or CapabilityAwareExperimentPlanner(artifacts)
         self.worker_id = worker_id or f"variant-{uuid.uuid4().hex[:16]}"
         self.lease_seconds = lease_seconds
 
@@ -181,6 +191,20 @@ class ReproductionVariantExecutor:
         )
         if task is None or task["payload"] != request.model_dump(mode="json"):
             raise ValueError("variant request is not the persisted task payload")
+        if task["status"] == "planning_deferred":
+            plan = _stored_plan(self.repository, request)
+            return VariantExecutionResult(
+                request_id=request.request_id,
+                outcome=ReproductionOutcome(
+                    reproduction_id=request.request_id,
+                    status=ReproductionStatus.ENVIRONMENT_BLOCKED,
+                    error=(
+                        plan.rationale if plan is not None
+                        else str(task.get("last_error") or "experiment planning deferred")
+                    ),
+                ),
+                plan=plan,
+            )
         terminal_statuses = {
             item.value: item
             for item in (
@@ -207,6 +231,7 @@ class ReproductionVariantExecutor:
                     evidence=evidence,
                     error=str(task.get("last_error") or ""),
                 ),
+                plan=_stored_plan(self.repository, request),
             )
         lease = self.repository.acquire_task_lease(
             request.run_id,
@@ -224,6 +249,7 @@ class ReproductionVariantExecutor:
                     status=ReproductionStatus.IN_PROGRESS,
                     error="variant task is leased or already terminal",
                 ),
+                plan=_stored_plan(self.repository, request),
             )
         try:
             base_task = _task(
@@ -235,8 +261,58 @@ class ReproductionVariantExecutor:
             if base_task is None:
                 raise ValueError("base reproduction task is missing")
             base = ReproductionSpec.model_validate(base_task["payload"])
+            plan = await self.planner.plan(request, base)
+            if plan.status is not ExperimentPlanStatus.READY:
+                _persist_plan(self.repository, plan, self.worker_id, self.lease_seconds)
+                self.repository.finish_task_lease(
+                    lease,
+                    status="planning_deferred",
+                    error=plan.rationale,
+                )
+                return VariantExecutionResult(
+                    request_id=request.request_id,
+                    outcome=ReproductionOutcome(
+                        reproduction_id=request.request_id,
+                        status=ReproductionStatus.ENVIRONMENT_BLOCKED,
+                        error=plan.rationale,
+                    ),
+                    plan=plan,
+                )
             spec = await self.compiler.compile(request, base)
             _validate_compiled_identity(request, base, spec)
+            try:
+                validate_compiled_experiment(
+                    plan,
+                    base,
+                    spec,
+                    poc_source=self.artifacts.read_bytes(base.poc_artifact).decode(
+                        errors="replace"
+                    ),
+                )
+            except ValueError as exc:
+                plan = plan.model_copy(update={
+                    "status": ExperimentPlanStatus.UNSUPPORTED,
+                    "rationale": f"Compiled experiment failed conformance: {exc}",
+                    "remaining_requirement": (
+                        "Provide a harness whose source consumes every compiled control."
+                    ),
+                })
+                _persist_plan(self.repository, plan, self.worker_id, self.lease_seconds)
+                self.repository.finish_task_lease(
+                    lease,
+                    status="planning_deferred",
+                    error=plan.rationale,
+                )
+                return VariantExecutionResult(
+                    request_id=request.request_id,
+                    outcome=ReproductionOutcome(
+                        reproduction_id=request.request_id,
+                        status=ReproductionStatus.ENVIRONMENT_BLOCKED,
+                        error=plan.rationale,
+                    ),
+                    plan=plan,
+                )
+            _persist_plan(self.repository, plan, self.worker_id, self.lease_seconds)
             outcome = await ReproducerService(
                 self.repository,
                 self.artifacts,
@@ -244,7 +320,7 @@ class ReproductionVariantExecutor:
                 worker_id=self.worker_id,
                 lease_seconds=self.lease_seconds,
             ).reproduce_variant(spec, lease)
-            return VariantExecutionResult(request.request_id, outcome)
+            return VariantExecutionResult(request.request_id, outcome, plan)
         except Exception as exc:
             self.repository.finish_task_lease(
                 lease,
@@ -258,6 +334,7 @@ class ReproductionVariantExecutor:
                     status=ReproductionStatus.ENVIRONMENT_BLOCKED,
                     error=str(exc),
                 ),
+                plan=_stored_plan(self.repository, request),
             )
 
 
@@ -274,6 +351,52 @@ def _task(
         ),
         None,
     )
+
+
+def _persist_plan(
+    repository: SqliteRepository,
+    plan: ExperimentPlan,
+    worker_id: str,
+    lease_seconds: int,
+) -> None:
+    payload = plan.model_dump(mode="json")
+    created = repository.ensure_task(
+        plan.run_id,
+        "experiment_plan",
+        plan.request_id,
+        payload=payload,
+    )
+    if not created:
+        stored = _task(repository, plan.run_id, "experiment_plan", plan.request_id)
+        if stored is None or stored["payload"] != payload:
+            raise ValueError("experiment plan changed during replay")
+        if stored["status"] == plan.status.value:
+            return
+        if stored["status"] not in {"pending", "running"}:
+            raise ValueError(
+                "experiment plan task has incompatible status: " + stored["status"]
+            )
+    lease = repository.acquire_task_lease(
+        plan.run_id,
+        "experiment_plan",
+        plan.request_id,
+        worker_id=worker_id,
+        lease_seconds=lease_seconds,
+        max_attempts=2,
+    )
+    if lease is None:
+        raise RuntimeError("experiment plan task could not be leased")
+    repository.finish_task_lease(lease, status=plan.status.value)
+
+
+def _stored_plan(
+    repository: SqliteRepository,
+    request: ReproductionVariantRequest,
+) -> ExperimentPlan | None:
+    task = _task(repository, request.run_id, "experiment_plan", request.request_id)
+    if task is None:
+        return None
+    return ExperimentPlan.model_validate(task["payload"])
 
 
 def _validate_compiled_identity(

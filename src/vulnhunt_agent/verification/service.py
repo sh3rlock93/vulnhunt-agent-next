@@ -30,6 +30,7 @@ from ..reproduction.variants import (
     ReproductionVariantExecutor,
     VariantCompiler,
 )
+from ..reproduction.planning import ExperimentPlanStatus
 from ..reviewing.agent import EvidenceReviewerAgent
 from ..reviewing.service import EvidenceReviewCoordinator
 from ..sandbox.base import SandboxBackend
@@ -58,6 +59,8 @@ class VerificationSummary:
     reports: int
     variants_executed: int = 0
     variants_failed: int = 0
+    experiment_plans: int = 0
+    experiment_plans_deferred: int = 0
     automatic_rereviews: int = 0
     synthesis_attempts: int = 0
     feasibility: dict[str, int] | None = None
@@ -241,6 +244,8 @@ class VerifiedPipelineService:
         )
         variants_executed = 0
         variants_failed = 0
+        experiment_plans = 0
+        experiment_plans_deferred = 0
         automatic_rereviews = 0
         for candidate_id in candidates:
             finding = self.repository.get_candidate(candidate_id)
@@ -255,6 +260,31 @@ class VerifiedPipelineService:
                     if request is None or variant_executor is None:
                         raise RuntimeError("variant request has no available executor")
                     execution = await variant_executor.execute(request)
+                    if execution.plan is not None:
+                        experiment_plans += 1
+                    if (
+                        execution.plan is not None
+                        and execution.plan.status is not ExperimentPlanStatus.READY
+                    ):
+                        experiment_plans_deferred += 1
+                        self._defer(
+                            candidate_id,
+                            finding.feasibility.status if finding.feasibility else (
+                                FeasibilityStatus.UNKNOWN
+                            ),
+                            reason=execution.plan.rationale,
+                            deferred_reason=(
+                                VerificationDeferredReason.EXPERIMENT_PLAN_UNSUPPORTED
+                            ),
+                            remaining_requirement=(
+                                execution.plan.remaining_requirement
+                                or "Provide an executable conforming experiment plan."
+                            ),
+                            synthesis_attempts=self._synthesis_attempts(
+                                run_id, candidate_id
+                            ),
+                        )
+                        break
                     if execution.outcome.status.value == "in_progress":
                         break
                     variants_executed += 1
@@ -319,6 +349,8 @@ class VerifiedPipelineService:
             reports=reports,
             variants_executed=variants_executed,
             variants_failed=variants_failed,
+            experiment_plans=experiment_plans,
+            experiment_plans_deferred=experiment_plans_deferred,
             automatic_rereviews=automatic_rereviews,
             synthesis_attempts=synthesis_attempts,
             feasibility=dict(sorted(feasibility_counts.items())),

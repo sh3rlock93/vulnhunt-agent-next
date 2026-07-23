@@ -84,6 +84,7 @@ class VerificationDeferredReason(StrEnum):
     REVIEW_INCONCLUSIVE = "review_inconclusive"
     EXECUTION_ERROR = "execution_error"
     HUMAN_REVIEW_REQUIRED = "human_review_required"
+    EXPERIMENT_PLAN_UNSUPPORTED = "experiment_plan_unsupported"
 
 
 class ImmutableSourceRange(DomainModel):
