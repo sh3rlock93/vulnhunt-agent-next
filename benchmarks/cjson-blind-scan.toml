@@ -1,0 +1,49 @@
+[benchmark]
+schema_version = 1
+id = "cjson-cursor-state-blind-v1"
+oracle_policy = "blind-oracle-v1"
+
+[source]
+repository = "https://github.com/DaveGamble/cJSON.git"
+commit = "98f9eb0412067a852ec107c68e49180fe4e472dc"
+tree = "5e10bc6289cb29afd1847278a89359e3e9d5e1f2"
+
+[scan]
+environment = "c:gcc-13"
+hunters = [
+  "c-bounds-integers",
+  "c-memory-lifetime",
+  "c-parser-state",
+  "c-injection-format",
+  "c-concurrency-state",
+  "c-error-contracts",
+]
+
+[policies]
+signal_router = "c-signal-router-v4"
+risk_chain = "c-risk-chain-v1"
+cursor_access = "c-cursor-access-v1"
+cursor_transition = "c-cursor-transition-v1"
+cursor_proof = "c-cursor-proof-v1"
+capacity_fact = "c-capacity-fact-v2"
+capacity_summary = "c-capacity-summary-v2"
+capacity_risk_chain = "c-capacity-risk-chain-v3"
+slice_work = "c-slice-work-v4"
+context = "c-context-v6"
+admission = "c-budget-v9"
+input_fairness = "work-input-fairness-v3"
+evidence = "native-evidence-v2"
+model_protocol = "strict-tool-json-v3"
+
+[budget]
+max_hunter_sessions = 12
+max_input_tokens = 2000000
+max_output_tokens = 200000
+max_wall_clock_minutes = 60
+max_retries_per_work_item = 1
+max_format_repairs_per_work_item = 1
+
+[limits]
+max_target_signals_per_work = 6
+max_context_bytes = 24000
+max_parallel_hunters = 3
