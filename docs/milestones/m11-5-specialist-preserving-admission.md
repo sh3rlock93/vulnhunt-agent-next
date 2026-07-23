@@ -38,3 +38,19 @@ Session, input, output, context, retry, and parallelism ceilings are not raised.
 - broad prompt rewrites;
 - weakening or deleting a protected regression;
 - treating an unrelated finding as a pass for a missing historical target.
+
+## PR4 authenticated result
+
+The 2026-07-23 Codex-subscription blind run completed all 10 admitted work
+items with no failed or deferred sessions. It used 420,807 new input tokens,
+134,912 cache-read tokens, and 8,309 output tokens, all within the locked
+budget. The `c-parser-state` work ran fourth and produced a candidate spanning
+`cue_scanner.l`, `cue_parser.y`, and the `cd.c:347` write sink. Discovery did
+not receive the oracle or fixed tree.
+
+After the discovery root was frozen as
+`7ba3e4e7ea6bc66aeaf3fd46e1ca1772e51bf5471c20b1dc0f5b5d4e652cf17e`,
+the withheld evaluator matched exactly one of three candidates. Two clean
+vulnerable-image attempts crashed under ASan in `track_set_index`, while two
+fixed-image attempts completed without a sanitizer finding and emitted the
+expected rejection. All authenticated release checks passed.
