@@ -111,7 +111,7 @@ def test_twelve_session_dense_plan_admits_distinct_critical_seeds() -> None:
     }
     seeds = {item.seed_file for item in admitted.values() if item.required}
     assert first == second
-    assert first.policy_version == "c-budget-v9"
+    assert first.policy_version == "c-budget-v10"
     assert len(first.admitted_work_ids) == 11
     assert first.retry_slots == 1
     assert first.chain_critical_slots == 6

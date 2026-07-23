@@ -1182,7 +1182,7 @@ def test_full_router_prevalidates_dense_targets_without_truncation() -> None:
     other_snapshot = route(reverse=False, snapshot=HASH_B)
 
     assert first == second
-    assert first.policy_version == "c-signal-router-v3"
+    assert first.policy_version == "c-signal-router-v4"
     assert len(first.work_items) == 49
     assert len({item.work_id for item in first.work_items}) == 49
     assert all(len(item.target_signal_ids) <= 6 for item in first.work_items)

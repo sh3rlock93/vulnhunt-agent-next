@@ -20,14 +20,14 @@ hunters = [
 ]
 
 [policies]
-signal_router = "c-signal-router-v3"
+signal_router = "c-signal-router-v4"
 risk_chain = "c-risk-chain-v1"
 capacity_fact = "c-capacity-fact-v2"
 capacity_summary = "c-capacity-summary-v2"
 capacity_risk_chain = "c-capacity-risk-chain-v3"
 slice_work = "c-slice-work-v4"
 context = "c-context-v6"
-admission = "c-budget-v9"
+admission = "c-budget-v10"
 input_fairness = "work-input-fairness-v2"
 evidence = "native-evidence-v2"
 model_protocol = "strict-tool-json-v3"

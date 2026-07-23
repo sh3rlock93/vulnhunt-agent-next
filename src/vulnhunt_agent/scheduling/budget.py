@@ -16,7 +16,7 @@ from ..analysis.models import CapacityPriorityClass, CapacityRiskChain, RiskChai
 from ..domain.schemas import BudgetPolicy, BudgetUsage, HunterWorkItem
 
 LEGACY_BUDGET_POLICY = "hunter-budget-allocation-v1"
-NATIVE_DIVERSE_POLICY = "c-budget-v9"
+NATIVE_DIVERSE_POLICY = "c-budget-v10"
 NATIVE_CHAIN_SHARE = 0.50
 NATIVE_SEED_DIVERSITY_SHARE = 0.25
 NATIVE_HIGH_RISK_SHARE = 1 / 6
@@ -660,8 +660,13 @@ def _allocate_native_diverse(
     }
     diversity_goal = min(3, len(eligible_critical_seeds), capacity)
     required_specialist_obligations = _required_specialist_obligations(ordered)
+    explicit_required_specialists = {
+        candidate.item.work_id
+        for candidate in ordered
+        if _is_explicit_required_specialist(candidate)
+    }
     specialist_target = min(
-        len(required_specialist_obligations),
+        len(required_specialist_obligations) + len(explicit_required_specialists),
         max(0, capacity - 1),
         max(
             1,
@@ -784,19 +789,29 @@ def _allocate_native_diverse(
             seed_slots += 1
 
     required_specialist_slots = 0
-    for candidate in ordered:
+    specialist_order = sorted(
+        ordered,
+        key=lambda candidate: (
+            0 if candidate.item.work_id in explicit_required_specialists else 1,
+            _candidate_order(candidate),
+        ),
+    )
+    for candidate in specialist_order:
         if required_specialist_slots >= specialist_target:
             break
+        explicit = candidate.item.work_id in explicit_required_specialists
         uncovered = (
             _specialist_chain_groups(candidate)
             & required_specialist_obligations
         ) - selected_specialist_chain_groups
-        if not uncovered:
+        if not explicit and not uncovered:
             continue
         if admit(
             candidate,
             quota="required_specialist",
             reason=(
+                "required cursor-transition Hunter retained"
+                if explicit else
                 "required Hunter specialization retained for a shared capacity root"
             ),
         ):
@@ -1116,6 +1131,14 @@ def _required_specialist_obligations(
             (group, hunter) for hunter in hunters if hunter != primary
         )
     return obligations
+
+
+def _is_explicit_required_specialist(candidate: _AdmissionCandidate) -> bool:
+    """Recognize a structurally routed specialist without widening its quota."""
+    return (
+        candidate.item.required
+        and "required:cursor-transition" in candidate.item.routing_reasons
+    )
 
 
 def _native_ranking_records(

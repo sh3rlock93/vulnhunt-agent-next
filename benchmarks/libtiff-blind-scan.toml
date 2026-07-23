@@ -20,7 +20,7 @@ hunters = [
 ]
 
 [policies]
-signal_router = "c-signal-router-v3"
+signal_router = "c-signal-router-v4"
 risk_chain = "c-risk-chain-v1"
 slice_work = "c-slice-work-v4"
 context = "c-context-v4"

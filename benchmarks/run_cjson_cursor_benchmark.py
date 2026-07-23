@@ -48,7 +48,7 @@ REQUIRED_POLICIES = {
     "cursor_access": "c-cursor-access-v1",
     "cursor_transition": "c-cursor-transition-v1",
     "cursor_proof": "c-cursor-proof-v1",
-    "admission": "c-budget-v9",
+    "admission": "c-budget-v10",
     "input_fairness": "work-input-fairness-v3",
 }
 
