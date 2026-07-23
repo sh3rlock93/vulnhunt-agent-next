@@ -434,7 +434,7 @@ def _capacity_policies_recorded(policies: dict[str, Any]) -> bool:
         policies.get("capacity_summary") == "c-capacity-summary-v2",
         policies.get("capacity_risk_chain") == "c-capacity-risk-chain-v3",
         policies.get("context") == "c-context-v6",
-        policies.get("admission") == "c-budget-v8",
+        policies.get("admission") == "c-budget-v9",
         policies.get("input_fairness") == "work-input-fairness-v2",
     ))
 

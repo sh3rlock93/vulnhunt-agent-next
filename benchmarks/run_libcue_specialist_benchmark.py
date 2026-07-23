@@ -60,6 +60,7 @@ def evaluate_frozen(args: argparse.Namespace) -> dict[str, Any]:
     graph = CAnalysisGraph.model_validate(analysis.get("graph") or {})
     target_signal_ids = _matching_target_signal_ids(graph, oracle["location"])
     specialist = _specialist_record(plan, target_signal_ids, oracle["location"])
+    allocation = plan.get("allocation") or plan.get("budget_allocation") or {}
     candidates = _load_candidates(frozen, discovery)
     matching_candidates = [
         candidate
@@ -88,6 +89,14 @@ def evaluate_frozen(args: argparse.Namespace) -> dict[str, Any]:
             specialist
             and specialist.get("admission_rank") is not None
             and int(specialist["admission_rank"])
+            <= REQUIRED_BUDGET["max_hunter_sessions"]
+        ),
+        "required_specialist_quota_recorded": bool(
+            specialist and specialist.get("quota") == "required_specialist"
+        ),
+        "required_specialist_reserve_bounded": (
+            int(allocation.get("required_specialist_slots") or 0) == 1
+            and len(allocation.get("admitted_work_ids") or [])
             <= REQUIRED_BUDGET["max_hunter_sessions"]
         ),
         "cross_file_context_complete": bool(
@@ -225,6 +234,7 @@ def _specialist_record(
         ),
         "pre_admission_rank": ranking.get("pre_admission_rank"),
         "admission_rank": decision.get("rank") if decision else None,
+        "quota": decision.get("quota") if decision else None,
         "disposition": ranking.get("disposition"),
         "reason": ranking.get("reason"),
         "context_bytes": int(context.get("bytes") or 0),
