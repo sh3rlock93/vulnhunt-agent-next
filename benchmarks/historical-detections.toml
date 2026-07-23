@@ -1,0 +1,104 @@
+[registry]
+schema_version = 1
+policy_version = "historical-detection-registry-v1"
+
+[[detection]]
+id = "zlib-cve-2023-45853"
+status = "must_detect"
+source_repository = "https://github.com/madler/zlib.git"
+source_commit = "6dfa8714a3af40303bf5c6258af28a0eb37fc4ff"
+source_tree = "75d0c90b9a6b6639c4d980947b5a99d5712f3635"
+expected_hunter = "c-bounds-integers"
+required_paths = ["contrib/minizip/zip.c"]
+weakness_terms = ["integer overflow", "heap buffer overflow"]
+scan_manifest = "benchmarks/zlib-cve-2023-45853.toml"
+last_known_good_scanner_commit = "0565ac5519d9536706e0432de8023797172b111a"
+maximum_admission_rank = 6
+
+[[detection]]
+id = "libjpeg-turbo-issue-387"
+status = "must_detect"
+source_repository = "https://github.com/libjpeg-turbo/libjpeg-turbo.git"
+source_commit = "c30b1e72dac76343ef9029833d1561de07d29bad"
+source_tree = "48074ffcebfb949fd22ded3281301259d4c9f265"
+expected_hunter = "c-bounds-integers"
+required_paths = ["tjbench.c", "turbojpeg.c"]
+weakness_terms = ["out-of-bounds write", "double free"]
+scan_manifest = "benchmarks/libjpeg-turbo-blind-scan.toml"
+oracle = "benchmarks/oracles/libjpeg-turbo-issue-387.toml"
+last_known_good_scanner_commit = "0565ac5519d9536706e0432de8023797172b111a"
+maximum_admission_rank = 6
+
+[[detection]]
+id = "libwebp-cve-2023-4863"
+status = "must_detect"
+source_repository = "https://github.com/webmproject/libwebp.git"
+source_commit = "7ba44f80f3b94fc0138db159afea770ef06532a0"
+source_tree = "5189aba17d0a7df8f385946a4d02dffe702b7224"
+expected_hunter = "c-bounds-integers"
+required_paths = ["src/dec/vp8l_dec.c", "src/utils/huffman_utils.c"]
+weakness_terms = ["heap buffer overflow", "huffman table capacity"]
+scan_manifest = "benchmarks/libwebp-blind-scan.toml"
+oracle = "benchmarks/oracles/libwebp-cve-2023-4863.toml"
+last_known_good_scanner_commit = "9dd8f46e6bd359fbd792d2697fe1d6c411fe8367"
+maximum_admission_rank = 6
+
+[[detection]]
+id = "libcue-time-global-buffer-overflow"
+status = "must_detect"
+source_repository = "https://github.com/lipnitsk/libcue.git"
+source_commit = "1b0f3917b8f908c81bb646ce42f29cf7c86443a1"
+source_tree = "0427ce355c4cc08d478aa1401eff9aa8a9300e6b"
+expected_hunter = "c-injection-format"
+required_paths = ["time.c"]
+weakness_terms = ["global buffer overflow", "sprintf"]
+last_known_good_scanner_commit = "9dd8f46e6bd359fbd792d2697fe1d6c411fe8367"
+maximum_admission_rank = 3
+
+[[detection]]
+id = "libcue-cve-2023-43641"
+status = "recovery_target"
+source_repository = "https://github.com/lipnitsk/libcue.git"
+source_commit = "1b0f3917b8f908c81bb646ce42f29cf7c86443a1"
+source_tree = "0427ce355c4cc08d478aa1401eff9aa8a9300e6b"
+expected_hunter = "c-parser-state"
+required_paths = ["cue_scanner.l", "cue_parser.y", "cd.c"]
+weakness_terms = ["negative array index", "out-of-bounds write"]
+scan_manifest = "benchmarks/libcue-blind-scan.toml"
+oracle = "benchmarks/oracles/libcue-cve-2023-43641.toml"
+maximum_admission_rank = 12
+
+[[detection]]
+id = "libtiff-cve-2023-41175"
+status = "known_gap"
+source_repository = "https://gitlab.com/libtiff/libtiff.git"
+source_commit = "cb88a5b6bf1757060ec4d50055fa852fd7830cfe"
+source_tree = "41d6d3775738d3dae27fcdc5d74c131aaff443e3"
+expected_hunter = "c-bounds-integers"
+required_paths = ["tools/raw2tiff.c"]
+weakness_terms = ["integer size overflow", "heap buffer overflow"]
+scan_manifest = "benchmarks/libtiff-blind-scan.toml"
+oracle = "benchmarks/oracles/libtiff-cve-2023-41175.toml"
+maximum_admission_rank = 16
+
+[[detection]]
+id = "libyaml-utf16-retry-oob"
+status = "known_gap"
+source_repository = "https://github.com/yaml/libyaml.git"
+source_commit = "893682bb98d5ed663a3e314c46dceaf9b1c8802f"
+source_tree = "a195adec98f9bc5253565930b30a46a26dec86e8"
+expected_hunter = "c-bounds-integers"
+required_paths = ["src/writer.c"]
+weakness_terms = ["UTF-16", "raw buffer overflow"]
+maximum_admission_rank = 12
+
+[[detection]]
+id = "libpng-visualpng-candidates"
+status = "known_gap"
+source_repository = "https://github.com/pnggroup/libpng.git"
+source_commit = "2b978915d82377df13fcbb1fb56660195ded868a"
+source_tree = "58d40326652c2f414e8a6a4398f0a7c9fd54340d"
+expected_hunter = "c-bounds-integers"
+required_paths = ["contrib/visupng/VisualPng.c"]
+weakness_terms = ["global buffer overflow", "allocation race"]
+maximum_admission_rank = 12
