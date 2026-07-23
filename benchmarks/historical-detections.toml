@@ -57,7 +57,7 @@ maximum_admission_rank = 3
 
 [[detection]]
 id = "libcue-cve-2023-43641"
-status = "recovery_target"
+status = "must_detect"
 source_repository = "https://github.com/lipnitsk/libcue.git"
 source_commit = "1b0f3917b8f908c81bb646ce42f29cf7c86443a1"
 source_tree = "0427ce355c4cc08d478aa1401eff9aa8a9300e6b"
@@ -66,7 +66,8 @@ required_paths = ["cue_scanner.l", "cue_parser.y", "cd.c"]
 weakness_terms = ["negative array index", "out-of-bounds write"]
 scan_manifest = "benchmarks/libcue-blind-scan.toml"
 oracle = "benchmarks/oracles/libcue-cve-2023-43641.toml"
-maximum_admission_rank = 12
+last_known_good_scanner_commit = "a6ed134e9a877d15560feb426c14917952022c94"
+maximum_admission_rank = 4
 
 [[detection]]
 id = "libtiff-cve-2023-41175"

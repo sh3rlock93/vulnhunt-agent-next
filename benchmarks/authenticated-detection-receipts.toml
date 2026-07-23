@@ -1,0 +1,36 @@
+[receipts]
+schema_version = 1
+policy_version = "authenticated-detection-receipt-v1"
+
+[[run]]
+id = "libcue-m11-5-authenticated"
+source_repository = "https://github.com/lipnitsk/libcue.git"
+source_commit = "1b0f3917b8f908c81bb646ce42f29cf7c86443a1"
+source_tree = "0427ce355c4cc08d478aa1401eff9aa8a9300e6b"
+adapter = "codex_subscription"
+model_id = "gpt-5.6-sol"
+frozen_root_sha256 = "7ba3e4e7ea6bc66aeaf3fd46e1ca1772e51bf5471c20b1dc0f5b5d4e652cf17e"
+sessions = 10
+input_tokens = 420807
+cache_read_tokens = 134912
+output_tokens = 8309
+complete = true
+oracle_isolated = true
+
+[[run.detection]]
+baseline_id = "libcue-time-global-buffer-overflow"
+candidate_id = "cand_verified_be38e660fe4ca349ccf1c71b3f"
+hunter = "c-injection-format"
+paths = ["time.c"]
+sink = "time.c:33"
+candidate_present = true
+differential_reproduction = false
+
+[[run.detection]]
+baseline_id = "libcue-cve-2023-43641"
+candidate_id = "cand_verified_2bff0feaf586a086c2193b1090"
+hunter = "c-parser-state"
+paths = ["cue_scanner.l", "cue_parser.y", "cd.c"]
+sink = "cd.c:347"
+candidate_present = true
+differential_reproduction = true

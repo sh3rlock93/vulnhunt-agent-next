@@ -54,3 +54,27 @@ the withheld evaluator matched exactly one of three candidates. Two clean
 vulnerable-image attempts crashed under ASan in `track_set_index`, while two
 fixed-image attempts completed without a sanitizer finding and emitted the
 expected rejection. All authenticated release checks passed.
+
+## PR5 no-regression release matrix
+
+The final release matrix is closed over every `must_detect` registry entry.
+Each protected detection names the exact CI job that proves its deterministic
+admission contract; an omitted, skipped, cancelled, or failed job fails the
+aggregate gate. Authenticated receipts are source-pinned and must match the
+expected Hunter and paths. A gate that requires differential reproduction
+cannot be declared without an authenticated receipt containing that proof.
+
+`libcue-cve-2023-43641` is promoted to `must_detect` only after the PR4 blind
+candidate and two vulnerable/two fixed reproduction attempts passed. A fresh
+credential-free run retained the historical `time.c` formatting finding at
+rank 3 and the parser-to-`cd.c` finding at rank 4. Re-evaluating the frozen
+authenticated run matched both model candidates, verified the discovery root,
+and repeated the CVE differential reproduction successfully.
+
+The aggregate CI gate covers these protected detections:
+
+- zlib CVE-2023-45853;
+- libjpeg-turbo issue 387;
+- libwebp CVE-2023-4863;
+- the libcue `time.c` global-buffer-overflow finding;
+- libcue CVE-2023-43641.

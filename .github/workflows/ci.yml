@@ -326,3 +326,80 @@ jobs:
           --vulnerable-repo .benchmark/libjpeg-vulnerable
           --fixed-repo .benchmark/libjpeg-fixed
           --output .benchmark/m11-3-evaluation
+
+  m11-5-libcue-specialist:
+    name: M11.5 libcue specialist-preservation gates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install project
+        run: python -m pip install -e .
+      - name: Configure default model catalog
+        run: cp settings.example.toml settings.toml
+      - name: Checkout pinned vulnerable libcue tree
+        uses: actions/checkout@v6
+        with:
+          repository: lipnitsk/libcue
+          ref: 1b0f3917b8f908c81bb646ce42f29cf7c86443a1
+          path: .benchmark/libcue-m11-5-vulnerable
+      - name: Checkout pinned fixed libcue tree
+        uses: actions/checkout@v6
+        with:
+          repository: lipnitsk/libcue
+          ref: cfb98a060fd79dbc3463d85f0f29c3c335dfa0ea
+          path: .benchmark/libcue-m11-5-fixed
+      - name: Discover without oracle input
+        run: >-
+          python benchmarks/run_libcue_specialist_benchmark.py discover
+          --repo .benchmark/libcue-m11-5-vulnerable
+          --scan-manifest benchmarks/libcue-blind-scan.toml
+          --output .benchmark/m11-5-discovery
+          --mode deterministic
+      - name: Freeze discovery artifacts
+        run: >-
+          python benchmarks/run_libcue_specialist_benchmark.py freeze
+          --discovery .benchmark/m11-5-discovery
+          --frozen .benchmark/m11-5-frozen
+      - name: Require both libcue specialists within the locked budget
+        run: >-
+          python benchmarks/run_libcue_specialist_benchmark.py evaluate
+          --frozen .benchmark/m11-5-frozen
+          --oracle benchmarks/oracles/libcue-cve-2023-43641.toml
+          --scan-manifest benchmarks/libcue-blind-scan.toml
+          --vulnerable-repo .benchmark/libcue-m11-5-vulnerable
+          --fixed-repo .benchmark/libcue-m11-5-fixed
+          --output .benchmark/m11-5-evaluation
+
+  m11-5-release-matrix:
+    name: M11.5 protected detection release matrix
+    if: ${{ always() }}
+    needs:
+      - m9-zlib-regression
+      - m11-2-libwebp-blind
+      - m11-3-libjpeg-alias-blind
+      - m11-5-libcue-specialist
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install project
+        run: python -m pip install -e .
+      - name: Require every protected detection gate to pass
+        env:
+          ZLIB_STATUS: ${{ needs['m9-zlib-regression'].result }}
+          LIBWEBP_STATUS: ${{ needs['m11-2-libwebp-blind'].result }}
+          LIBJPEG_STATUS: ${{ needs['m11-3-libjpeg-alias-blind'].result }}
+          LIBCUE_STATUS: ${{ needs['m11-5-libcue-specialist'].result }}
+        run: >-
+          python benchmarks/run_detection_release_matrix.py evaluate
+          --status m9-zlib-regression=${ZLIB_STATUS}
+          --status m11-2-libwebp-blind=${LIBWEBP_STATUS}
+          --status m11-3-libjpeg-alias-blind=${LIBJPEG_STATUS}
+          --status m11-5-libcue-specialist=${LIBCUE_STATUS}
