@@ -11,6 +11,7 @@ import pytest
 
 from vulnhunt_agent.core import openai_auto
 from vulnhunt_agent.core.codex_client import (
+    _CODEX_MODEL_INSTRUCTIONS,
     CodexSubscriptionClient,
     _build_adapter_prompt,
     _classify_failure,
@@ -282,6 +283,80 @@ def test_codex_prompt_marks_scanner_input_untrusted_and_disallows_codex_tools() 
     begin = next(line for line in prompt.splitlines() if line.startswith("BEGIN_"))
     end = next(line for line in prompt.splitlines() if line.startswith("END_"))
     assert begin.removeprefix("BEGIN_") == end.removeprefix("END_")
+
+
+async def test_codex_subscription_replaces_builtin_model_instructions(
+    monkeypatch,
+) -> None:
+    provider = _auto_provider(
+        codex_timeout_seconds=30,
+        codex_max_parallel=1,
+    )
+    monkeypatch.setattr(
+        "vulnhunt_agent.core.codex_client._settings.resolve",
+        lambda model_id: (None, provider),
+    )
+    captured: dict[str, Any] = {}
+
+    class _Process:
+        returncode = 0
+
+        def __init__(self, args: tuple[str, ...]) -> None:
+            self.args = args
+
+        async def communicate(self, input_bytes: bytes):
+            captured["prompt"] = input_bytes.decode()
+            configs = [
+                self.args[index + 1]
+                for index, value in enumerate(self.args)
+                if value == "--config"
+            ]
+            instruction_config = next(
+                value for value in configs
+                if value.startswith("model_instructions_file=")
+            )
+            instruction_path = Path(json.loads(instruction_config.split("=", 1)[1]))
+            captured["instructions"] = instruction_path.read_text(encoding="utf-8")
+
+            output_index = self.args.index("--output-last-message") + 1
+            Path(self.args[output_index]).write_text(
+                json.dumps({"text": "done", "tool_calls": []}),
+                encoding="utf-8",
+            )
+            events = json.dumps({
+                "type": "turn.completed",
+                "usage": {
+                    "input_tokens": 100,
+                    "cached_input_tokens": 0,
+                    "output_tokens": 5,
+                },
+            }).encode()
+            return events, b""
+
+    async def fake_subprocess(*args, **kwargs):
+        captured["args"] = args
+        captured["cwd"] = kwargs["cwd"]
+        return _Process(args)
+
+    monkeypatch.setattr(
+        "vulnhunt_agent.core.codex_client.asyncio.create_subprocess_exec",
+        fake_subprocess,
+    )
+    client = CodexSubscriptionClient("gpt-5.6-sol", max_tokens=200)
+
+    response = await client.chat(
+        messages=[{"role": "user", "content": [{"text": "review"}]}],
+        system="review source",
+    )
+
+    args = captured["args"]
+    assert "--ignore-user-config" in args
+    assert "--strict-config" in args
+    assert captured["instructions"] == _CODEX_MODEL_INSTRUCTIONS
+    assert _CODEX_MODEL_INSTRUCTIONS.strip()
+    assert "not a coding agent" in captured["instructions"]
+    assert "model_instructions_file" not in captured["prompt"]
+    assert response.text == "done"
 
 
 def test_codex_failure_hint_does_not_echo_diagnostics() -> None:
