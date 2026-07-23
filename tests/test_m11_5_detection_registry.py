@@ -75,7 +75,7 @@ def test_libcue_scan_manifest_is_oracle_free_and_budget_locked() -> None:
     assert "fixed_source" not in raw
     assert _contains_exact(scan["budget"], REQUIRED_BUDGET)
     assert _contains_exact(scan["limits"], REQUIRED_LIMITS)
-    assert scan["policies"]["admission"] == "c-budget-v8"
+    assert scan["policies"]["admission"] == "c-budget-v9"
     assert scan["policies"]["input_fairness"] == "work-input-fairness-v3"
 
 
@@ -134,4 +134,5 @@ def test_specialist_record_does_not_accept_bounds_as_parser_coverage() -> None:
     assert record is not None
     assert record["work_id"] == "work-parser"
     assert record["admission_rank"] is None
+    assert record["quota"] is None
     assert record["reason"] == "duplicate_capacity_chain"

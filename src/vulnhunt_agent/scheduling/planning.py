@@ -163,6 +163,7 @@ def _plan_contract(
                 asdict(item) for item in allocation.capacity_units
             ],
             "input_fairness": asdict(input_budget),
+            "required_specialist_slots": allocation.required_specialist_slots,
             "retry_slots": allocation.retry_slots,
         },
     }
@@ -264,6 +265,7 @@ def _normalized_allocation(
         "decisions": decisions,
         "ranking": ranking,
         "capacity_units": capacity_units,
+        "required_specialist_slots": allocation.required_specialist_slots,
         "input_fairness": {
             "policy_version": input_budget.policy_version,
             "per_work_input_limit": input_budget.per_work_input_limit,

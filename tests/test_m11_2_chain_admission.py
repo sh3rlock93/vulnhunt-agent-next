@@ -10,6 +10,7 @@ from vulnhunt_agent.domain.schemas import BudgetPolicy, HunterWorkItem
 from vulnhunt_agent.scheduling import (
     allocate_work_items,
     apply_admission_focus,
+    build_work_input_budget,
     work_id_for,
 )
 
@@ -100,7 +101,7 @@ def test_one_capacity_root_preserves_distinct_hunter_specialists() -> None:
 
     admitted = [item for item in items if item.work_id in first.admitted_work_ids]
     assert first == second
-    assert first.policy_version == "c-budget-v8"
+    assert first.policy_version == "c-budget-v9"
     assert {item.hunter for item in admitted} == {
         "c-bounds-integers",
         "c-memory-lifetime",
@@ -110,6 +111,7 @@ def test_one_capacity_root_preserves_distinct_hunter_specialists() -> None:
     )
     assert representative.seed_file == "decode.c"
     assert first.chain_critical_slots == 1
+    assert first.required_specialist_slots == 1
     assert len(first.admitted_work_ids) == 2
     assert set(first.deferred.values()) == {"duplicate_capacity_chain"}
     assert all(
@@ -156,6 +158,37 @@ def test_distinct_capacity_specialist_is_budget_deferred_not_deduplicated() -> N
         if record.work_id == lifetime.work_id
     )
     assert lifetime_record.disposition == "budget_deferred"
+
+
+def test_required_specialist_displaces_lower_priority_work_when_saturated() -> None:
+    chain = _chain()
+    bounds = _work(1, "decode.c", "allocation", "c-bounds-integers")
+    parser = _work(2, "decode.c", "allocation", "c-parser-state")
+    unrelated = _work(3, "other.c", "other-signal", "c-bounds-integers")
+
+    allocation = allocate_work_items(
+        (unrelated, parser, bounds),
+        BudgetPolicy(max_hunter_sessions=2, max_retries_per_work_item=0),
+        capacity_chains=(chain,),
+        native_full_scan=True,
+    )
+
+    assert allocation.admitted_work_ids == (bounds.work_id, parser.work_id)
+    assert allocation.required_specialist_slots == 1
+    assert allocation.decisions[1].quota == "required_specialist"
+    assert allocation.deferred == {unrelated.work_id: "max_hunter_sessions"}
+    assert len(allocation.admitted_work_ids) == 2
+
+    input_budget = build_work_input_budget(
+        (bounds, parser, unrelated),
+        allocation,
+        BudgetPolicy(
+            max_hunter_sessions=2,
+            max_retries_per_work_item=0,
+            max_input_tokens=200_000,
+        ),
+    )
+    assert input_budget.critical_work_ids == (bounds.work_id, parser.work_id)
 
 
 def test_complete_priority_is_eligible_without_fixed_score_threshold() -> None:

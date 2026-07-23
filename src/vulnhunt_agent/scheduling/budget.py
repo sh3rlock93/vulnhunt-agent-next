@@ -16,10 +16,11 @@ from ..analysis.models import CapacityPriorityClass, CapacityRiskChain, RiskChai
 from ..domain.schemas import BudgetPolicy, BudgetUsage, HunterWorkItem
 
 LEGACY_BUDGET_POLICY = "hunter-budget-allocation-v1"
-NATIVE_DIVERSE_POLICY = "c-budget-v8"
+NATIVE_DIVERSE_POLICY = "c-budget-v9"
 NATIVE_CHAIN_SHARE = 0.50
 NATIVE_SEED_DIVERSITY_SHARE = 0.25
 NATIVE_HIGH_RISK_SHARE = 1 / 6
+NATIVE_REQUIRED_SPECIALIST_SHARE = 1 / 12
 NATIVE_EARLY_SEED_CAP = 2
 CAPACITY_ADMISSION_UNIT_POLICY = "capacity-admission-unit-v1"
 WORK_INPUT_FAIRNESS_POLICY = "work-input-fairness-v3"
@@ -43,6 +44,7 @@ class BudgetAllocation:
     general_slots: int
     policy_version: str = LEGACY_BUDGET_POLICY
     chain_critical_slots: int = 0
+    required_specialist_slots: int = 0
     chain_revisit_slots: int = 0
     component_diverse_slots: int = 0
     seed_diverse_slots: int = 0
@@ -483,21 +485,21 @@ def build_work_input_budget(
         1,
         policy.max_input_tokens // max(1, len(admitted)),
     )
-    critical_chain_work_ids = {
+    priority_protected_work_ids = {
         decision.work_id
         for decision in allocation.decisions
-        if decision.quota == "chain_critical"
+        if decision.quota in {"chain_critical", "required_specialist"}
     }
     work_input_limits = {
         work_id: min(
             policy.max_input_tokens,
-            base_share * (6 if work_id in critical_chain_work_ids else 2),
+            base_share * (6 if work_id in priority_protected_work_ids else 2),
         )
         for work_id in admitted
     }
     per_work_limit = max(work_input_limits.values(), default=base_share)
     by_work_id = {item.work_id: item for item in work_items}
-    protected_work_ids = critical_chain_work_ids or {
+    protected_work_ids = priority_protected_work_ids or {
         work_id
         for work_id in admitted
         if by_work_id.get(work_id) is not None and by_work_id[work_id].required
@@ -657,6 +659,17 @@ def _allocate_native_diverse(
         candidate.seed_family for candidate in ordered if candidate.item.required
     }
     diversity_goal = min(3, len(eligible_critical_seeds), capacity)
+    required_specialist_obligations = _required_specialist_obligations(ordered)
+    specialist_target = min(
+        len(required_specialist_obligations),
+        max(0, capacity - 1),
+        max(
+            1,
+            math.ceil(
+                policy.max_hunter_sessions * NATIVE_REQUIRED_SPECIALIST_SHARE
+            ),
+        ),
+    )
 
     def admit(
         candidate: _AdmissionCandidate,
@@ -723,7 +736,7 @@ def _allocate_native_diverse(
 
     chain_slots = 0
     chain_target = min(
-        capacity,
+        max(0, capacity - specialist_target),
         max(1, math.ceil(policy.max_hunter_sessions * NATIVE_CHAIN_SHARE)),
     )
     seed_capped_critical: list[_AdmissionCandidate] = []
@@ -753,7 +766,7 @@ def _allocate_native_diverse(
 
     seed_slots = 0
     seed_target = min(
-        max(0, capacity - len(selected)),
+        max(0, capacity - len(selected) - specialist_target),
         max(1, math.ceil(policy.max_hunter_sessions * NATIVE_SEED_DIVERSITY_SHARE)),
     )
     for candidate in ordered:
@@ -769,6 +782,25 @@ def _allocate_native_diverse(
             reason="first admitted critical work from a distinct seed file",
         ):
             seed_slots += 1
+
+    required_specialist_slots = 0
+    for candidate in ordered:
+        if required_specialist_slots >= specialist_target:
+            break
+        uncovered = (
+            _specialist_chain_groups(candidate)
+            & required_specialist_obligations
+        ) - selected_specialist_chain_groups
+        if not uncovered:
+            continue
+        if admit(
+            candidate,
+            quota="required_specialist",
+            reason=(
+                "required Hunter specialization retained for a shared capacity root"
+            ),
+        ):
+            required_specialist_slots += 1
 
     chain_revisit_slots = 0
     for candidate in seed_capped_critical:
@@ -866,6 +898,7 @@ def _allocate_native_diverse(
         general_slots=len(selected) - critical_slots - total_high,
         policy_version=NATIVE_DIVERSE_POLICY,
         chain_critical_slots=chain_slots,
+        required_specialist_slots=required_specialist_slots,
         chain_revisit_slots=chain_revisit_slots,
         seed_diverse_slots=seed_slots,
         high_risk_non_chain_slots=high_slots,
@@ -1061,6 +1094,28 @@ def _specialist_chain_groups(
         (group, candidate.item.hunter)
         for group in candidate.logical_chain_groups
     }
+
+
+def _required_specialist_obligations(
+    candidates: list[_AdmissionCandidate],
+) -> set[tuple[str, str]]:
+    """Return non-primary Hunter coverage required on shared capacity roots."""
+    hunters_by_group: dict[str, set[str]] = {}
+    for candidate in candidates:
+        if not candidate.item.required:
+            continue
+        for group in candidate.logical_chain_groups:
+            hunters_by_group.setdefault(group, set()).add(candidate.item.hunter)
+
+    obligations: set[tuple[str, str]] = set()
+    for group, hunters in hunters_by_group.items():
+        if len(hunters) < 2:
+            continue
+        primary = min(hunters, key=lambda hunter: (_hunter_priority(hunter), hunter))
+        obligations.update(
+            (group, hunter) for hunter in hunters if hunter != primary
+        )
+    return obligations
 
 
 def _native_ranking_records(
