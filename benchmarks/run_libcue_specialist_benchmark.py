@@ -61,12 +61,25 @@ def evaluate_frozen(args: argparse.Namespace) -> dict[str, Any]:
     graph = CAnalysisGraph.model_validate(analysis.get("graph") or {})
     target_signal_ids = _matching_target_signal_ids(graph, oracle["location"])
     specialist = _specialist_record(plan, target_signal_ids, oracle["location"])
+    historical = _historical_detection_record(
+        graph,
+        plan,
+        oracle["historical_detection"],
+    )
     allocation = plan.get("allocation") or plan.get("budget_allocation") or {}
     candidates = _load_candidates(frozen, discovery)
     matching_candidates = [
         candidate
         for candidate in candidates
         if _candidate_matches_oracle(candidate, oracle)
+    ]
+    historical_candidates = [
+        candidate
+        for candidate in candidates
+        if _candidate_matches_historical(
+            candidate,
+            oracle["historical_detection"],
+        )
     ]
     audit = discovery.get("oracle_access_audit") or {}
 
@@ -108,6 +121,19 @@ def evaluate_frozen(args: argparse.Namespace) -> dict[str, Any]:
             and 0 < int(specialist.get("context_bytes") or 0)
             <= REQUIRED_LIMITS["max_context_bytes"]
         ),
+        "historical_detection_planned": historical is not None,
+        "historical_detection_admitted": bool(
+            historical and historical.get("admission_rank") is not None
+        ),
+        "historical_detection_rank_preserved": bool(
+            historical
+            and historical.get("admission_rank") is not None
+            and int(historical["admission_rank"])
+            <= int(oracle["historical_detection"]["maximum_admission_rank"])
+        ),
+        "historical_detection_context_complete": bool(
+            historical and historical.get("required_paths_present")
+        ),
     }
     if discovery.get("mode") == "authenticated":
         usage = discovery.get("usage") or {}
@@ -122,6 +148,7 @@ def evaluate_frozen(args: argparse.Namespace) -> dict[str, Any]:
             <= REQUIRED_BUDGET["max_output_tokens"]
         )
         checks["matching_model_candidate"] = bool(matching_candidates)
+        checks["historical_model_candidate"] = bool(historical_candidates)
     else:
         checks["deterministic_without_model_credentials"] = (
             (discovery.get("model") or {}).get("adapter") == "none"
@@ -163,6 +190,10 @@ def evaluate_frozen(args: argparse.Namespace) -> dict[str, Any]:
             "signal_ids": sorted(target_signal_ids),
             "specialist": specialist,
             "matching_candidates": matching_candidates,
+        },
+        "historical_detection": {
+            "record": historical,
+            "matching_candidates": historical_candidates,
         },
         "metrics": {
             "candidate_count": len(candidates),
@@ -213,7 +244,7 @@ def _specialist_record(
         return None
     work_id = str(work["work_id"])
     allocation = plan.get("allocation") or plan.get("budget_allocation") or {}
-    decision = next((
+    decision: dict[str, Any] | None = next((
         item for item in allocation.get("decisions", [])
         if item.get("work_id") == work_id
     ), None)
@@ -285,6 +316,79 @@ def _candidate_matches_oracle(
         and int(location["sink_line_min"]) <= sink_line <= int(location["sink_line_max"])
         and set(location["required_paths"]).issubset(paths)
         and bounds
+    )
+
+
+def _historical_detection_record(
+    graph: CAnalysisGraph,
+    plan: dict[str, Any],
+    spec: dict[str, Any],
+) -> dict[str, Any] | None:
+    signal_ids = {
+        signal.signal_id
+        for signal in graph.signals
+        if signal.path == spec["sink_file"]
+        and int(spec["sink_line_min"])
+        <= signal.line
+        <= int(spec["sink_line_max"])
+    }
+    work = next((
+        item
+        for item in plan.get("work_items", [])
+        if item.get("hunter") == spec["required_hunter"]
+        and signal_ids.intersection(item.get("target_signal_ids", []))
+    ), None)
+    if work is None:
+        return None
+    work_id = str(work["work_id"])
+    allocation = plan.get("allocation") or plan.get("budget_allocation") or {}
+    decision: dict[str, Any] | None = next((
+        item for item in allocation.get("decisions", [])
+        if item.get("work_id") == work_id
+    ), None)
+    context: dict[str, Any] = next((
+        item for item in plan.get("contexts", [])
+        if item.get("work_id") == work_id
+    ), {})
+    hydrated = set(context.get("hydrated_context_files", []))
+    return {
+        "baseline_id": spec["id"],
+        "work_id": work_id,
+        "hunter": work.get("hunter"),
+        "admission_rank": decision.get("rank") if decision else None,
+        "quota": decision.get("quota") if decision else None,
+        "context_bytes": int(context.get("bytes") or 0),
+        "hydrated_context_files": sorted(hydrated),
+        "required_paths_present": set(spec["required_paths"]).issubset(hydrated),
+        "target_signal_ids": sorted(
+            signal_ids.intersection(work.get("target_signal_ids", []))
+        ),
+    }
+
+
+def _candidate_matches_historical(
+    candidate: dict[str, Any],
+    spec: dict[str, Any],
+) -> bool:
+    sink = candidate.get("sink") or {
+        "path": candidate.get("sink_file", ""),
+        "line": candidate.get("sink_line", 0),
+    }
+    try:
+        sink_line = int(sink.get("line") or 0)
+    except (TypeError, ValueError):
+        sink_line = 0
+    searchable = " ".join((
+        str(candidate.get("title", "")),
+        str(candidate.get("weakness", candidate.get("type", ""))),
+        str(candidate.get("description", "")),
+        *(str(item) for item in candidate.get("impact", [])),
+    )).casefold()
+    normalized = re.sub(r"[_-]+", " ", searchable)
+    return (
+        sink.get("path") == spec["sink_file"]
+        and int(spec["sink_line_min"]) <= sink_line <= int(spec["sink_line_max"])
+        and any(term in normalized for term in spec["weakness_terms"])
     )
 
 

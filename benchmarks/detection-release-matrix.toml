@@ -1,0 +1,26 @@
+[matrix]
+schema_version = 1
+policy_version = "detection-release-matrix-v1"
+
+[[gate]]
+baseline_id = "zlib-cve-2023-45853"
+ci_job = "m9-zlib-regression"
+
+[[gate]]
+baseline_id = "libjpeg-turbo-issue-387"
+ci_job = "m11-3-libjpeg-alias-blind"
+
+[[gate]]
+baseline_id = "libwebp-cve-2023-4863"
+ci_job = "m11-2-libwebp-blind"
+
+[[gate]]
+baseline_id = "libcue-time-global-buffer-overflow"
+ci_job = "m11-5-libcue-specialist"
+authenticated_receipt = "libcue-m11-5-authenticated"
+
+[[gate]]
+baseline_id = "libcue-cve-2023-43641"
+ci_job = "m11-5-libcue-specialist"
+authenticated_receipt = "libcue-m11-5-authenticated"
+require_differential_reproduction = true

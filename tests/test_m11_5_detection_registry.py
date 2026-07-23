@@ -14,6 +14,7 @@ from benchmarks.detection_registry import (
 from benchmarks.run_libcue_specialist_benchmark import (
     REQUIRED_BUDGET,
     REQUIRED_LIMITS,
+    _candidate_matches_historical,
     _candidate_matches_oracle,
     _contains_exact,
     _specialist_record,
@@ -37,6 +38,7 @@ def test_registry_protects_every_current_green_detection() -> None:
         "libjpeg-turbo-issue-387",
         "libwebp-cve-2023-4863",
         "libcue-time-global-buffer-overflow",
+        "libcue-cve-2023-43641",
     )
     assert {entry.baseline_id for entry in entries} >= {
         "libcue-cve-2023-43641",
@@ -110,6 +112,28 @@ def test_libcue_candidate_requires_parser_paths_and_exact_sink() -> None:
         "impact": ["A converted negative value writes before Track.index."],
     }
     assert _candidate_matches_oracle(authenticated_shape, oracle)
+
+
+def test_libcue_historical_candidate_requires_time_sink_and_weakness() -> None:
+    historical = tomllib.loads(
+        ORACLE.read_text(encoding="utf-8")
+    )["historical_detection"]
+    matching = {
+        "title": "Unbounded sprintf causes global buffer overflow",
+        "weakness": "out_of_bounds_write",
+        "sink": {"path": "time.c", "line": 33},
+        "impact": ["A long value overflows the static buffer."],
+    }
+
+    assert _candidate_matches_historical(matching, historical)
+    assert not _candidate_matches_historical(
+        {**matching, "sink": {"path": "cd.c", "line": 347}},
+        historical,
+    )
+    assert not _candidate_matches_historical(
+        {**matching, "title": "Formatting helper", "weakness": "formatting"},
+        historical,
+    )
 
 
 def test_specialist_record_does_not_accept_bounds_as_parser_coverage() -> None:
