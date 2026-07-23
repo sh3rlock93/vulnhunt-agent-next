@@ -103,3 +103,16 @@ expected_hunter = "c-bounds-integers"
 required_paths = ["contrib/visupng/VisualPng.c"]
 weakness_terms = ["global buffer overflow", "allocation race"]
 maximum_admission_rank = 12
+
+[[detection]]
+id = "cjson-issue-800"
+status = "recovery_target"
+source_repository = "https://github.com/DaveGamble/cJSON.git"
+source_commit = "98f9eb0412067a852ec107c68e49180fe4e472dc"
+source_tree = "5e10bc6289cb29afd1847278a89359e3e9d5e1f2"
+expected_hunter = "c-parser-state"
+required_paths = ["cJSON.c"]
+weakness_terms = ["out-of-bounds read", "cursor advance"]
+scan_manifest = "benchmarks/cjson-blind-scan.toml"
+oracle = "benchmarks/oracles/cjson-issue-800.toml"
+maximum_admission_rank = 12
