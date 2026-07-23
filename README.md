@@ -201,6 +201,11 @@ billing paths. The CLI fallback has higher per-call overhead and is intended for
 local use; the Responses API remains the preferred automation path. Bedrock
 remains available as an explicit provider.
 
+The subscription fallback replaces Codex's built-in coding-agent instructions
+with a package-owned, minimal inference-adapter contract on every ephemeral
+execution. It still ignores user and repository Codex configuration, so an
+analyzed repository cannot replace the scanner's model instructions.
+
 <p align="center">
   <img src="assets/img/ui_screenshot.png" alt="Streamlit UI — mid-run" width="90%">
 </p>
