@@ -78,9 +78,19 @@ def evaluate_frozen(args: argparse.Namespace) -> dict[str, Any]:
     target_ids = _matching_target_signal_ids(graph, oracle["location"])
     specialist = _specialist_record(plan, target_ids, oracle["location"])
     candidates = _load_candidates(frozen, discovery)
+    evidence_path = frozen / "evidence.json"
+    evidence = _read_json(evidence_path) if evidence_path.is_file() else []
     matching = [
-        item for item in candidates if _candidate_matches_oracle(item, oracle)
+        item
+        for item in candidates
+        if _candidate_matches_oracle(item, oracle, evidence=evidence)
     ]
+    specialist_finding = _specialist_cursor_finding(
+        frozen,
+        specialist,
+        target_ids,
+        oracle["location"],
+    )
     audit = discovery.get("oracle_access_audit") or {}
     checks: dict[str, bool] = {
         "frozen_hashes_verified": bool(freeze_manifest.get("closed")),
@@ -138,6 +148,7 @@ def evaluate_frozen(args: argparse.Namespace) -> dict[str, Any]:
             <= REQUIRED_BUDGET["max_output_tokens"]
         )
         checks["matching_model_candidate"] = bool(matching)
+        checks["parser_specialist_confirmed_target"] = specialist_finding is not None
     else:
         checks["deterministic_without_model_credentials"] = (
             (discovery.get("model") or {}).get("adapter") == "none"
@@ -179,6 +190,7 @@ def evaluate_frozen(args: argparse.Namespace) -> dict[str, Any]:
         "target": {
             "signal_ids": sorted(target_ids),
             "specialist": specialist,
+            "specialist_finding": specialist_finding,
             "matching_candidates": matching,
         },
         "metrics": {
@@ -217,6 +229,8 @@ def _matching_target_signal_ids(
 def _candidate_matches_oracle(
     candidate: dict[str, Any],
     oracle: dict[str, Any],
+    *,
+    evidence: Sequence[dict[str, Any]] = (),
 ) -> bool:
     location = oracle["location"]
     points = _candidate_points(candidate)
@@ -226,6 +240,22 @@ def _candidate_matches_oracle(
         <= point["line"]
         <= int(location["entry_line_max"])
         for point in points
+    )
+    candidate_id = str(candidate.get("candidate_id") or "")
+    evidence_entry_present = any(
+        item.get("candidate_id") == candidate_id
+        and item.get("kind") == "reproduction"
+        and item.get("target_source_reached") is True
+        and any(
+            _normalized_path(frame.get("path")) == location["entry_file"]
+            and int(location["entry_line_min"])
+            <= _safe_int(frame.get("line"))
+            <= int(location["entry_line_max"])
+            for frame in item.get("sanitizer_frames") or []
+            if isinstance(frame, dict)
+        )
+        for item in evidence
+        if isinstance(item, dict)
     )
     sink_present = any(
         point["path"] == location["sink_file"]
@@ -247,12 +277,93 @@ def _candidate_matches_oracle(
         "read of size",
         "heap buffer overflow read",
     ))
+    terminal = (
+        not candidate.get("state")
+        or (
+            candidate.get("state") == "reportable"
+            and (candidate.get("resolution") or {}).get("disposition") == "confirmed"
+        )
+    )
     return (
-        entry_present
+        terminal
+        and (entry_present or evidence_entry_present)
         and sink_present
         and set(location["required_paths"]).issubset(paths)
         and read_oob
     )
+
+
+def _specialist_cursor_finding(
+    frozen: Path,
+    specialist: dict[str, Any] | None,
+    target_ids: set[str],
+    location: dict[str, Any],
+) -> dict[str, Any] | None:
+    if not specialist or not specialist.get("work_id"):
+        return None
+    matches = sorted(
+        frozen.glob(
+            f"*/hunters/{specialist['work_id']}/hunts/"
+            f"{location['required_hunter']}/findings.json"
+        )
+    )
+    for path in matches:
+        if not path.is_file():
+            continue
+        payload = _read_json(path)
+        dispositions = payload.get("target_dispositions") or []
+        disposition = next((
+            item
+            for item in dispositions
+            if isinstance(item, dict)
+            and item.get("target_id") in target_ids
+            and item.get("status") == "finding"
+        ), None)
+        if disposition is None:
+            continue
+        proof = disposition.get("cursor_proof") or {}
+        attempt = proof.get("boundary_attempt") or {}
+        if (
+            proof.get("policy_version") != "c-cursor-proof-v1"
+            or proof.get("conclusion") != "unsafe_reachable"
+            or attempt.get("status") != "executed"
+        ):
+            continue
+        indices = disposition.get("finding_indices") or []
+        findings = payload.get("findings") or []
+        for index in indices:
+            if not isinstance(index, int) or not 0 <= index < len(findings):
+                continue
+            finding = findings[index]
+            if not isinstance(finding, dict):
+                continue
+            sink_line = _safe_int(finding.get("sink_line"))
+            if (
+                finding.get("sink_file") == location["sink_file"]
+                and int(location["sink_line_min"])
+                <= sink_line
+                <= int(location["sink_line_max"])
+            ):
+                return {
+                    "work_id": specialist["work_id"],
+                    "hunter": location["required_hunter"],
+                    "target_id": disposition["target_id"],
+                    "title": finding.get("title"),
+                    "sink": f"{finding['sink_file']}:{sink_line}",
+                    "cursor_proof": proof,
+                }
+    return None
+
+
+def _normalized_path(value: Any) -> str:
+    return str(value or "").replace("\\", "/").rsplit("/", 1)[-1]
+
+
+def _safe_int(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _candidate_points(candidate: dict[str, Any]) -> list[dict[str, Any]]:

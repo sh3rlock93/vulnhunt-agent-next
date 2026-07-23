@@ -24,3 +24,9 @@ baseline_id = "libcue-cve-2023-43641"
 ci_job = "m11-5-libcue-specialist"
 authenticated_receipt = "libcue-m11-5-authenticated"
 require_differential_reproduction = true
+
+[[gate]]
+baseline_id = "cjson-issue-800"
+ci_job = "m11-7-cjson-cursor"
+authenticated_receipt = "cjson-m11-7-authenticated"
+require_differential_reproduction = true

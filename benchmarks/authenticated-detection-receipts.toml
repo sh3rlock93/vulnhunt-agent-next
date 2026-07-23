@@ -34,3 +34,27 @@ paths = ["cue_scanner.l", "cue_parser.y", "cd.c"]
 sink = "cd.c:347"
 candidate_present = true
 differential_reproduction = true
+
+[[run]]
+id = "cjson-m11-7-authenticated"
+source_repository = "https://github.com/DaveGamble/cJSON.git"
+source_commit = "98f9eb0412067a852ec107c68e49180fe4e472dc"
+source_tree = "5e10bc6289cb29afd1847278a89359e3e9d5e1f2"
+adapter = "codex_subscription"
+model_id = "gpt-5.6-sol"
+frozen_root_sha256 = "2984ebf579b40af9db27dc0c1cec3bae0d98e20a82762cb91c3594026bea009c"
+sessions = 12
+input_tokens = 1191295
+cache_read_tokens = 329472
+output_tokens = 27099
+complete = true
+oracle_isolated = true
+
+[[run.detection]]
+baseline_id = "cjson-issue-800"
+candidate_id = "cand_verified_3f59aa2bebb8d1b2bc979873b6"
+hunter = "c-parser-state"
+paths = ["cJSON.c"]
+sink = "cJSON.c:787"
+candidate_present = true
+differential_reproduction = true
