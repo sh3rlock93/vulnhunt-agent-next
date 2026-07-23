@@ -18,14 +18,23 @@ from .constraints import extract_constraint_facts
 from .capacity import build_local_capacity_summary, extract_capacity_facts
 from .capacity_summaries import CAPACITY_SUMMARY_POLICY, propagate_capacity_summaries
 from .capacity_chains import build_capacity_risk_chains
+from .cursor import (
+    CursorMacro,
+    build_cursor_transition_chains,
+    extract_cursor_facts,
+    extract_cursor_macros,
+)
 from .models import (
     CAnalysisGraph,
     CapacityCallSite,
     CapacityFact,
     ConstraintFact,
+    CursorFact,
+    CursorTransitionChain,
     EdgeKind,
     GraphEdge,
     GraphNode,
+    GuardState,
     FunctionCapacitySummary,
     NodeKind,
     RiskChain,
@@ -132,6 +141,7 @@ class _Extracted:
     constraint_facts: tuple[ConstraintFact, ...] = ()
     capacity_facts: tuple[CapacityFact, ...] = ()
     capacity_summary: FunctionCapacitySummary | None = None
+    cursor_facts: tuple[CursorFact, ...] = ()
 
 
 def build_c_analysis_graph(repo: Path, source_files: list[str]) -> CAnalysisGraph:
@@ -170,6 +180,10 @@ def build_c_analysis_graph(repo: Path, source_files: list[str]) -> CAnalysisGrap
     )
     capacity_facts = sorted(
         (fact for item in extracted for fact in item.capacity_facts),
+        key=lambda item: item.fact_id,
+    )
+    cursor_facts = sorted(
+        (fact for item in extracted for fact in item.cursor_facts),
         key=lambda item: item.fact_id,
     )
     local_capacity_summaries = tuple(sorted(
@@ -248,11 +262,6 @@ def build_c_analysis_graph(repo: Path, source_files: list[str]) -> CAnalysisGrap
         ):
             entrypoints.append(node.node_id)
 
-    critical_sinks = [
-        signal.signal_id
-        for signal in signals
-        if signal.role is SignalRole.SINK and signal.risk >= 4
-    ]
     capacity_calls = sorted(
         {item.call_id: item for item in capacity_calls}.values(),
         key=lambda item: item.call_id,
@@ -269,6 +278,21 @@ def build_c_analysis_graph(repo: Path, source_files: list[str]) -> CAnalysisGrap
         edges=tuple(edges),
         entrypoint_ids=tuple(sorted(set(entrypoints))),
     )
+    cursor_transition_chains = build_cursor_transition_chains(
+        facts=tuple(cursor_facts),
+        calls=tuple(capacity_calls),
+        summaries=capacity_summaries,
+    )
+    signals.extend(_cursor_signals(cursor_facts, cursor_transition_chains))
+    signals = sorted(
+        {item.signal_id: item for item in signals}.values(),
+        key=lambda item: item.signal_id,
+    )
+    critical_sinks = [
+        signal.signal_id
+        for signal in signals
+        if signal.role is SignalRole.SINK and signal.risk >= 4
+    ]
     return CAnalysisGraph(
         nodes=tuple(nodes),
         edges=tuple(edges),
@@ -281,6 +305,8 @@ def build_c_analysis_graph(repo: Path, source_files: list[str]) -> CAnalysisGrap
         capacity_calls=tuple(capacity_calls),
         capacity_summaries=capacity_summaries,
         capacity_risk_chains=capacity_risk_chains,
+        cursor_facts=tuple(cursor_facts),
+        cursor_transition_chains=cursor_transition_chains,
         unresolved_calls=tuple(sorted(
             unresolved,
             key=lambda item: (item.path, item.line, item.source, item.callee),
@@ -291,10 +317,15 @@ def build_c_analysis_graph(repo: Path, source_files: list[str]) -> CAnalysisGrap
 def _extract_c_file(parser: Parser, repo: Path, relative: str) -> list[_Extracted]:
     source = (repo / relative).read_bytes()
     root = parser.parse(source).root_node
+    cursor_macros = extract_cursor_macros(source)
     return [
         extracted
         for region in c_function_regions(root, source)
-        if (extracted := _extract_c_function(relative, source, region)) is not None
+        if (
+            extracted := _extract_c_function(
+                relative, source, region, cursor_macros=cursor_macros
+            )
+        ) is not None
     ]
 
 
@@ -302,6 +333,8 @@ def _extract_c_function(
     relative: str,
     source: bytes,
     region: CFunctionRegion,
+    *,
+    cursor_macros: dict[str, CursorMacro] | None = None,
 ) -> _Extracted | None:
     declarator = region.declarator
     name = _c_function_name(declarator, source)
@@ -441,6 +474,15 @@ def _extract_c_function(
         body_nodes=region.body_nodes,
         facts=capacity_facts,
     )
+    cursor_facts = extract_cursor_facts(
+        path=relative,
+        node_id=node_id,
+        function=name,
+        source=source,
+        function_node=region.container,
+        body_nodes=region.body_nodes,
+        macros=cursor_macros or {},
+    )
     return _Extracted(
         node=node,
         calls=tuple(call_sites),
@@ -449,6 +491,7 @@ def _extract_c_function(
         constraint_facts=constraint_facts,
         capacity_facts=capacity_facts,
         capacity_summary=capacity_summary,
+        cursor_facts=cursor_facts,
     )
 
 
@@ -736,6 +779,43 @@ def _signal(
         detail=detail,
         risk=risk,
     )
+
+
+def _cursor_signals(
+    facts: list[CursorFact],
+    chains: tuple[CursorTransitionChain, ...],
+) -> list[SecuritySignal]:
+    by_read: dict[str, list[CursorTransitionChain]] = {}
+    for chain in chains:
+        by_read.setdefault(chain.read_fact_id, []).append(chain)
+    signals = []
+    for fact in facts:
+        related = by_read.get(fact.fact_id, [])
+        if not related:
+            continue
+        unsafe = [
+            chain for chain in related
+            if chain.guard_state is not GuardState.DOMINATES
+        ]
+        selected = max(unsafe or related, key=lambda chain: (chain.score, chain.chain_id))
+        guarded = not unsafe
+        signals.append(_signal(
+            fact.node_id,
+            fact.path,
+            fact.line,
+            SignalRole.SINK,
+            "cursor_index_read_guarded" if guarded else "cursor_index_read",
+            "cursor-backed subscript read",
+            2 if guarded else 5,
+            (
+                f"cursor={selected.subject}; bound={selected.bound}; "
+                f"required_guard_index={selected.required_access_index}; "
+                f"observed_guard_index={selected.observed_guard_index}; "
+                f"guard_state={selected.guard_state.value}; "
+                f"chain={selected.chain_id}; expression={fact.evidence[:160]}"
+            ),
+        ))
+    return signals
 
 
 def _edge(

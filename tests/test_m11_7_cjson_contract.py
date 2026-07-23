@@ -94,4 +94,4 @@ def test_neutral_cursor_fixtures_do_not_embed_target_signatures() -> None:
     assert "parse_string" not in vulnerable + guarded
     assert "parse_object" not in vulnerable + guarded
     assert "HAS(view, 1)" not in vulnerable
-    assert "HAS(view, 1)" in guarded
+    assert "MISSING(view, 1)" in guarded

@@ -49,6 +49,12 @@ class CapacityFactKind(StrEnum):
     GROWTH = "growth"
 
 
+class CursorFactKind(StrEnum):
+    READ = "read"
+    ADVANCE = "advance"
+    GUARD = "guard"
+
+
 class CapacityReturnKind(StrEnum):
     NONE = "none"
     STATUS = "status"
@@ -240,6 +246,52 @@ class CapacityRiskChain(AnalysisModel):
     rationale: str = Field(min_length=1)
 
 
+class CursorFact(AnalysisModel):
+    fact_id: str = Field(pattern=r"^cursor_[0-9a-f]{20}$")
+    policy_version: str = "c-cursor-access-v1"
+    kind: CursorFactKind
+    node_id: str = Field(min_length=1)
+    path: str = Field(min_length=1)
+    function: str = Field(min_length=1)
+    line: int = Field(ge=1)
+    subject: str = Field(min_length=1)
+    bound: str = Field(min_length=1)
+    access_index: str = ""
+    delta: int = 0
+    callee: str = ""
+    macro: str = ""
+    control: str = Field(
+        default="none",
+        pattern=r"^(?:none|loop_entry|reject_fallthrough|positive_branch)$",
+    )
+    controlled_start_line: int = Field(default=0, ge=0)
+    controlled_end_line: int = Field(default=0, ge=0)
+    evidence: str = Field(min_length=1)
+    confidence: str = Field(pattern=r"^(?:low|medium|high)$")
+
+
+class CursorTransitionChain(AnalysisModel):
+    chain_id: str = Field(pattern=r"^cursor_transition_[0-9a-f]{20}$")
+    policy_version: str = "c-cursor-transition-v1"
+    caller_node_id: str = Field(min_length=1)
+    reader_node_id: str = Field(min_length=1)
+    paths: tuple[str, ...] = Field(min_length=1)
+    fact_ids: tuple[str, ...] = Field(min_length=1)
+    guard_fact_ids: tuple[str, ...] = ()
+    advance_fact_id: str = Field(pattern=r"^cursor_[0-9a-f]{20}$")
+    read_fact_id: str = Field(pattern=r"^cursor_[0-9a-f]{20}$")
+    call_line: int = Field(ge=1)
+    subject: str = Field(min_length=1)
+    bound: str = Field(min_length=1)
+    required_access_index: int = Field(ge=0)
+    observed_guard_index: int | None = Field(default=None, ge=0)
+    guard_state: GuardState
+    evidence_lines: dict[str, tuple[int, ...]] = Field(default_factory=dict)
+    score: int = Field(ge=0, le=100)
+    confidence: str = Field(pattern=r"^(?:low|medium|high)$")
+    rationale: str = Field(min_length=1)
+
+
 class CAnalysisGraph(AnalysisModel):
     schema_version: int = 2
     language: str = "c"
@@ -254,6 +306,8 @@ class CAnalysisGraph(AnalysisModel):
     capacity_calls: tuple[CapacityCallSite, ...] = ()
     capacity_summaries: tuple[FunctionCapacitySummary, ...] = ()
     capacity_risk_chains: tuple[CapacityRiskChain, ...] = ()
+    cursor_facts: tuple[CursorFact, ...] = ()
+    cursor_transition_chains: tuple[CursorTransitionChain, ...] = ()
     unresolved_calls: tuple[UnresolvedCall, ...] = ()
 
 

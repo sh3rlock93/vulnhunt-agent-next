@@ -7,7 +7,6 @@ typedef struct {
 } stream_view;
 
 #define HAS(view, n) ((view)->position + (n) < (view)->length)
-#define MISSING(view, n) (!HAS(view, n))
 #define CURRENT(view) ((view)->data + (view)->position)
 
 static int read_label(stream_view *view)
@@ -17,14 +16,9 @@ static int read_label(stream_view *view)
 
 int read_record(stream_view *view)
 {
-    do {
-        if (MISSING(view, 1)) {
-            return 0;
-        }
-        view->position++;
-        if (!read_label(view)) {
-            return 0;
-        }
-    } while (HAS(view, 0) && CURRENT(view)[0] == ',');
-    return 1;
+    if (HAS(view, 1)) {
+        return 0;
+    }
+    view->position++;
+    return read_label(view);
 }
