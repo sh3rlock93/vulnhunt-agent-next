@@ -530,6 +530,14 @@ Reviewer는 다음 artifact를 받는다.
 
 Reviewer는 임의 명령을 직접 실행하지 않고 `request_reproduction_variant`를 통해 Reproducer에 추가 실험을 요청한다. 이로써 판단과 실행 권한을 분리한다.
 
+Reviewer 요청은 Reproducer로 바로 전달하지 않는다. `experiment-planning-v1`
+계층이 immutable PoC와 요청한 실행 topology를 대조해 argument-only,
+environment-only, new-harness, fixed-revision 중 하나로 계획한다. 현재 PoC가
+인자를 소비하지 않거나 새로운 network/process topology가 필요한 경우에는
+인자를 임의로 덧붙여 실행하지 않고 typed deferral로 남긴다. 실행 가능한 계획도
+Variant Compiler 결과가 승인된 mutation boundary와 일치하는지 확인한 후에만
+Reproducer로 전달한다.
+
 ### Consensus
 
 기본 정책:

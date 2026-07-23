@@ -24,6 +24,11 @@ from vulnhunt_agent.reproduction.service import (
     ReproductionStatus,
     ReproducerService,
 )
+from vulnhunt_agent.reproduction.planning import (
+    CapabilityAwareExperimentPlanner,
+    ExperimentPlanStatus,
+    ExperimentStrategy,
+)
 from vulnhunt_agent.reproduction.variants import (
     LLMVariantCompiler,
     ReproductionVariantExecutor,
@@ -65,6 +70,19 @@ class SafeInputCompiler:
                     type=OracleType.STDOUT_REGEX,
                     pattern=r"SAFE_CONTROL=1",
                 ),
+            ),
+        )
+
+
+class UnknownOptionCompiler:
+    async def compile(self, request, base):
+        return compile_variant_spec(
+            request,
+            base,
+            VariantExecutionPatch(
+                argv=(*base.argv, "--not-implemented"),
+                env_overrides={},
+                oracle=base.oracle,
             ),
         )
 
@@ -276,6 +294,160 @@ async def test_variant_executor_leases_runs_twice_and_preserves_finding_state(
     repository.close()
 
 
+async def test_experiment_planner_rejects_ignored_argv_without_running(
+    tmp_path,
+) -> None:
+    repository, artifacts, spec = _prepared_candidate(
+        tmp_path,
+        poc_source="print('LEAKED_SECRET=1')\n",
+    )
+    await ReproducerService(
+        repository,
+        artifacts,
+        FakeSandboxBackend([
+            ExecResult(exit_code=0, stdout="LEAKED_SECRET=1", stderr=""),
+            ExecResult(exit_code=0, stdout="LEAKED_SECRET=1", stderr=""),
+        ]),
+    ).reproduce(spec)
+    request = ReproductionVariantRequest(
+        request_id="variant-ignored-argv",
+        run_id="run-1",
+        candidate_id="cand-1",
+        reviewer="reviewer-a",
+        base_reproduction_group=spec.reproduction_id,
+        variant_type=ReproductionVariantType.ALTERNATE_TRIGGER,
+        rationale="Exercise a separate input path.",
+        requested_change="Use the PoC alternate trigger input.",
+    )
+    EvidenceReviewCoordinator(repository, artifacts).request_variant(request)
+    backend = FakeSandboxBackend([])
+
+    result = await ReproductionVariantExecutor(
+        repository,
+        artifacts,
+        backend,
+        SafeInputCompiler(),
+    ).execute(request)
+
+    assert result.plan is not None
+    assert result.plan.status is ExperimentPlanStatus.REQUIRES_HARNESS
+    assert result.plan.strategy is ExperimentStrategy.NEW_HARNESS
+    assert "does not consume command-line arguments" in result.plan.rationale
+    assert backend.jobs == []
+    tasks = repository.list_tasks("run-1")
+    plan_task = next(item for item in tasks if item["task_type"] == "experiment_plan")
+    variant_task = next(
+        item for item in tasks if item["task_type"] == "reproduction_variant"
+    )
+    assert plan_task["status"] == "requires_harness"
+    assert variant_task["status"] == "planning_deferred"
+    repository.close()
+
+
+async def test_experiment_planner_rejects_missing_network_topology(
+    tmp_path,
+) -> None:
+    repository, artifacts, spec = _prepared_candidate(tmp_path)
+    request = ReproductionVariantRequest(
+        request_id="variant-real-tcp",
+        run_id="run-1",
+        candidate_id="cand-1",
+        reviewer="reviewer-a",
+        base_reproduction_group=spec.reproduction_id,
+        variant_type=ReproductionVariantType.ALTERNATE_TRIGGER,
+        rationale="Prove remote reachability.",
+        requested_change=(
+            "Run an end-to-end real TCP server and a separate client; the harness must "
+            "not call the sink directly."
+        ),
+    )
+
+    plan = await CapabilityAwareExperimentPlanner(artifacts).plan(request, spec)
+
+    assert plan.status is ExperimentPlanStatus.REQUIRES_HARNESS
+    assert set(plan.required_capabilities) >= {
+        "separate_transport_client",
+        "server_receive_path",
+    }
+    repository.close()
+
+
+async def test_experiment_conformance_rejects_unimplemented_compiled_option(
+    tmp_path,
+) -> None:
+    repository, artifacts, spec = _prepared_candidate(tmp_path)
+    await ReproducerService(
+        repository,
+        artifacts,
+        FakeSandboxBackend([
+            ExecResult(exit_code=0, stdout="LEAKED_SECRET=1", stderr=""),
+            ExecResult(exit_code=0, stdout="LEAKED_SECRET=1", stderr=""),
+        ]),
+    ).reproduce(spec)
+    request = ReproductionVariantRequest(
+        request_id="variant-unimplemented-option",
+        run_id="run-1",
+        candidate_id="cand-1",
+        reviewer="reviewer-a",
+        base_reproduction_group=spec.reproduction_id,
+        variant_type=ReproductionVariantType.SAFE_INPUT,
+        rationale="Run a negative control.",
+        requested_change="Use the existing PoC safe input.",
+    )
+    EvidenceReviewCoordinator(repository, artifacts).request_variant(request)
+    backend = FakeSandboxBackend([])
+
+    result = await ReproductionVariantExecutor(
+        repository,
+        artifacts,
+        backend,
+        UnknownOptionCompiler(),
+    ).execute(request)
+
+    assert result.plan is not None
+    assert result.plan.status is ExperimentPlanStatus.UNSUPPORTED
+    assert "does not implement compiled options" in result.plan.rationale
+    assert backend.jobs == []
+    repository.close()
+
+
+async def test_experiment_planner_routes_config_and_fixed_revision_controls(
+    tmp_path,
+) -> None:
+    repository, artifacts, spec = _prepared_candidate(tmp_path)
+    planner = CapabilityAwareExperimentPlanner(artifacts)
+    common = {
+        "request_id": "variant-routing",
+        "run_id": "run-1",
+        "candidate_id": "cand-1",
+        "reviewer": "reviewer-a",
+        "base_reproduction_group": spec.reproduction_id,
+        "rationale": "Resolve the remaining uncertainty.",
+        "requested_change": "Run a bounded control.",
+    }
+
+    config = await planner.plan(
+        ReproductionVariantRequest(
+            **common,
+            variant_type=ReproductionVariantType.CONFIG_TOGGLE,
+        ),
+        spec,
+    )
+    fixed = await planner.plan(
+        ReproductionVariantRequest(
+            **{**common, "request_id": "variant-fixed"},
+            variant_type=ReproductionVariantType.FIXED_REVISION,
+        ),
+        spec,
+    )
+
+    assert config.status is ExperimentPlanStatus.READY
+    assert config.strategy is ExperimentStrategy.ENVIRONMENT_VARIANT
+    assert fixed.status is ExperimentPlanStatus.REQUIRES_SNAPSHOT
+    assert fixed.strategy is ExperimentStrategy.FIXED_REVISION
+    repository.close()
+
+
 def test_variant_compiler_cannot_change_executable_or_reuse_fixed_snapshot(
     tmp_path,
 ) -> None:
@@ -450,7 +622,16 @@ async def test_strict_report_rejects_tampered_reproduction_artifact(tmp_path) ->
     repository.close()
 
 
-def _prepared_candidate(tmp_path) -> tuple[
+def _prepared_candidate(
+    tmp_path,
+    *,
+    poc_source: str = (
+        "import os, sys\n"
+        "safe = '--safe-control' in sys.argv\n"
+        "mode = os.environ.get('MODE', '')\n"
+        "print('LEAKED_SECRET=1' if sys.argv or safe or mode else '')\n"
+    ),
+) -> tuple[
     SqliteRepository, ArtifactStore, ReproductionSpec
 ]:
     artifacts = ArtifactStore(tmp_path / "artifacts")
@@ -458,7 +639,7 @@ def _prepared_candidate(tmp_path) -> tuple[
     source.mkdir()
     (source / "app.py").write_text("print('target loaded')\n")
     snapshot = SnapshotBuilder(artifacts).create(source)
-    poc = artifacts.put_text("print('LEAKED_SECRET=1')\n", "text/x-python")
+    poc = artifacts.put_text(poc_source, "text/x-python")
 
     repository = SqliteRepository(tmp_path / "state.db")
     repository.save_run(RunRecord(run_id="run-1"))
