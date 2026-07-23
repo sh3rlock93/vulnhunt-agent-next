@@ -84,6 +84,7 @@ def context_for_work_item(
         support_limit=3,
     )
     capacity_chains = _attach_capacity_evidence_facts(graph, capacity_chains)
+    cursor_chains = matching_cursor_transition_chains(graph, work_item)[:4]
     selected_ids = set(work_item.slice_ids)
     matching = [
         item for item in plan.get("slices", [])
@@ -135,6 +136,12 @@ def context_for_work_item(
             capacity_chains[0].get("policy_version", "") if capacity_chains else ""
         ),
         "capacity_risk_chains": capacity_chains,
+        "cursor_transition_policy_version": (
+            cursor_chains[0].get("policy_version", "") if cursor_chains else ""
+        ),
+        "cursor_transition_chains": [
+            _compact_cursor_transition(item) for item in cursor_chains
+        ],
         "change_focus": {
             "target_node_ids": list(work_item.target_node_ids),
             "target_signal_ids": list(work_item.target_signal_ids),
@@ -165,6 +172,56 @@ def matching_capacity_risk_chains(
         target_signal_ids=set(work_item.target_signal_ids),
         target_node_ids=set(work_item.target_node_ids),
     )
+
+
+def matching_cursor_transition_chains(
+    graph: dict,
+    work_item: HunterWorkItem,
+) -> list[dict]:
+    signals = {item["signal_id"]: item for item in graph.get("signals", [])}
+    target_nodes = set(work_item.target_node_ids)
+    target_nodes.update(
+        signals[signal_id]["node_id"]
+        for signal_id in work_item.target_signal_ids
+        if signal_id in signals
+    )
+    matching = [
+        chain for chain in graph.get("cursor_transition_chains", [])
+        if chain.get("reader_node_id") in target_nodes
+        or chain.get("caller_node_id") in target_nodes
+    ]
+    guard_rank = {"absent": 0, "partial": 1, "unknown": 2, "dominates": 3}
+    return sorted(
+        matching,
+        key=lambda item: (
+            guard_rank.get(str(item.get("guard_state", "unknown")), 2),
+            -int(item.get("score", 0)),
+            str(item.get("chain_id", "")),
+        ),
+    )
+
+
+def _compact_cursor_transition(chain: dict) -> dict:
+    return {
+        field: chain.get(field)
+        for field in (
+            "chain_id",
+            "policy_version",
+            "caller_node_id",
+            "reader_node_id",
+            "paths",
+            "guard_state",
+            "subject",
+            "bound",
+            "required_access_index",
+            "observed_guard_index",
+            "call_line",
+            "evidence_lines",
+            "score",
+            "confidence",
+            "rationale",
+        )
+    }
 
 
 def _attach_capacity_evidence_facts(

@@ -24,6 +24,13 @@ from .context_cache import (
     context_cache_key,
 )
 from .constraints import CONSTRAINT_POLICY, extract_constraint_facts
+from .cursor import (
+    CURSOR_ACCESS_POLICY,
+    CURSOR_TRANSITION_POLICY,
+    build_cursor_transition_chains,
+    extract_cursor_facts,
+    extract_cursor_macros,
+)
 from .incremental import INCREMENTAL_POLICY, build_incremental_scope
 from .scope import SCAN_SCOPE_POLICY, build_scan_scope
 from .models import (
@@ -37,6 +44,9 @@ from .models import (
     CapacityReturnKind,
     ConstraintFact,
     ConstraintKind,
+    CursorFact,
+    CursorFactKind,
+    CursorTransitionChain,
     CoveragePlan,
     EdgeKind,
     GraphEdge,
@@ -64,6 +74,9 @@ __all__ = [
     "CapacityReturnKind",
     "ConstraintFact",
     "ConstraintKind",
+    "CursorFact",
+    "CursorFactKind",
+    "CursorTransitionChain",
     "CoveragePlan",
     "EdgeKind",
     "GraphEdge",
@@ -91,6 +104,11 @@ __all__ = [
     "build_scan_scope",
     "context_cache_key",
     "extract_constraint_facts",
+    "CURSOR_ACCESS_POLICY",
+    "CURSOR_TRANSITION_POLICY",
+    "extract_cursor_macros",
+    "extract_cursor_facts",
+    "build_cursor_transition_chains",
     "CAPACITY_FACT_POLICY",
     "MAX_ALIAS_HOPS",
     "MAX_CAPACITY_TRANSFORMS",
