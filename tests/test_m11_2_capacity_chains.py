@@ -134,7 +134,7 @@ def test_capacity_priority_class_precedes_legacy_raw_score(tmp_path) -> None:
         native_full_scan=True,
     )
 
-    assert allocation.policy_version == "c-budget-v7"
+    assert allocation.policy_version == "c-budget-v8"
     assert allocation.admitted_work_ids == (capacity_work.work_id,)
     assert allocation.ranking[0].priority_class == (
         "complete_unchecked_capacity_path"

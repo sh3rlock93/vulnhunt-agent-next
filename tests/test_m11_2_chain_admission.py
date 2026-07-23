@@ -77,7 +77,7 @@ def _chain(
     )
 
 
-def test_one_capacity_root_is_one_bounds_first_admission_unit() -> None:
+def test_one_capacity_root_preserves_distinct_hunter_specialists() -> None:
     chain = _chain()
     items = (
         _work(1, "decode.c", "allocation", "c-memory-lifetime"),
@@ -98,20 +98,26 @@ def test_one_capacity_root_is_one_bounds_first_admission_unit() -> None:
         native_full_scan=True,
     )
 
-    admitted = next(item for item in items if item.work_id in first.admitted_work_ids)
+    admitted = [item for item in items if item.work_id in first.admitted_work_ids]
     assert first == second
-    assert first.policy_version == "c-budget-v7"
-    assert admitted.hunter == "c-bounds-integers"
-    assert admitted.seed_file == "decode.c"
+    assert first.policy_version == "c-budget-v8"
+    assert {item.hunter for item in admitted} == {
+        "c-bounds-integers",
+        "c-memory-lifetime",
+    }
+    representative = next(
+        item for item in admitted if item.hunter == "c-bounds-integers"
+    )
+    assert representative.seed_file == "decode.c"
     assert first.chain_critical_slots == 1
-    assert len(first.admitted_work_ids) == 1
+    assert len(first.admitted_work_ids) == 2
     assert set(first.deferred.values()) == {"duplicate_capacity_chain"}
     assert all(
         record.disposition == "duplicate_deferred"
         for record in first.ranking
         if record.work_id not in first.admitted_work_ids
     )
-    assert first.duplicate_coverage_deferred == 2
+    assert first.duplicate_coverage_deferred == 1
     assert len({record.logical_chain_group for record in first.ranking}) == 1
     assert first.ranking[0].logical_chain_group == chain.root_cause_group
     assert len(first.capacity_units) == 1
@@ -119,7 +125,7 @@ def test_one_capacity_root_is_one_bounds_first_admission_unit() -> None:
     assert unit.policy_version == "capacity-admission-unit-v1"
     assert unit.root_cause_group == chain.root_cause_group
     assert unit.representative_chain_id == chain.chain_id
-    assert unit.representative_work_id == admitted.work_id
+    assert unit.representative_work_id == representative.work_id
     assert unit.chain_ids == (chain.chain_id,)
     assert unit.work_ids == tuple(sorted(item.work_id for item in items))
     assert unit.required_paths == chain.paths
@@ -129,6 +135,27 @@ def test_one_capacity_root_is_one_bounds_first_admission_unit() -> None:
         for record in first.ranking
         if record.work_id != unit.representative_work_id
     )
+
+
+def test_distinct_capacity_specialist_is_budget_deferred_not_deduplicated() -> None:
+    chain = _chain()
+    bounds = _work(1, "decode.c", "allocation", "c-bounds-integers")
+    lifetime = _work(2, "decode.c", "allocation", "c-memory-lifetime")
+
+    allocation = allocate_work_items(
+        (lifetime, bounds),
+        BudgetPolicy(max_hunter_sessions=1, max_retries_per_work_item=0),
+        capacity_chains=(chain,),
+        native_full_scan=True,
+    )
+
+    assert allocation.admitted_work_ids == (bounds.work_id,)
+    assert allocation.deferred == {lifetime.work_id: "max_hunter_sessions"}
+    lifetime_record = next(
+        record for record in allocation.ranking
+        if record.work_id == lifetime.work_id
+    )
+    assert lifetime_record.disposition == "budget_deferred"
 
 
 def test_complete_priority_is_eligible_without_fixed_score_threshold() -> None:

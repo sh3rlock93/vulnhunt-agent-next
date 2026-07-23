@@ -16,7 +16,7 @@ from ..analysis.models import CapacityPriorityClass, CapacityRiskChain, RiskChai
 from ..domain.schemas import BudgetPolicy, BudgetUsage, HunterWorkItem
 
 LEGACY_BUDGET_POLICY = "hunter-budget-allocation-v1"
-NATIVE_DIVERSE_POLICY = "c-budget-v7"
+NATIVE_DIVERSE_POLICY = "c-budget-v8"
 NATIVE_CHAIN_SHARE = 0.50
 NATIVE_SEED_DIVERSITY_SHARE = 0.25
 NATIVE_HIGH_RISK_SHARE = 1 / 6
@@ -648,7 +648,7 @@ def _allocate_native_diverse(
     selected_components: set[str] = set()
     selected_seed_families: set[str] = set()
     selected_coverage_groups: set[str] = set()
-    selected_logical_chain_groups: set[str] = set()
+    selected_specialist_chain_groups: set[tuple[str, str]] = set()
     seed_counts: dict[str, int] = {}
     decisions: list[AdmissionDecision] = []
     cap_exceptions = 0
@@ -675,9 +675,10 @@ def _allocate_native_diverse(
             and candidate.coverage_group in selected_coverage_groups
         ):
             return False
+        specialist_chain_groups = _specialist_chain_groups(candidate)
         if (
-            candidate.logical_chain_groups
-            and set(candidate.logical_chain_groups) <= selected_logical_chain_groups
+            specialist_chain_groups
+            and specialist_chain_groups <= selected_specialist_chain_groups
         ):
             return False
         novelty = 10 if candidate.component not in selected_components else 0
@@ -697,7 +698,7 @@ def _allocate_native_diverse(
         selected_components.add(candidate.component)
         selected_seed_families.add(candidate.seed_family)
         selected_coverage_groups.add(candidate.coverage_group)
-        selected_logical_chain_groups.update(candidate.logical_chain_groups)
+        selected_specialist_chain_groups.update(specialist_chain_groups)
         seed_counts[candidate.seed_family] = (
             seed_counts.get(candidate.seed_family, 0) + 1
         )
@@ -811,7 +812,10 @@ def _allocate_native_diverse(
     for candidate in ordered:
         if len(selected) >= capacity:
             break
-        if candidate.coverage_group in selected_coverage_groups:
+        if (
+            not candidate.logical_chain_groups
+            and candidate.coverage_group in selected_coverage_groups
+        ):
             duplicate_work_ids.add(candidate.item.work_id)
             continue
         before_diversity = len(selected_seed_families) < diversity_goal
@@ -837,8 +841,9 @@ def _allocate_native_diverse(
         candidate.item.work_id: (
             "duplicate_capacity_chain"
             if (
-                candidate.logical_chain_groups
-                and set(candidate.logical_chain_groups) <= selected_logical_chain_groups
+                _specialist_chain_groups(candidate)
+                and _specialist_chain_groups(candidate)
+                <= selected_specialist_chain_groups
             )
             else "duplicate_coverage_group"
             if candidate.item.work_id in duplicate_work_ids
@@ -1046,6 +1051,16 @@ def _canonicalize_capacity_candidates(
 def _capacity_unit_id(root_cause_group: str) -> str:
     canonical = f"{CAPACITY_ADMISSION_UNIT_POLICY}\0{root_cause_group}"
     return "capacity_unit_" + hashlib.sha256(canonical.encode()).hexdigest()[:20]
+
+
+def _specialist_chain_groups(
+    candidate: _AdmissionCandidate,
+) -> set[tuple[str, str]]:
+    """Keep capacity cost units shared without conflating Hunter expertise."""
+    return {
+        (group, candidate.item.hunter)
+        for group in candidate.logical_chain_groups
+    }
 
 
 def _native_ranking_records(
