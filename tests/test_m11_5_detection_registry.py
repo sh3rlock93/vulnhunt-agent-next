@@ -39,6 +39,7 @@ def test_registry_protects_every_current_green_detection() -> None:
         "libwebp-cve-2023-4863",
         "libcue-time-global-buffer-overflow",
         "libcue-cve-2023-43641",
+        "cjson-issue-800",
     )
     assert {entry.baseline_id for entry in entries} >= {
         "libcue-cve-2023-43641",

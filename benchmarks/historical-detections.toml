@@ -106,7 +106,7 @@ maximum_admission_rank = 12
 
 [[detection]]
 id = "cjson-issue-800"
-status = "recovery_target"
+status = "must_detect"
 source_repository = "https://github.com/DaveGamble/cJSON.git"
 source_commit = "98f9eb0412067a852ec107c68e49180fe4e472dc"
 source_tree = "5e10bc6289cb29afd1847278a89359e3e9d5e1f2"
@@ -115,4 +115,5 @@ required_paths = ["cJSON.c"]
 weakness_terms = ["out-of-bounds read", "cursor advance"]
 scan_manifest = "benchmarks/cjson-blind-scan.toml"
 oracle = "benchmarks/oracles/cjson-issue-800.toml"
+last_known_good_scanner_commit = "3d273c17c3ab88ff373ca7bb9a4df7577628ea8f"
 maximum_admission_rank = 12

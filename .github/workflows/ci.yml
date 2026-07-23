@@ -374,14 +374,76 @@ jobs:
           --fixed-repo .benchmark/libcue-m11-5-fixed
           --output .benchmark/m11-5-evaluation
 
+  m11-7-cjson-cursor:
+    name: M11.7 cJSON cursor-state recovery gates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install project
+        run: python -m pip install -e .
+      - name: Configure default model catalog
+        run: cp settings.example.toml settings.toml
+      - name: Checkout pinned vulnerable cJSON tree
+        uses: actions/checkout@v6
+        with:
+          repository: DaveGamble/cJSON
+          ref: 98f9eb0412067a852ec107c68e49180fe4e472dc
+          path: .benchmark/cjson-m11-7-vulnerable
+      - name: Checkout pinned fixed cJSON tree
+        uses: actions/checkout@v6
+        with:
+          repository: DaveGamble/cJSON
+          ref: 3ef4e4e730e5efd381be612df41e1ff3f5bb3c32
+          path: .benchmark/cjson-m11-7-fixed
+      - name: Discover without oracle input
+        run: >-
+          python benchmarks/run_cjson_cursor_benchmark.py discover
+          --repo .benchmark/cjson-m11-7-vulnerable
+          --scan-manifest benchmarks/cjson-blind-scan.toml
+          --output .benchmark/m11-7-discovery
+          --mode deterministic
+      - name: Freeze discovery artifacts
+        run: >-
+          python benchmarks/run_cjson_cursor_benchmark.py freeze
+          --discovery .benchmark/m11-7-discovery
+          --frozen .benchmark/m11-7-frozen
+      - name: Prepare clean source-baked reproduction images
+        run: |
+          set -euo pipefail
+          docker create --name cjson-m11-7-vulnerable gcc:13-bookworm sleep infinity
+          docker cp .benchmark/cjson-m11-7-vulnerable/. cjson-m11-7-vulnerable:/code
+          docker commit cjson-m11-7-vulnerable scanner/prepared:cjson-m11-7-vulnerable
+          docker rm cjson-m11-7-vulnerable
+          docker create --name cjson-m11-7-fixed gcc:13-bookworm sleep infinity
+          docker cp .benchmark/cjson-m11-7-fixed/. cjson-m11-7-fixed:/code
+          docker commit cjson-m11-7-fixed scanner/prepared:cjson-m11-7-fixed
+          docker rm cjson-m11-7-fixed
+      - name: Require cursor target, Parser-State admission, and differential proof
+        run: >-
+          python benchmarks/run_cjson_cursor_benchmark.py evaluate
+          --frozen .benchmark/m11-7-frozen
+          --oracle benchmarks/oracles/cjson-issue-800.toml
+          --scan-manifest benchmarks/cjson-blind-scan.toml
+          --vulnerable-repo .benchmark/cjson-m11-7-vulnerable
+          --fixed-repo .benchmark/cjson-m11-7-fixed
+          --output .benchmark/m11-7-evaluation
+          --run-reproduction
+          --vulnerable-image scanner/prepared:cjson-m11-7-vulnerable
+          --fixed-image scanner/prepared:cjson-m11-7-fixed
+
   m11-5-release-matrix:
-    name: M11.5 protected detection release matrix
+    name: Protected detection release matrix
     if: ${{ always() }}
     needs:
       - m9-zlib-regression
       - m11-2-libwebp-blind
       - m11-3-libjpeg-alias-blind
       - m11-5-libcue-specialist
+      - m11-7-cjson-cursor
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -399,9 +461,11 @@ jobs:
           LIBWEBP_STATUS: ${{ needs['m11-2-libwebp-blind'].result }}
           LIBJPEG_STATUS: ${{ needs['m11-3-libjpeg-alias-blind'].result }}
           LIBCUE_STATUS: ${{ needs['m11-5-libcue-specialist'].result }}
+          CJSON_STATUS: ${{ needs['m11-7-cjson-cursor'].result }}
         run: >-
           python benchmarks/run_detection_release_matrix.py evaluate
           --status m9-zlib-regression=${ZLIB_STATUS}
           --status m11-2-libwebp-blind=${LIBWEBP_STATUS}
           --status m11-3-libjpeg-alias-blind=${LIBJPEG_STATUS}
           --status m11-5-libcue-specialist=${LIBCUE_STATUS}
+          --status m11-7-cjson-cursor=${CJSON_STATUS}

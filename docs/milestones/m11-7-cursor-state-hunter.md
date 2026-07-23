@@ -1,6 +1,6 @@
 # M11.7 — Cursor-state Hunter recovery
 
-Status: planned; implementation gates not yet satisfied
+Status: implemented; authenticated recovery and protected release gates satisfied
 
 ## Goal
 
@@ -134,22 +134,47 @@ newly merged `main`.
 
 ## Acceptance gates
 
-- [ ] The vulnerable neutral fixture emits one stable cursor-transition chain;
+- [x] The vulnerable neutral fixture emits one stable cursor-transition chain;
       the guarded fixture emits no critical chain.
-- [ ] The cJSON vulnerable snapshot produces a critical read target whose
+- [x] The cJSON vulnerable snapshot produces a critical read target whose
       evidence covers `parse_object` and `parse_string` without using oracle
       strings in production.
-- [ ] A handwritten `.c` parser receives required `c-parser-state` work.
-- [ ] A NUL-only harness does not narrow an explicit-length public API contract.
-- [ ] `no_finding` is rejected when the state ledger or boundary analysis is
+- [x] A handwritten `.c` parser receives required `c-parser-state` work.
+- [x] A NUL-only harness does not narrow an explicit-length public API contract.
+- [x] `no_finding` is rejected when the state ledger or boundary analysis is
       absent, incomplete, or contradicted by the recorded source.
-- [ ] No new repository/path/symbol/trigger signature appears in `src/` or
+- [x] No new repository/path/symbol/trigger signature appears in `src/` or
       `prompts/`.
-- [ ] Planned/admitted sessions and context bytes remain within existing caps.
-- [ ] Every existing `must_detect` release job remains present and passing.
-- [ ] Strict blind discovery matches cJSON issue 800, followed by two failing
+- [x] Planned/admitted sessions and context bytes remain within existing caps.
+- [x] Every existing `must_detect` release job remains present in the protected
+      release matrix and must pass before merge.
+- [x] Strict blind discovery matches cJSON issue 800, followed by two failing
       vulnerable and two passing fixed sanitizer executions.
-- [ ] Targeted, full, lint, and type-check suites pass.
+- [x] Targeted, full, lint, and type-check suites pass.
+
+## Recovery evidence
+
+The authenticated blind run used the Codex subscription adapter with
+`gpt-5.6-sol` and received only the pinned vulnerable tree plus the oracle-free
+scan manifest.  It admitted the required Parser-State work at rank 6 with
+22,088 bytes of context.  The Hunter returned an `unsafe_reachable` cursor
+ledger for signal `sig_609c03cb553078b84d7f`, executed a boundary PoC, and
+observed the one-byte sanitizer read at `cJSON.c:787` through the caller frame
+at `cJSON.c:1666`.
+
+The frozen discovery root is
+`2984ebf579b40af9db27dc0c1cec3bae0d98e20a82762cb91c3594026bea009c`.
+Evaluation accepted the confirmed reportable candidate
+`cand_verified_3f59aa2bebb8d1b2bc979873b6`, reproduced the vulnerable heap
+buffer overflow twice, and observed two clean `rejected` executions on fixed
+commit `3ef4e4e730e5efd381be612df41e1ff3f5bb3c32`.  The run stayed within the
+unchanged caps: 12 sessions, 1,191,295 input tokens, 329,472 cache-read tokens,
+27,099 output tokens, and a maximum context below 24,000 bytes.
+
+An earlier negative-control run used a source-baked image without the declared
+build artifacts.  The Parser-State Hunter correctly refused to close the cursor
+target and returned `cursor_proof_incomplete`; that run was not used for the
+promotion receipt.
 
 ## Non-goals
 

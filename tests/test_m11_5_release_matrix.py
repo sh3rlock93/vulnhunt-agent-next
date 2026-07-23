@@ -25,9 +25,10 @@ def test_release_matrix_covers_every_protected_detection_exactly() -> None:
         "libwebp-cve-2023-4863",
         "libcue-time-global-buffer-overflow",
         "libcue-cve-2023-43641",
+        "cjson-issue-800",
     )
     assert gates[-1].require_differential_reproduction is True
-    assert gates[-1].authenticated_receipt == "libcue-m11-5-authenticated"
+    assert gates[-1].authenticated_receipt == "cjson-m11-7-authenticated"
 
 
 def test_release_matrix_passes_only_when_every_unique_job_succeeds() -> None:
