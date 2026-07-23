@@ -194,6 +194,7 @@ _CHECKPOINT_FIELDS = (
     "transient_retries",
     "source_evidence_retries",
     "capacity_negative_rechecks",
+    "cursor_proof_retries",
     "model_failures",
 )
 

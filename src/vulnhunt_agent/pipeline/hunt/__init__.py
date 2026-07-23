@@ -17,10 +17,12 @@ from typing import Awaitable, Callable
 
 from ...analysis import CONTEXT_SHARD_POLICY, SharedContextCache
 from ...agents.hunter import (
+    CURSOR_PROOF_RETRY_LIMIT,
     SOURCE_EVIDENCE_POLICY,
     SOURCE_EVIDENCE_RETRY_LIMIT,
     TARGET_COMPLETION_POLICY,
 )
+from ...agents.cursor_proof import CURSOR_PROOF_POLICY
 from ...agents.durable_queue import DurableHuntQueueStore
 from ...agents.queue import HuntTask
 from ...core.events import EventBus
@@ -146,6 +148,8 @@ async def run_hunt(store: RunStore, bus: EventBus) -> None:
         "completion_repair_limit": 1,
         "source_evidence_policy": SOURCE_EVIDENCE_POLICY,
         "source_evidence_retry_limit": SOURCE_EVIDENCE_RETRY_LIMIT,
+        "cursor_proof_policy": CURSOR_PROOF_POLICY,
+        "cursor_proof_retry_limit": CURSOR_PROOF_RETRY_LIMIT,
         "iteration_tiers": [6, 18, 40],
         "scan_mode": incremental.get("mode", "full"),
         "scan_scope": scan_scope,

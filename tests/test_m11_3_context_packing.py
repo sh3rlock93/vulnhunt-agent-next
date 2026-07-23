@@ -31,7 +31,7 @@ def test_packet_fit_discards_supporting_metadata_before_focus_source() -> None:
     packet = {
         "cache_key": "context_" + "a" * 64,
         "source_snapshot": "a" * 64,
-        "context_policy": "c-context-v6",
+        "context_policy": "c-context-v7",
         "focus_chain_ids": [focus_id],
         "risk_chains": [
             {

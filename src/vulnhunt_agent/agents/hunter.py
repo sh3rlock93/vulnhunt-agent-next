@@ -13,6 +13,11 @@ from ..core.llm import LLMClient
 from ..core.model_errors import ModelClientError
 from ..core.tool_protocol import TOOL_ARGUMENTS_INVALID
 from ..scheduling.budget import BudgetExceededError
+from .cursor_proof import (
+    CURSOR_PROOF_POLICY,
+    cursor_target_ids,
+    validate_cursor_proofs,
+)
 from .tools import HunterTools, tool_specs
 
 TARGET_COMPLETION_POLICY = "c-target-completion-v1"
@@ -20,6 +25,7 @@ SOURCE_EVIDENCE_POLICY = "c-source-read-evidence-v1"
 SOURCE_EVIDENCE_RETRY_LIMIT = 1
 CAPACITY_NEGATIVE_RECHECK_POLICY = "c-capacity-negative-recheck-v1"
 CAPACITY_NEGATIVE_RECHECK_LIMIT = 1
+CURSOR_PROOF_RETRY_LIMIT = 1
 
 
 FINAL_REPORT_INSTRUCTIONS = """VERIFY WITH A PoC.
@@ -66,6 +72,14 @@ When `focus_chain_ids` are present, use `read_file` on at least one matching
 chain evidence range before finalizing. The source-evidence gate will reject a
 finding, no-finding, or deferred result based only on packet excerpts.
 
+When `cursor_transition_chains` identify one of your exact target IDs, read the
+recorded guard, advance, call, and read ranges and attach `cursor_proof` to that
+target's disposition. Transcribe the numeric relations from source; do not infer
+them from the rationale. Analyze both the minimum remaining-input boundary and
+the maximum accepted boundary. If the sandbox is available and the chain has an
+absent, partial, or unknown guard, write a PoC, compile it when required, execute
+the boundary hypothesis, and cite the zero-based runtime execution ledger index.
+
 When done, STOP calling tools and output ONLY this JSON:
 {
   "target_dispositions": [
@@ -73,7 +87,28 @@ When done, STOP calling tools and output ONLY this JSON:
       "target_id": "<exact target signal/node id from change_focus>",
       "status": "finding|no_finding|deferred",
       "finding_indices": [<zero-based indexes into findings>],
-      "rationale": "<concise evidence-based reason>"
+      "rationale": "<concise evidence-based reason>",
+      "cursor_proof": null | {
+        "policy_version": "c-cursor-proof-v1",
+        "chain_id": "<cursor_transition id>",
+        "pre_guard_relation": "<relation before mutation>",
+        "observed_guard_index": null | <int>,
+        "cursor_mutation": "<exact mutation>",
+        "cursor_delta": <int>,
+        "post_mutation_relation": "<relation after mutation>",
+        "callee_entry_precondition": "<callee relation>",
+        "dereference_relation": "<indexed read relation>",
+        "dereference_index": <int>,
+        "required_guard_index": <int>,
+        "minimum_boundary_case": "<minimum remaining-input analysis>",
+        "maximum_boundary_case": "<maximum accepted-input analysis>",
+        "conclusion": "unsafe_reachable|safe_proved",
+        "boundary_attempt": {
+          "status": "executed|not_available",
+          "execution_index": null | <zero-based exec ledger index>,
+          "rationale": "<what was attempted or why sandbox was unavailable>"
+        }
+      }
     }
   ],
   "findings": [
@@ -160,6 +195,7 @@ class HuntResult:
     transient_retries: int = 0
     source_evidence_retries: int = 0
     capacity_negative_rechecks: int = 0
+    cursor_proof_retries: int = 0
     model_failures: dict[str, int] = field(default_factory=dict)
     stopped: str = ""   # "final_json" | "max_iter" | "error"
     budget_reason: str = ""
@@ -426,6 +462,60 @@ class HunterAgent:
                             self._checkpoint(result)
                             return result
                     if (
+                        (cursor_proof_error := validate_cursor_proofs(
+                            analysis_context,
+                            dispositions,
+                            expected_targets=expected_targets,
+                            source_reads=getattr(self.tools, "source_reads", []),
+                            executions=getattr(
+                                self.tools, "execution_records", []
+                            ),
+                            written_pocs=getattr(self.tools, "written_pocs", []),
+                            sandbox_available=with_sandbox,
+                        ))
+                        and result.cursor_proof_retries < CURSOR_PROOF_RETRY_LIMIT
+                        and i + 1 < self.max_iterations
+                    ):
+                        result.cursor_proof_retries += 1
+                        messages.append({
+                            "role": "user",
+                            "content": [{"text": _cursor_proof_retry_message(
+                                analysis_context or {},
+                                cursor_proof_error,
+                            )}],
+                        })
+                        self.on_event(
+                            "cursor_proof_retry",
+                            policy=CURSOR_PROOF_POLICY,
+                            retry=result.cursor_proof_retries,
+                        )
+                        self._attach_tool_ledger(result)
+                        self._checkpoint(result)
+                        continue
+                    if cursor_proof_error:
+                        cursor_targets = cursor_target_ids(
+                            analysis_context,
+                            expected_targets,
+                        )
+                        findings, dispositions = _defer_cursor_targets(
+                            findings,
+                            dispositions,
+                            cursor_targets,
+                            "cursor proof or boundary evidence was incomplete",
+                        )
+                        incomplete_set = set(incomplete) | set(cursor_targets)
+                        result.findings = findings
+                        result.target_dispositions = dispositions
+                        result.incomplete_target_ids = [
+                            target_id for target_id in expected_targets
+                            if target_id in incomplete_set
+                        ]
+                        result.stopped = "cursor_proof_incomplete"
+                        result.budget_reason = "cursor_proof_incomplete"
+                        self._attach_tool_ledger(result)
+                        self._checkpoint(result)
+                        return result
+                    if (
                         _needs_capacity_negative_recheck(
                             analysis_context,
                             findings=findings,
@@ -557,6 +647,7 @@ def _result_with_initial_metrics(raw: dict) -> HuntResult:
         "transient_retries",
         "source_evidence_retries",
         "capacity_negative_rechecks",
+        "cursor_proof_retries",
     )
     for name in integer_fields:
         value = raw.get(name, 0)
@@ -809,6 +900,10 @@ def _validate_dispositions(
             "status": status,
             "finding_indices": list(dict.fromkeys(indexes)),
             "rationale": rationale.strip(),
+            **(
+                {"cursor_proof": item.get("cursor_proof")}
+                if "cursor_proof" in item else {}
+            ),
         })
         seen.add(target_id)
 
@@ -834,3 +929,63 @@ def _deferred_dispositions(
         }
         for target_id in target_ids
     ]
+
+
+def _cursor_proof_retry_message(context: dict, error: str) -> str:
+    chains = context.get("cursor_transition_chains") or []
+    suggested_reads = [
+        {
+            "path": item.get("path", ""),
+            "start": max(1, int(item.get("line", 1)) - 4),
+            "end": int(item.get("line", 1)) + 4,
+            "role": item.get("role", ""),
+        }
+        for chain in chains
+        for item in chain.get("evidence_requirements") or ()
+    ]
+    return (
+        "Cursor proof gate blocked finalization: " + error + ". "
+        "Repair exactly once. Read every missing guard/mutation/call/dereference "
+        "range, return a complete c-cursor-proof-v1 ledger for each non-deferred "
+        "cursor target, and keep its numeric fields equal to the immutable chain. "
+        "If a sandbox is available for an unsafe chain, execute the boundary PoC "
+        "and cite the runtime (not compiler) execution index. Suggested reads: "
+        + json.dumps(suggested_reads, ensure_ascii=False)
+        + ". Cursor chains: "
+        + json.dumps(chains, ensure_ascii=False, separators=(",", ":"))
+    )
+
+
+def _defer_cursor_targets(
+    findings: list[dict],
+    dispositions: list[dict],
+    cursor_targets: tuple[str, ...],
+    rationale: str,
+) -> tuple[list[dict], list[dict]]:
+    targets = set(cursor_targets)
+    retained_indexes = sorted({
+        index
+        for item in dispositions
+        if item.get("target_id") not in targets
+        for index in item.get("finding_indices") or ()
+    })
+    remap = {old: new for new, old in enumerate(retained_indexes)}
+    retained_findings = [findings[index] for index in retained_indexes]
+    normalized = []
+    for item in dispositions:
+        if item.get("target_id") in targets:
+            normalized.append({
+                "target_id": item["target_id"],
+                "status": "deferred",
+                "finding_indices": [],
+                "rationale": rationale,
+            })
+            continue
+        normalized.append({
+            **item,
+            "finding_indices": [
+                remap[index] for index in item.get("finding_indices") or ()
+                if index in remap
+            ],
+        })
+    return retained_findings, normalized

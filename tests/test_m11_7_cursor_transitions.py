@@ -120,6 +120,16 @@ def test_cursor_ids_are_deterministic_and_slice_reaches_caller() -> None:
     assert packet["cursor_transition_chains"][0]["evidence_lines"] == {
         "parser.c": [14, 20, 21, 24]
     }
+    proof_context = packet["cursor_transition_chains"][0]
+    assert proof_context["target_signal_ids"] == [signal.signal_id]
+    assert proof_context["advance_delta"] == 1
+    assert proof_context["dereference_index"] == 0
+    assert proof_context["evidence_requirements"] == [
+        {"role": "read", "path": "parser.c", "line": 14},
+        {"role": "advance", "path": "parser.c", "line": 20},
+        {"role": "call", "path": "parser.c", "line": 21},
+        {"role": "guard", "path": "parser.c", "line": 24},
+    ]
 
 
 def test_ordinary_array_read_does_not_create_cursor_target(tmp_path: Path) -> None:
