@@ -16,7 +16,7 @@ from ..domain.schemas import (
 )
 from .shadow import work_id_for
 
-ROUTER_POLICY = "c-signal-router-v3"
+ROUTER_POLICY = "c-signal-router-v4"
 
 BOUNDS = "c-bounds-integers"
 LIFETIME = "c-memory-lifetime"
@@ -31,6 +31,7 @@ _CATEGORY_HUNTERS: dict[str, tuple[str, ...]] = {
     "external_input": (BOUNDS,),
     "array_index_write": (BOUNDS,),
     "array_index_write_guarded": (BOUNDS,),
+    "cursor_index_read": (PARSER, BOUNDS),
     "unbounded_copy": (BOUNDS, LIFETIME),
     "unbounded_input": (BOUNDS,),
     "memory_copy": (BOUNDS, LIFETIME),
@@ -174,8 +175,12 @@ def build_routing_plan(
             target_node_ids=target_node_ids,
             target_signal_ids=target_signal_ids,
         )
-        for hunter, reasons in routed:
-            for batch in target_batches:
+        for batch in target_batches:
+            for hunter, reasons in _route_target_batch(
+                routed=routed,
+                batch=batch,
+                signals=signals,
+            ):
                 focus_reasons = list(reasons)
                 if batch.target_node_ids:
                     focus_reasons.append("change-focus:direct-node")
@@ -323,11 +328,12 @@ def _route_file(
             )
         if signal.risk >= 4 and mapped:
             required_specialists.add(mapped[0])
-            critical_preferences.append((
-                -signal.risk,
-                signal.signal_id,
-                mapped[0],
-            ))
+            if signal.category != "cursor_index_read":
+                critical_preferences.append((
+                    -signal.risk,
+                    signal.signal_id,
+                    mapped[0],
+                ))
 
     contextual = _context_signals(matching_slices, all_signals)
     grammar_context = any(
@@ -382,6 +388,40 @@ def _route_file(
         (hunter, sorted(reasons[hunter] or {"fallback:deterministic"}))
         for hunter in selected
     ]
+
+
+def _route_target_batch(
+    *,
+    routed: list[tuple[str, list[str]]],
+    batch: RoutingTargetBatch,
+    signals: dict[str, SecuritySignal],
+) -> list[tuple[str, list[str]]]:
+    cursor_targets = [
+        signals[signal_id]
+        for signal_id in batch.target_signal_ids
+        if signal_id in signals
+        and signals[signal_id].category == "cursor_index_read"
+        and signals[signal_id].risk >= 4
+    ]
+    if not cursor_targets:
+        return routed
+    parser_reasons = sorted({
+        "required:cursor-transition",
+        *(
+            f"signal:{signal.category}:{signal.operation}:risk-{signal.risk}"
+            for signal in cursor_targets
+        ),
+    })
+    existing = {hunter: reasons for hunter, reasons in routed}
+    if PARSER in existing:
+        parser_reasons = sorted(set(parser_reasons) | set(existing[PARSER]))
+    ordered = [(PARSER, parser_reasons)]
+    ordered.extend(
+        (hunter, reasons)
+        for hunter, reasons in routed
+        if hunter != PARSER
+    )
+    return ordered[:2]
 
 
 def _context_signals(

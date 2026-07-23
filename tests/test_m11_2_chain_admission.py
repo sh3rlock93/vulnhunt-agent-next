@@ -20,6 +20,8 @@ def _work(
     path: str,
     signal: str | tuple[str, ...],
     hunter: str,
+    *,
+    routing_reasons: tuple[str, ...] = ("chain admission fixture",),
 ) -> HunterWorkItem:
     signals = (signal,) if isinstance(signal, str) else signal
     work_id = work_id_for(
@@ -42,7 +44,7 @@ def _work(
         hunter=hunter,
         risk=5,
         required=True,
-        routing_reasons=("chain admission fixture",),
+        routing_reasons=routing_reasons,
     )
 
 
@@ -101,7 +103,7 @@ def test_one_capacity_root_preserves_distinct_hunter_specialists() -> None:
 
     admitted = [item for item in items if item.work_id in first.admitted_work_ids]
     assert first == second
-    assert first.policy_version == "c-budget-v9"
+    assert first.policy_version == "c-budget-v10"
     assert {item.hunter for item in admitted} == {
         "c-bounds-integers",
         "c-memory-lifetime",
@@ -189,6 +191,48 @@ def test_required_specialist_displaces_lower_priority_work_when_saturated() -> N
         ),
     )
     assert input_budget.critical_work_ids == (bounds.work_id, parser.work_id)
+
+
+def test_explicit_cursor_specialist_uses_existing_specialist_reservation() -> None:
+    chain = _chain()
+    bounds = _work(1, "decode.c", "allocation", "c-bounds-integers")
+    capacity_specialist = _work(
+        2,
+        "decode.c",
+        "allocation",
+        "c-memory-lifetime",
+    )
+    cursor_specialist = _work(
+        3,
+        "parser.c",
+        "cursor-read",
+        "c-parser-state",
+        routing_reasons=(
+            "required:cursor-transition",
+            "signal:cursor_index_read",
+        ),
+    )
+
+    allocation = allocate_work_items(
+        (capacity_specialist, cursor_specialist, bounds),
+        BudgetPolicy(max_hunter_sessions=2, max_retries_per_work_item=0),
+        capacity_chains=(chain,),
+        native_full_scan=True,
+    )
+
+    assert allocation.policy_version == "c-budget-v10"
+    assert allocation.admitted_work_ids == (
+        bounds.work_id,
+        cursor_specialist.work_id,
+    )
+    assert allocation.required_specialist_slots == 1
+    assert allocation.decisions[1].quota == "required_specialist"
+    assert allocation.decisions[1].reason == (
+        "required cursor-transition Hunter retained"
+    )
+    assert allocation.deferred == {
+        capacity_specialist.work_id: "max_hunter_sessions"
+    }
 
 
 def test_complete_priority_is_eligible_without_fixed_score_threshold() -> None:
