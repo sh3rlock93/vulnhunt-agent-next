@@ -49,6 +49,7 @@ from vulnhunt_agent.pipeline.file_selector import run_file_selector
 from vulnhunt_agent.pipeline.filter_files import run_filter
 from vulnhunt_agent.pipeline.source_snapshot import run_source_snapshot
 from vulnhunt_agent.pipeline import hunt as hunt_pipeline
+from vulnhunt_agent.pipeline.hunt import _run_tasks_in_ranked_waves
 from vulnhunt_agent.scheduling import (
     AdmissionDecision,
     BudgetAllocation,
@@ -417,7 +418,7 @@ def test_per_work_input_cap_prevents_one_session_from_consuming_its_peer() -> No
     assert peer.input_tokens == 50
 
 
-def test_unstarted_critical_work_keeps_its_first_call_reserve() -> None:
+def test_critical_work_keeps_its_reserve_until_terminal_completion() -> None:
     general = "work_" + "a" * 64
     critical = "work_" + "b" * 64
     plan = WorkInputBudgetPlan(
@@ -431,6 +432,7 @@ def test_unstarted_critical_work_keeps_its_first_call_reserve() -> None:
         BudgetPolicy(max_input_tokens=100, max_output_tokens=100),
         work_input_budget=plan,
     )
+    controller.activate_priority_window((critical, general))
 
     with pytest.raises(BudgetExceededError, match="critical_input_reserve"):
         controller.reserve_call(
@@ -439,12 +441,96 @@ def test_unstarted_critical_work_keeps_its_first_call_reserve() -> None:
             work_id=general,
         )
     reserved = controller.reserve_call(
-        input_upper_bound=50,
+        input_upper_bound=30,
         requested_output_tokens=1,
         work_id=critical,
     )
-    assert reserved.work_id == critical
+    controller.complete_call(reserved, LLMResponse(
+        text="{}",
+        input_tokens=30,
+        output_tokens=1,
+        cache_read_tokens=0,
+        cache_write_tokens=0,
+        stop_reason="end_turn",
+        content_blocks=[{"text": "{}"}],
+    ))
+
+    # A first model call no longer releases the critical work's protection.
+    with pytest.raises(BudgetExceededError, match="critical_input_reserve"):
+        controller.reserve_call(
+            input_upper_bound=51,
+            requested_output_tokens=1,
+            work_id=general,
+        )
+    assert controller.snapshot()["pending_critical_work_ids"] == [critical]
+
+    controller.finish_work(critical)
     assert controller.snapshot()["pending_critical_work_ids"] == []
+
+
+def test_priority_window_does_not_reserve_for_later_ranked_waves() -> None:
+    first = "work_" + "a" * 64
+    later = "work_" + "b" * 64
+    plan = WorkInputBudgetPlan(
+        policy_version="work-input-fairness-v3",
+        per_work_input_limit=100,
+        critical_first_call_reserve=50,
+        work_input_limits={first: 100, later: 100},
+        critical_work_ids=(first, later),
+    )
+    controller = BudgetController(
+        BudgetPolicy(max_input_tokens=100, max_output_tokens=100),
+        work_input_budget=plan,
+    )
+
+    controller.activate_priority_window((first,))
+
+    reservation = controller.reserve_call(
+        input_upper_bound=100,
+        requested_output_tokens=1,
+        work_id=first,
+    )
+    assert reservation.work_id == first
+    assert controller.snapshot()["pending_critical_work_ids"] == [first]
+
+
+async def test_ranked_execution_waits_for_current_wave_before_starting_next() -> None:
+    tasks = [
+        type("Task", (), {"work_id": work_id})()
+        for work_id in ("work-b", "work-c", "work-a")
+    ]
+    first_wave_gate = asyncio.Event()
+    started: list[str] = []
+    activated: list[tuple[str, ...]] = []
+
+    class Controller:
+        def activate_priority_window(self, work_ids: tuple[str, ...]) -> None:
+            activated.append(work_ids)
+
+    async def run_work(task) -> str | None:
+        started.append(task.work_id)
+        if task.work_id in {"work-b", "work-c"}:
+            await first_wave_gate.wait()
+        return task.work_id
+
+    execution = asyncio.create_task(_run_tasks_in_ranked_waves(
+        tasks,
+        max_parallel=2,
+        budget_controller=Controller(),  # type: ignore[arg-type]
+        run_work=run_work,
+    ))
+    for _ in range(3):
+        if len(started) == 2:
+            break
+        await asyncio.sleep(0)
+
+    assert started == ["work-b", "work-c"]
+    assert activated == [("work-b", "work-c")]
+
+    first_wave_gate.set()
+    assert await execution == ["work-b", "work-c", "work-a"]
+    assert started == ["work-b", "work-c", "work-a"]
+    assert activated == [("work-b", "work-c"), ("work-a",)]
 
 
 def test_work_input_budget_is_derived_from_admitted_sessions() -> None:
@@ -485,7 +571,7 @@ def test_work_input_budget_is_derived_from_admitted_sessions() -> None:
         BudgetPolicy(max_input_tokens=101),
     )
 
-    assert plan.policy_version == "work-input-fairness-v2"
+    assert plan.policy_version == "work-input-fairness-v3"
     assert plan.per_work_input_limit == 101
     assert plan.critical_first_call_reserve == 50
     assert plan.work_input_limits == {

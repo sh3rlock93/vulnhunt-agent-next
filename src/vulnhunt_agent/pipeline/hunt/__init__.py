@@ -13,6 +13,7 @@ import json
 import uuid
 from dataclasses import asdict
 from pathlib import Path
+from typing import Awaitable, Callable
 
 from ...analysis import CONTEXT_SHARD_POLICY, SharedContextCache
 from ...agents.hunter import (
@@ -385,7 +386,7 @@ async def run_hunt(store: RunStore, bus: EventBus) -> None:
         budget_policy.max_retries_per_work_item + 1,
     )
 
-    async def run_work(task: HuntTask) -> str | None:
+    async def execute_work(task: HuntTask) -> str | None:
         if task.status in {"done", "failed", "budget_deferred"}:
             return None
         item = by_work_id.get(task.work_id)
@@ -535,6 +536,12 @@ async def run_hunt(store: RunStore, bus: EventBus) -> None:
                 usage=usage_items[0] if usage_items else None,
             )
 
+    async def run_work(task: HuntTask) -> str | None:
+        try:
+            return await execute_work(task)
+        finally:
+            budget_controller.finish_work(task.work_id)
+
     batch = _tasks_in_admission_order(
         queue.tasks,
         allocation.admitted_work_ids,
@@ -542,13 +549,12 @@ async def run_hunt(store: RunStore, bus: EventBus) -> None:
     recycled_work_ids: list[str] = []
     try:
         while batch:
-            promoted = [
-                work_id
-                for work_id in await asyncio.gather(
-                    *(run_work(task) for task in batch)
-                )
-                if work_id
-            ]
+            promoted = await _run_tasks_in_ranked_waves(
+                batch,
+                max_parallel=max_parallel,
+                budget_controller=budget_controller,
+                run_work=run_work,
+            )
             if not promoted:
                 borrowed_retry = admission_ledger.borrow_unused_retry()
                 if borrowed_retry:
@@ -682,6 +688,36 @@ def _tasks_in_admission_order(
         for work_id in admitted_work_ids
         if work_id in by_work_id
     ]
+
+
+async def _run_tasks_in_ranked_waves(
+    tasks: list[HuntTask],
+    *,
+    max_parallel: int,
+    budget_controller: BudgetController,
+    run_work: Callable[[HuntTask], Awaitable[str | None]],
+) -> list[str]:
+    """Execute persisted admission ranks in bounded priority waves.
+
+    A lower-ranked wave cannot start or consume shared input budget until all
+    work in the preceding wave has reached a terminal state. Work inside one
+    wave remains concurrent up to the configured Hunter parallelism.
+    """
+    promoted: list[str] = []
+    wave_size = max(1, max_parallel)
+    for offset in range(0, len(tasks), wave_size):
+        wave = tasks[offset:offset + wave_size]
+        budget_controller.activate_priority_window(tuple(
+            task.work_id for task in wave
+        ))
+        promoted.extend(
+            work_id
+            for work_id in await asyncio.gather(
+                *(run_work(task) for task in wave)
+            )
+            if work_id
+        )
+    return promoted
 
 
 def _budget_policy(cfg: dict) -> BudgetPolicy:

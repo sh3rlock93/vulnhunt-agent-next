@@ -22,7 +22,7 @@ NATIVE_SEED_DIVERSITY_SHARE = 0.25
 NATIVE_HIGH_RISK_SHARE = 1 / 6
 NATIVE_EARLY_SEED_CAP = 2
 CAPACITY_ADMISSION_UNIT_POLICY = "capacity-admission-unit-v1"
-WORK_INPUT_FAIRNESS_POLICY = "work-input-fairness-v2"
+WORK_INPUT_FAIRNESS_POLICY = "work-input-fairness-v3"
 
 
 class BudgetExceededError(RuntimeError):
@@ -73,7 +73,12 @@ class CapacityAdmissionUnit:
 
 @dataclass(frozen=True)
 class WorkInputBudgetPlan:
-    """Deterministic per-work caps and protected first-call input budget."""
+    """Deterministic per-work caps and protected critical input budget.
+
+    ``critical_first_call_reserve`` keeps its serialized name for run-artifact
+    compatibility. Under v3 the unused portion remains protected until the
+    work reaches a terminal state, rather than ending after its first call.
+    """
 
     policy_version: str
     per_work_input_limit: int
@@ -1304,15 +1309,45 @@ class BudgetController:
             set(work_input_budget.critical_work_ids)
             if work_input_budget is not None else set()
         )
-        self._pending_critical_work_ids = critical_work_ids - {
-            item.work_id
-            for item in prior
-            if item.sessions > 0 or item.calls > 0
-        }
+        # The controller cannot infer terminal work state from usage alone.
+        # The pipeline narrows this set to each active priority wave and calls
+        # finish_work only when a work item actually becomes terminal.
+        self._pending_critical_work_ids = critical_work_ids
         prior_seconds = sum(item.wall_time_ms for item in prior) / 1000
         allowance = max(0.0, policy.max_wall_clock_minutes * 60 - prior_seconds)
         self._deadline = clock() + allowance
         self._reservations: dict[str, _CallReservation] = {}
+
+    def activate_priority_window(self, work_ids: tuple[str, ...]) -> None:
+        """Protect only critical work eligible to execute in the current wave."""
+        with self._lock:
+            critical_work_ids = (
+                set(self._work_input_budget.critical_work_ids)
+                if self._work_input_budget is not None else set()
+            )
+            self._pending_critical_work_ids = set(work_ids) & critical_work_ids
+
+    def finish_work(self, work_id: str) -> None:
+        """Release a critical reserve only after its work becomes terminal."""
+        with self._lock:
+            self._pending_critical_work_ids.discard(work_id)
+
+    def _protected_critical_input(self, *, excluding_work_id: str = "") -> int:
+        if self._work_input_budget is None:
+            return 0
+        protected = 0
+        reserve = self._work_input_budget.critical_first_call_reserve
+        for critical_work_id in self._pending_critical_work_ids:
+            if critical_work_id == excluding_work_id:
+                continue
+            reserved = sum(
+                item.input_tokens
+                for item in self._reservations.values()
+                if item.work_id == critical_work_id
+            )
+            consumed = self._work_input_tokens.get(critical_work_id, 0)
+            protected += max(0, reserve - consumed - reserved)
+        return protected
 
     def reserve_call(
         self,
@@ -1349,9 +1384,8 @@ class BudgetController:
                     )
                     if input_upper_bound > work_remaining:
                         raise BudgetExceededError("max_input_tokens_per_work")
-                protected_critical = (
-                    len(self._pending_critical_work_ids - {work_id})
-                    * self._work_input_budget.critical_first_call_reserve
+                protected_critical = self._protected_critical_input(
+                    excluding_work_id=work_id,
                 )
                 if input_upper_bound > remaining_input - protected_critical:
                     raise BudgetExceededError("critical_input_reserve")
@@ -1366,7 +1400,6 @@ class BudgetController:
                 work_id=work_id,
             )
             self._reservations[reservation.reservation_id] = reservation
-            self._pending_critical_work_ids.discard(work_id)
             return reservation
 
     def complete_call(
@@ -1414,8 +1447,7 @@ class BudgetController:
                     if self._work_input_budget is not None else 0
                 ),
                 "protected_critical_input_tokens": (
-                    len(self._pending_critical_work_ids)
-                    * self._work_input_budget.critical_first_call_reserve
+                    self._protected_critical_input()
                     if self._work_input_budget is not None else 0
                 ),
                 "pending_critical_work_ids": sorted(
