@@ -11,10 +11,11 @@ from .context import (
     _select_focus_chains,
     context_for_work_item,
     matching_capacity_risk_chains_for_targets,
+    matching_cursor_transition_chains_for_targets,
     matching_risk_chains_for_targets,
 )
 
-CONTEXT_CACHE_POLICY = "c-context-v6"
+CONTEXT_CACHE_POLICY = "c-context-v7"
 CONTEXT_SHARD_POLICY = "c-focus-chain-shards-v1"
 MAX_CONTEXT_BYTES = 24_000
 MIN_EVIDENCE_EXCERPT_BYTES = 512
@@ -458,6 +459,7 @@ def context_cache_key(
     related_nodes = compact.get("related_nodes") or []
     constraint_facts = compact.get("constraint_facts") or []
     capacity_chains = compact.get("capacity_risk_chains") or []
+    cursor_chains = compact.get("cursor_transition_chains") or []
     context_files = set(work_item.files)
     context_files.update(
         str(item.get("path", ""))
@@ -467,6 +469,12 @@ def context_cache_key(
     context_files.update(
         str(path)
         for chain in capacity_chains
+        for path in chain.get("paths", ())
+        if path
+    )
+    context_files.update(
+        str(path)
+        for chain in cursor_chains
         for path in chain.get("paths", ())
         if path
     )
@@ -493,6 +501,7 @@ def context_cache_key(
         "focus_chain_ids": list(work_item.focus_chain_ids),
         "risk_chains": compact.get("risk_chains", []),
         "capacity_risk_chains": capacity_chains,
+        "cursor_transition_chains": cursor_chains,
         "related_nodes": related_nodes,
         "constraint_policy_version": compact.get("constraint_policy_version", ""),
         "constraint_facts": constraint_facts,
@@ -569,6 +578,17 @@ def _relevant_ranges(
         target_node_ids=target_node_ids,
     ), focus_chain_ids or set(), support_limit=3)
     for chain in capacity_chains:
+        for path, lines in chain.get("evidence_lines", {}).items():
+            if path in files:
+                out.setdefault(path, []).extend(
+                    (int(line), int(line)) for line in lines
+                )
+    cursor_chains = matching_cursor_transition_chains_for_targets(
+        graph,
+        target_signal_ids=target_signal_ids,
+        target_node_ids=target_node_ids,
+    )[:4]
+    for chain in cursor_chains:
         for path, lines in chain.get("evidence_lines", {}).items():
             if path in files:
                 out.setdefault(path, []).extend(

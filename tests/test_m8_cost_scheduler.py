@@ -1500,7 +1500,7 @@ def test_shared_context_cache_reuses_cross_hunter_packet_and_snapshot_keys(
 
     assert first == second
     stats = cache.stats()
-    assert stats["policy_version"] == "c-context-v6"
+    assert stats["policy_version"] == "c-context-v7"
     assert stats["entries"] == 1
     assert stats["hits"] == 1
     assert stats["misses"] == 1
@@ -1700,6 +1700,8 @@ async def test_hunt_pipeline_executes_slice_queue_without_legacy_json(
     assert plan is not None
     assert summary is not None
     assert plan["mode"] == "slice"
+    assert plan["cursor_proof_policy"] == "c-cursor-proof-v1"
+    assert plan["cursor_proof_retry_limit"] == 1
     assert plan["scheduled_sessions"] == 2
     assert plan["context_cache"]["entries"] == 1
     assert plan["context_cache"]["misses"] == 1

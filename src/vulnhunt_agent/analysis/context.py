@@ -84,7 +84,10 @@ def context_for_work_item(
         support_limit=3,
     )
     capacity_chains = _attach_capacity_evidence_facts(graph, capacity_chains)
-    cursor_chains = matching_cursor_transition_chains(graph, work_item)[:4]
+    cursor_chains = _attach_cursor_proof_context(
+        graph,
+        matching_cursor_transition_chains(graph, work_item)[:4],
+    )
     selected_ids = set(work_item.slice_ids)
     matching = [
         item for item in plan.get("slices", [])
@@ -185,6 +188,26 @@ def matching_cursor_transition_chains(
         for signal_id in work_item.target_signal_ids
         if signal_id in signals
     )
+    return matching_cursor_transition_chains_for_targets(
+        graph,
+        target_signal_ids=set(work_item.target_signal_ids),
+        target_node_ids=target_nodes,
+    )
+
+
+def matching_cursor_transition_chains_for_targets(
+    graph: dict,
+    *,
+    target_signal_ids: set[str],
+    target_node_ids: set[str],
+) -> list[dict]:
+    signals = {item["signal_id"]: item for item in graph.get("signals", [])}
+    target_nodes = set(target_node_ids)
+    target_nodes.update(
+        signals[signal_id]["node_id"]
+        for signal_id in target_signal_ids
+        if signal_id in signals
+    )
     matching = [
         chain for chain in graph.get("cursor_transition_chains", [])
         if chain.get("reader_node_id") in target_nodes
@@ -220,8 +243,81 @@ def _compact_cursor_transition(chain: dict) -> dict:
             "score",
             "confidence",
             "rationale",
+            "target_signal_ids",
+            "advance_delta",
+            "dereference_index",
+            "evidence_requirements",
         )
     }
+
+
+def _attach_cursor_proof_context(graph: dict, chains: list[dict]) -> list[dict]:
+    """Attach exact proof obligations without exposing the full graph."""
+    facts = {
+        str(item.get("fact_id", "")): item
+        for item in graph.get("cursor_facts", [])
+        if item.get("fact_id")
+    }
+    signals = graph.get("signals", [])
+    enriched = []
+    for chain in chains:
+        advance = facts.get(str(chain.get("advance_fact_id", "")), {})
+        read = facts.get(str(chain.get("read_fact_id", "")), {})
+        guard_ids = set(chain.get("guard_fact_ids") or ())
+        requirements: list[tuple[str, str, int]] = [
+            (
+                str(fact.get("kind", "")),
+                str(fact.get("path", "")),
+                int(fact.get("line", 0)),
+            )
+            for fact_id in chain.get("fact_ids") or ()
+            if (fact := facts.get(str(fact_id))) is not None
+            and (
+                str(fact_id) in guard_ids
+                or fact.get("kind") in {"advance", "read"}
+            )
+        ]
+        call_path = str(advance.get("path", ""))
+        call_line = int(chain.get("call_line", 0))
+        if call_path and call_line > 0:
+            requirements.append(("call", call_path, call_line))
+        target_signal_ids = sorted(
+            str(signal.get("signal_id", ""))
+            for signal in signals
+            if signal.get("node_id") == chain.get("reader_node_id")
+            and signal.get("category") == "cursor_index_read"
+            and f"chain={chain.get('chain_id', '')};" in str(
+                signal.get("detail", "")
+            )
+            and signal.get("signal_id")
+        )
+        ordered_requirements = sorted(
+            {
+                (role, path, line)
+                for role, path, line in requirements
+                if path and line > 0
+            },
+            key=lambda item: (item[1], item[2], item[0]),
+        )
+        enriched.append({
+            **chain,
+            "target_signal_ids": target_signal_ids,
+            "advance_delta": int(advance.get("delta", 0)),
+            "dereference_index": _integer_value(read.get("access_index")),
+            "evidence_requirements": [
+                {"role": role, "path": path, "line": line}
+                for role, path, line in ordered_requirements
+            ],
+        })
+    return enriched
+
+
+def _integer_value(value: object) -> int | None:
+    try:
+        parsed = int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed >= 0 else None
 
 
 def _attach_capacity_evidence_facts(
