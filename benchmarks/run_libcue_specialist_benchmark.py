@@ -5,6 +5,7 @@ import argparse
 import asyncio
 import hashlib
 import json
+import re
 import sys
 import tomllib
 from pathlib import Path
@@ -269,9 +270,15 @@ def _candidate_matches_oracle(
         str(candidate.get("description", "")),
         *(str(item) for item in candidate.get("impact", [])),
     )).casefold()
+    normalized_weakness = re.sub(r"[_-]+", " ", searchable)
     bounds = any(
-        term in searchable
-        for term in ("out-of-bounds", "out of bounds", "negative index", "oob")
+        term in normalized_weakness
+        for term in (
+            "out of bounds",
+            "negative index",
+            "negative array index",
+            "oob",
+        )
     )
     return (
         sink.get("path") == location["sink_file"]

@@ -98,6 +98,19 @@ def test_libcue_candidate_requires_parser_paths_and_exact_sink() -> None:
         {**matching, "sink": {"path": "time.c", "line": 33}}, oracle
     )
 
+    authenticated_shape = {
+        "title": "Oversized INDEX number can produce a negative array index",
+        "weakness": "out_of_bounds_write",
+        "entrypoint": {"path": "cue_scanner.l", "line": 132},
+        "sink": {"path": "cd.c", "line": 347},
+        "dataflow": [
+            {"path": "cue_parser.y", "line": 1},
+            {"path": "cd.h", "line": 1},
+        ],
+        "impact": ["A converted negative value writes before Track.index."],
+    }
+    assert _candidate_matches_oracle(authenticated_shape, oracle)
+
 
 def test_specialist_record_does_not_accept_bounds_as_parser_coverage() -> None:
     target = "sig-target"
