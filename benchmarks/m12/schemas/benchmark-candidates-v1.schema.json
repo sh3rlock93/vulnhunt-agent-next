@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vulnhunt.local/schemas/benchmark-candidates-v1.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "policy_version", "run_id", "candidate"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "policy_version": {"const": "benchmark-candidates-v1"},
+    "run_id": {"type": "string", "pattern": "^run_[0-9a-f]{16}$"},
+    "candidate": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["canonical_candidate_id", "state", "first_session_index", "first_observed_ms"],
+        "properties": {
+          "canonical_candidate_id": {"type": "string", "minLength": 1},
+          "state": {
+            "enum": [
+              "raw",
+              "poc_attempted",
+              "poc_ready",
+              "reproduced",
+              "reviewer_verified",
+              "review_inconclusive",
+              "reportable",
+              "rejected"
+            ]
+          },
+          "first_session_index": {"type": "integer", "minimum": 1},
+          "first_observed_ms": {"type": "integer", "minimum": 0}
+        }
+      }
+    }
+  }
+}

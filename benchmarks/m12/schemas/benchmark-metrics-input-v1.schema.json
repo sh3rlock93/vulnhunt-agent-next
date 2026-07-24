@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vulnhunt.local/schemas/benchmark-metrics-input-v1.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["cohort", "run"],
+  "properties": {
+    "cohort": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "policy_version", "id", "snapshot_sha256"],
+      "properties": {
+        "schema_version": {"const": 1},
+        "policy_version": {"const": "benchmark-metrics-input-v1"},
+        "id": {"type": "string", "pattern": "^cohort_[0-9a-f]{16}$"},
+        "snapshot_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "run": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "run_id",
+          "case_manifest",
+          "case_manifest_sha256",
+          "freeze_root",
+          "freeze_root_sha256",
+          "receipt",
+          "receipt_sha256",
+          "candidates",
+          "candidates_sha256",
+          "adjudications",
+          "adjudications_sha256"
+        ],
+        "properties": {
+          "run_id": {"$ref": "#/$defs/run_id"},
+          "case_manifest": {"$ref": "#/$defs/reference"},
+          "case_manifest_sha256": {"$ref": "#/$defs/sha256"},
+          "freeze_root": {"$ref": "#/$defs/reference"},
+          "freeze_root_sha256": {"$ref": "#/$defs/sha256"},
+          "receipt": {"$ref": "#/$defs/reference"},
+          "receipt_sha256": {"$ref": "#/$defs/sha256"},
+          "candidates": {"$ref": "#/$defs/reference"},
+          "candidates_sha256": {"$ref": "#/$defs/sha256"},
+          "adjudications": {"$ref": "#/$defs/reference"},
+          "adjudications_sha256": {"$ref": "#/$defs/sha256"}
+        }
+      }
+    }
+  },
+  "$defs": {
+    "run_id": {"type": "string", "pattern": "^run_[0-9a-f]{16}$"},
+    "reference": {"type": "string", "minLength": 1},
+    "sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"}
+  }
+}
