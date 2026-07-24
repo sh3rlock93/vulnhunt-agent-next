@@ -9,9 +9,13 @@ from dataclasses import replace
 
 import pytest
 
+from vulnhunt_agent.core.events import EventBus
+from vulnhunt_agent.core.run_store import RunStore
 from vulnhunt_agent.domain.schemas import OracleSpec, OracleType
 from vulnhunt_agent.infrastructure.artifacts import ArtifactStore
 from vulnhunt_agent.intake.snapshot import SnapshotBuilder
+from vulnhunt_agent.pipeline.sandbox_prepare import run_prepare
+from vulnhunt_agent.pipeline.source_snapshot import run_source_snapshot
 from vulnhunt_agent.reproduction.oracles import evaluate_oracle
 from vulnhunt_agent.reproduction.provenance import derive_execution_provenance
 from vulnhunt_agent.sandbox.base import SandboxJob
@@ -20,6 +24,90 @@ from vulnhunt_agent.sandbox.hardened import HardenedDockerBackend
 
 IMAGE = "python:3.12-slim"
 NATIVE_IMAGE = "gcc:13-bookworm"
+
+
+async def test_real_verified_native_prepare_emits_offline_receipt(tmp_path) -> None:
+    _require_docker(NATIVE_IMAGE)
+    source = tmp_path / "verified-native-source"
+    source.mkdir()
+    (source / "CMakeLists.txt").write_text(
+        "cmake_minimum_required(VERSION 3.16)\n"
+        "project(verified_native C)\n"
+        "enable_testing()\n"
+        "add_library(target STATIC target.c)\n"
+        "add_executable(target_test test.c)\n"
+        "target_link_libraries(target_test PRIVATE target)\n"
+        "add_test(NAME target_test COMMAND target_test)\n",
+        encoding="utf-8",
+    )
+    (source / "target.c").write_text(
+        "int read_index(const int *values, int index) { return values[index]; }\n",
+        encoding="utf-8",
+    )
+    (source / "test.c").write_text(
+        "int read_index(const int *, int);\n"
+        "int main(void) { int values[1] = {7}; return read_index(values, 0) != 7; }\n",
+        encoding="utf-8",
+    )
+    store = RunStore(tmp_path / "verified-native-run")
+    store.save_config({"repo_path": str(source), "environment": "c:gcc-13"})
+    bus = EventBus(store.dir / "events.jsonl")
+    await run_source_snapshot(store, bus)
+
+    try:
+        await run_prepare(store, bus)
+        prepared = store.load_step("sandbox_prepare")
+        receipt = store.load_step("prepared_build_receipt")
+        assert isinstance(prepared, dict)
+        assert isinstance(receipt, dict)
+        assert prepared["status"] == "ready"
+        assert receipt["status"] == "verified"
+        assert receipt["images"]["base"]["digest"].startswith("sha256:")
+        assert receipt["images"]["final"]["digest"] == prepared["image_digest"]
+        assert receipt["package_lock"]["entries"]
+        assert receipt["network"]["networked_phases"] == ["package_install"]
+        assert receipt["network"]["hunt"] == "none"
+        assert receipt["tests"][0]["outcome"] == "passed"
+        assert receipt["artifacts"]
+        assert receipt["sanitizer_provenance"]["artifacts"]
+
+        repeated_store = RunStore(tmp_path / "verified-native-run-repeated")
+        repeated_store.save_config({
+            "repo_path": str(source),
+            "environment": "c:gcc-13",
+        })
+        repeated_bus = EventBus(repeated_store.dir / "events.jsonl")
+        await run_source_snapshot(repeated_store, repeated_bus)
+        await run_prepare(repeated_store, repeated_bus)
+        repeated_plan = repeated_store.load_step("prepared_build_plan")
+        repeated_receipt = repeated_store.load_step("prepared_build_receipt")
+        assert isinstance(repeated_receipt, dict)
+        assert repeated_plan == store.load_step("prepared_build_plan")
+        assert (
+            repeated_receipt["equivalence_sha256"]
+            == receipt["equivalence_sha256"]
+        )
+
+        hunt = ContainerExecutor(
+            repo=source,
+            image=prepared["image"],
+            network="none",
+            source_baked=True,
+        )
+        try:
+            await hunt.start()
+            assert await hunt.network_isolated()
+        finally:
+            await hunt.stop()
+    finally:
+        prepared = store.load_step("sandbox_prepare") or {}
+        image = prepared.get("image")
+        if image:
+            subprocess.run(
+                ["docker", "image", "rm", "-f", image],
+                check=False,
+                capture_output=True,
+            )
 
 
 async def test_real_build_and_hunt_sandboxes_use_baked_source_without_mounts(

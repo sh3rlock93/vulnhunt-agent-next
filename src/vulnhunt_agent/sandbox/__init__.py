@@ -7,8 +7,11 @@ from .hardened import HardenedDockerBackend
 from .policy import NetworkMode, SandboxPolicy, SandboxRole
 from .prepared_build import (
     CBuildSystem,
+    PreparedBuildFailureCode,
     PreparedBuildPlan,
+    PreparedBuildReceipt,
     PreparedBuildUnsupportedReason,
+    PreparedBuildVerificationError,
     create_c_prepared_build_plan,
 )
 from ..core.settings import ENVIRONMENTS
@@ -25,8 +28,11 @@ __all__ = [
     "SandboxRole",
     "ContainerExecutor",
     "CBuildSystem",
+    "PreparedBuildFailureCode",
     "PreparedBuildPlan",
+    "PreparedBuildReceipt",
     "PreparedBuildUnsupportedReason",
+    "PreparedBuildVerificationError",
     "base_image_for",
     "create_c_prepared_build_plan",
     "language_of",

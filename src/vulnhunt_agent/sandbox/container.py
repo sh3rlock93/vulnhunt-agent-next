@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 import secrets
 import subprocess
@@ -131,12 +132,52 @@ class ContainerExecutor:
         self._started = False
         cleanup.unregister(self.name)
 
-    async def commit(self, image_tag: str) -> None:
+    async def commit(self, image_tag: str) -> str:
         """Commit the current container state as a new image (used by prepare step)."""
         if not self._started:
             raise RuntimeError("container not running")
         proc = await self._run_cli("commit", self.name, image_tag)
         _check(proc, "commit")
+        return await self.image_digest(image_tag)
+
+    async def image_digest(self, image: str | None = None) -> str:
+        """Resolve an image reference to the immutable local content ID."""
+        reference = image or self.image
+        if image is None:
+            await self._ensure_image()
+        proc = await self._run_cli(
+            "image", "inspect", "--format", "{{.Id}}", reference
+        )
+        _check(proc, f"inspect image '{reference}'")
+        digest = proc.stdout.decode(errors="replace").strip()
+        if re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None:
+            raise RuntimeError(f"Docker returned an invalid image digest for '{reference}'")
+        return digest
+
+    async def disconnect_network(self) -> None:
+        """Permanently detach a preparation container before offline phases."""
+        if not self._started:
+            raise RuntimeError("container not running")
+        if self.network != "none":
+            proc = await self._run_cli("network", "disconnect", self.network, self.name)
+            _check(proc, "disconnect preparation network")
+        if not await self.network_isolated():
+            raise RuntimeError("preparation container still has a network attachment")
+
+    async def network_isolated(self) -> bool:
+        if not self._started:
+            raise RuntimeError("container not running")
+        proc = await self._run_cli(
+            "inspect", "--format", "{{json .NetworkSettings.Networks}}", self.name
+        )
+        _check(proc, "inspect preparation network")
+        try:
+            networks = json.loads(proc.stdout.decode())
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise RuntimeError("Docker returned invalid network inspection data") from exc
+        return isinstance(networks, dict) and (
+            not networks or set(networks) == {"none"}
+        )
 
     # ----- operations -----
 
