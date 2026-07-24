@@ -1,7 +1,7 @@
 # M12 — Measured zero-day readiness
 
 Status: in progress; M12.0 and M12.1 are complete, and the M12.2 calibration
-corpus is frozen before authenticated execution
+corpus and 4-by-3 cohort runner are frozen before authenticated execution
 
 ## Goal
 
