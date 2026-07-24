@@ -17,64 +17,29 @@ from ..core.run_store import RunStore
 from ..core.v2_run import advance_run, source_snapshot_path
 from ..domain.states import RunState
 from ..sandbox import ContainerExecutor, base_image_for, language_of
+from ..sandbox.prepared_build import (
+    RIPGREP_INSTALL_COMMAND,
+    create_c_prepared_build_plan,
+    select_c_build,
+)
 from .registry import Step, register
 
 
 INSTALL_TIMEOUT = 1800   # 30 min — large Java repos need it
 VERIFY_TIMEOUT = 60
 
-_C_SANITIZER_FLAGS = (
-    "-O1 -g -fno-omit-frame-pointer -fsanitize=address,undefined"
-)
-
-
 def _ripgrep_install_cmd() -> str:
-    return (
-        "if ! command -v rg >/dev/null 2>&1; then "
-        "apt-get update && apt-get install -y --no-install-recommends ripgrep "
-        "&& rm -rf /var/lib/apt/lists/*; fi"
-    )
+    return RIPGREP_INSTALL_COMMAND
 
 
 def _c_install_cmds(repo: Path) -> list[str]:
-    toolchain = (
-        "apt-get update && apt-get install -y --no-install-recommends "
-        "cmake ninja-build meson flex bison autoconf automake libtool pkg-config "
-        "&& rm -rf /var/lib/apt/lists/*"
-    )
-    flags = _C_SANITIZER_FLAGS
-
-    if (repo / "CMakeLists.txt").exists():
-        return [
-            toolchain,
-            "cmake -S /code -B /opt/vulnhunt/build "
-            "-DCMAKE_BUILD_TYPE=Debug -DBUILD_SHARED_LIBS=OFF "
-            f"-DCMAKE_C_FLAGS='{flags}'",
-            "cmake --build /opt/vulnhunt/build --parallel 2",
-        ]
-    if (repo / "meson.build").exists():
-        return [
-            toolchain,
-            "meson setup /opt/vulnhunt/build /code "
-            "--buildtype=debug --default-library=static "
-            f"-Dc_args='{flags}'",
-            "meson compile -C /opt/vulnhunt/build -j 2",
-        ]
-    if (repo / "configure").exists() or (repo / "configure.ac").exists():
-        bootstrap = (
-            "if [ ! -x /code/configure ]; then cd /code && autoreconf -fi; fi; "
-            "mkdir -p /opt/vulnhunt/build && cd /opt/vulnhunt/build && "
-            f"CFLAGS='{flags}' /code/configure --disable-shared --enable-static"
+    selection = select_c_build(repo)
+    if not selection.supported:
+        raise RuntimeError(
+            "c repo has no CMakeLists.txt / meson.build / configure(.ac) / Makefile "
+            f"({selection.unsupported_reason.value})"
         )
-        return [toolchain, bootstrap, "make -C /opt/vulnhunt/build -j2"]
-    if (repo / "Makefile").exists() or (repo / "GNUmakefile").exists():
-        return [
-            toolchain,
-            f"make -C /code -j2 CFLAGS='{flags}'",
-        ]
-    raise RuntimeError(
-        "c repo has no CMakeLists.txt / meson.build / configure(.ac) / Makefile"
-    )
+    return list(selection.install_commands)
 
 
 def _install_cmds(repo: Path, env: str) -> list[str]:
@@ -175,17 +140,43 @@ async def run_prepare(store: RunStore, bus: EventBus) -> None:
                  image=custom, source="custom")
         return
 
-    install_cmds = [_ripgrep_install_cmd()] + _install_cmds(repo, env)
-    verify_cmds = _verify_cmds(env)
-    bus.emit("prepare_plan", install=len(install_cmds), verify=len(verify_cmds))
-
     base = base_image_for(env)
+    if language_of(env) == "c":
+        snapshot_digest = "sha256:" + _sha256_file(source_archive)
+        build_plan = create_c_prepared_build_plan(
+            repo,
+            source_snapshot_sha256=snapshot_digest,
+            base_image=base,
+        )
+        store.save_step("prepared_build_plan", build_plan.to_dict())
+        if not build_plan.supported:
+            raise RuntimeError(
+                "c repo has no CMakeLists.txt / meson.build / configure(.ac) / Makefile "
+                f"({build_plan.unsupported_reason.value})"
+            )
+        install_cmds = list(build_plan.support_commands + build_plan.install_commands)
+        verify_cmds = list(build_plan.verify_commands)
+        image_tag = build_plan.image_tag
+        bus.emit(
+            "prepare_plan",
+            install=len(install_cmds),
+            verify=len(verify_cmds),
+            policy=build_plan.policy_version,
+            plan_sha256=build_plan.plan_sha256,
+            build_system=build_plan.build_system.value,
+        )
+    else:
+        build_plan = None
+        install_cmds = [_ripgrep_install_cmd()] + _install_cmds(repo, env)
+        verify_cmds = _verify_cmds(env)
+        image_tag = _image_tag(repo)
+        bus.emit("prepare_plan", install=len(install_cmds), verify=len(verify_cmds))
+
     sandbox = ContainerExecutor(
         repo=repo, image=base,
         network="bridge", code_writable=True,
         source_archive=source_archive,
     )
-    image_tag = _image_tag(repo)
     install_log: list[dict] = []
     verify_log: list[dict] = []
     status = "ready"
@@ -229,6 +220,7 @@ async def run_prepare(store: RunStore, bus: EventBus) -> None:
         "install_log": install_log,
         "verify_log": verify_log,
         "error": error,
+        "build_plan_sha256": build_plan.plan_sha256 if build_plan else "",
     }
     store.save_step("sandbox_prepare", result)
     advance_run(
@@ -237,6 +229,14 @@ async def run_prepare(store: RunStore, bus: EventBus) -> None:
         reason=f"sandbox preparation finished with status {status}",
     )
     bus.emit("step_done", step="sandbox_prepare", status=status, image=result["image"])
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 register(Step(
