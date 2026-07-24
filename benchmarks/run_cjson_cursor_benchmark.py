@@ -19,6 +19,7 @@ from benchmarks.run_libcue_specialist_benchmark import (
     _load_candidates,
     _specialist_record,
 )
+from benchmarks.m12.prepared_build import resolve_reproduction_image
 from benchmarks.run_libtiff_blind_benchmark import (
     BenchmarkContractError,
     freeze_discovery,
@@ -156,16 +157,30 @@ def evaluate_frozen(args: argparse.Namespace) -> dict[str, Any]:
         )
 
     reproduction = None
+    prepared_builds = None
     if args.run_reproduction:
-        if not args.vulnerable_image or not args.fixed_image:
-            raise BenchmarkContractError(
-                "--run-reproduction requires both prepared images"
+        try:
+            vulnerable_image, vulnerable_prepared = resolve_reproduction_image(
+                image=args.vulnerable_image,
+                prepared_run=args.vulnerable_prepare_run,
+                label="vulnerable",
             )
+            fixed_image, fixed_prepared = resolve_reproduction_image(
+                image=args.fixed_image,
+                prepared_run=args.fixed_prepare_run,
+                label="fixed",
+            )
+        except ValueError as exc:
+            raise BenchmarkContractError(str(exc)) from exc
+        prepared_builds = {
+            "vulnerable": vulnerable_prepared,
+            "fixed": fixed_prepared,
+        }
         reproduction = asyncio.run(_run_reproduction(
             vulnerable_repo=args.vulnerable_repo.resolve(),
             fixed_repo=args.fixed_repo.resolve(),
-            vulnerable_image=args.vulnerable_image,
-            fixed_image=args.fixed_image,
+            vulnerable_image=vulnerable_image,
+            fixed_image=fixed_image,
             spec=oracle["reproduction"],
         ))
         checks["vulnerable_asan_reproduced_twice"] = reproduction[
@@ -199,6 +214,7 @@ def evaluate_frozen(args: argparse.Namespace) -> dict[str, Any]:
             "sessions": int((discovery.get("usage") or {}).get("sessions", 0)),
         },
         "reproduction": reproduction,
+        "prepared_builds": prepared_builds,
         "oracle_access_audit": {
             **audit,
             "evaluation_oracle_opened": str(oracle_path),
@@ -520,6 +536,8 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate.add_argument("--run-reproduction", action="store_true")
     evaluate.add_argument("--vulnerable-image", default="")
     evaluate.add_argument("--fixed-image", default="")
+    evaluate.add_argument("--vulnerable-prepare-run", type=Path)
+    evaluate.add_argument("--fixed-prepare-run", type=Path)
     return parser
 
 

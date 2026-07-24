@@ -6,6 +6,7 @@ import hashlib
 import json
 import re
 import shlex
+from copy import deepcopy
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
@@ -14,6 +15,7 @@ from typing import Any
 PREPARED_BUILD_PLAN_POLICY = "prepared-build-plan-v1"
 PREPARED_BUILD_RECEIPT_POLICY = "prepared-build-v1"
 C_SANITIZER_FLAGS = "-O1 -g -fno-omit-frame-pointer -fsanitize=address,undefined"
+C_CMAKE_COMPATIBILITY_FLAG = "-Wno-error=format-overflow"
 PACKAGE_LOCK_PATH = "/opt/vulnhunt/apt-packages.lock"
 _C_PACKAGES = (
     "autoconf automake bison cmake file flex libtool meson ninja-build "
@@ -39,6 +41,15 @@ RIPGREP_INSTALL_COMMAND = (
     "&& rm -rf /var/lib/apt/lists/*; fi"
 )
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
+_EQUIVALENCE_EXCLUSIONS = [
+    "images.final.digest",
+    "commands[*].duration_ms",
+    "commands[*].stdout_sha256",
+    "commands[*].stderr_sha256",
+    "tests[*].duration_ms",
+    "tests[*].stdout_sha256",
+    "tests[*].stderr_sha256",
+]
 
 
 class CBuildSystem(StrEnum):
@@ -282,13 +293,7 @@ class PreparedBuildReceipt:
                 "artifacts": sanitizer_artifacts,
             },
             "equivalence_exclusions": [
-                "images.final.digest",
-                "commands[*].duration_ms",
-                "commands[*].stdout_sha256",
-                "commands[*].stderr_sha256",
-                "tests[*].duration_ms",
-                "tests[*].stdout_sha256",
-                "tests[*].stderr_sha256",
+                *_EQUIVALENCE_EXCLUSIONS,
             ],
         }
 
@@ -321,17 +326,23 @@ class PreparedBuildReceipt:
         }
 
 
-def select_c_build(repo: Path) -> CBuildSelection:
+def select_c_build(
+    repo: Path,
+    *,
+    cmake_options: tuple[str, ...] = (),
+) -> CBuildSelection:
     """Select the first existing native layout using the historical precedence."""
     flags = C_SANITIZER_FLAGS
     if (repo / "CMakeLists.txt").is_file():
+        option_args = _validated_cmake_option_args(repo, cmake_options)
+        cmake_flags = f"{flags} {C_CMAKE_COMPATIBILITY_FLAG}"
         return CBuildSelection(
             build_system=CBuildSystem.CMAKE,
             descriptor="CMakeLists.txt",
             install_commands=(
                 "cmake -S /code -B /opt/vulnhunt/build "
                 "-DCMAKE_BUILD_TYPE=Debug -DBUILD_SHARED_LIBS=OFF "
-                f"-DCMAKE_C_FLAGS='{flags}'",
+                f"-DCMAKE_C_FLAGS='{cmake_flags}'{option_args}",
                 "cmake --build /opt/vulnhunt/build --parallel 2",
             ),
             test_commands=(
@@ -342,6 +353,8 @@ def select_c_build(repo: Path) -> CBuildSelection:
             expected_artifact_roots=("/opt/vulnhunt/build",),
         )
     if (repo / "meson.build").is_file():
+        if cmake_options:
+            raise ValueError("CMake options require a CMake build descriptor")
         return CBuildSelection(
             build_system=CBuildSystem.MESON,
             descriptor="meson.build",
@@ -355,6 +368,8 @@ def select_c_build(repo: Path) -> CBuildSelection:
             expected_artifact_roots=("/opt/vulnhunt/build",),
         )
     if (repo / "configure").is_file() or (repo / "configure.ac").is_file():
+        if cmake_options:
+            raise ValueError("CMake options require a CMake build descriptor")
         descriptor = "configure" if (repo / "configure").is_file() else "configure.ac"
         bootstrap = (
             "if [ ! -x /code/configure ]; then cd /code && autoreconf -fi; fi; "
@@ -376,6 +391,8 @@ def select_c_build(repo: Path) -> CBuildSelection:
             expected_artifact_roots=("/opt/vulnhunt/build",),
         )
     if (repo / "Makefile").is_file() or (repo / "GNUmakefile").is_file():
+        if cmake_options:
+            raise ValueError("CMake options require a CMake build descriptor")
         descriptor = "Makefile" if (repo / "Makefile").is_file() else "GNUmakefile"
         return CBuildSelection(
             build_system=CBuildSystem.MAKE,
@@ -390,6 +407,8 @@ def select_c_build(repo: Path) -> CBuildSelection:
             ),
             expected_artifact_roots=("/code",),
         )
+    if cmake_options:
+        raise ValueError("CMake options require a CMake build descriptor")
     return CBuildSelection(
         build_system=CBuildSystem.UNSUPPORTED,
         descriptor="",
@@ -405,12 +424,13 @@ def create_c_prepared_build_plan(
     *,
     source_snapshot_sha256: str,
     base_image: str,
+    cmake_options: tuple[str, ...] = (),
 ) -> PreparedBuildPlan:
     if _SHA256.fullmatch(source_snapshot_sha256) is None:
         raise ValueError("prepared build source snapshot must be a SHA-256 digest")
     if not base_image or "\0" in base_image:
         raise ValueError("prepared build base image is invalid")
-    selection = select_c_build(repo)
+    selection = select_c_build(repo, cmake_options=cmake_options)
     support = (C_TOOLCHAIN_COMMAND,) if selection.supported else ()
     return PreparedBuildPlan(
         source_snapshot_sha256=source_snapshot_sha256,
@@ -427,6 +447,10 @@ def create_c_prepared_build_plan(
             "-g",
             "-fno-omit-frame-pointer",
             "-fsanitize=address,undefined",
+        ) + (
+            (C_CMAKE_COMPATIBILITY_FLAG,)
+            if selection.build_system is CBuildSystem.CMAKE
+            else ()
         ),
         sanitizers=("address", "undefined"),
         expected_artifact_roots=selection.expected_artifact_roots,
@@ -524,6 +548,116 @@ def parse_package_lock(output: str) -> tuple[str, ...]:
             "prepared build package lock is missing or invalid",
         )
     return entries
+
+
+def verify_prepared_build_receipt(value: Any) -> None:
+    """Fail closed when a persisted prepared-build-v1 receipt was altered."""
+    if not isinstance(value, dict):
+        raise ValueError("prepared build receipt must be an object")
+    payload = deepcopy(value)
+    claimed_receipt = payload.pop("receipt_sha256", "")
+    if _SHA256.fullmatch(str(claimed_receipt)) is None:
+        raise ValueError("prepared build receipt identity is missing")
+    if _canonical_sha256(payload) != claimed_receipt:
+        raise ValueError("prepared build receipt hash mismatch")
+
+    claimed_equivalence = payload.pop("equivalence_sha256", "")
+    if _SHA256.fullmatch(str(claimed_equivalence)) is None:
+        raise ValueError("prepared build equivalence identity is missing")
+    if payload.get("schema_version") != 1:
+        raise ValueError("unsupported prepared build receipt schema")
+    if payload.get("policy_version") != PREPARED_BUILD_RECEIPT_POLICY:
+        raise ValueError("unsupported prepared build receipt policy")
+    if payload.get("status") != "verified":
+        raise ValueError("prepared build receipt is not verified")
+    if payload.get("equivalence_exclusions") != _EQUIVALENCE_EXCLUSIONS:
+        raise ValueError("prepared build equivalence exclusions changed")
+
+    images = payload.get("images")
+    if not isinstance(images, dict):
+        raise ValueError("prepared build image provenance is missing")
+    for role in ("base", "final"):
+        image = images.get(role)
+        if (
+            not isinstance(image, dict)
+            or not str(image.get("reference") or "")
+            or _SHA256.fullmatch(str(image.get("digest") or "")) is None
+        ):
+            raise ValueError(f"prepared build {role} image provenance is invalid")
+
+    for key in ("commands", "tests"):
+        results = payload.get(key)
+        if not isinstance(results, list):
+            raise ValueError(f"prepared build {key} are missing")
+        for result in results:
+            if (
+                not isinstance(result, dict)
+                or result.get("exit_code") != 0
+                or result.get("timed_out") is not False
+            ):
+                raise ValueError(f"prepared build {key} contain a failed result")
+
+    package_lock = payload.get("package_lock")
+    if (
+        not isinstance(package_lock, dict)
+        or package_lock.get("path") != PACKAGE_LOCK_PATH
+        or _SHA256.fullmatch(str(package_lock.get("sha256") or "")) is None
+        or not isinstance(package_lock.get("entries"), list)
+        or not package_lock["entries"]
+    ):
+        raise ValueError("prepared build package lock is invalid")
+
+    artifacts = payload.get("artifacts")
+    if not isinstance(artifacts, list) or not artifacts:
+        raise ValueError("prepared build artifacts are missing")
+    sanitizer_paths = set()
+    for artifact in artifacts:
+        if (
+            not isinstance(artifact, dict)
+            or not str(artifact.get("path") or "").startswith("/")
+            or _SHA256.fullmatch(str(artifact.get("sha256") or "")) is None
+            or not isinstance(artifact.get("sanitizer_markers"), list)
+        ):
+            raise ValueError("prepared build artifact provenance is invalid")
+        if artifact["sanitizer_markers"]:
+            sanitizer_paths.add(artifact["path"])
+    sanitizer = payload.get("sanitizer_provenance")
+    if (
+        not isinstance(sanitizer, dict)
+        or not sanitizer_paths
+        or set(sanitizer.get("artifacts") or []) != sanitizer_paths
+    ):
+        raise ValueError("prepared build sanitizer provenance is invalid")
+
+    equivalent = deepcopy(payload)
+    equivalent["images"]["final"]["digest"] = "<excluded>"
+    for key in ("commands", "tests"):
+        for result in equivalent[key]:
+            result["duration_ms"] = 0
+            result["stdout_sha256"] = "<excluded>"
+            result["stderr_sha256"] = "<excluded>"
+    if _canonical_sha256(equivalent) != claimed_equivalence:
+        raise ValueError("prepared build equivalence hash mismatch")
+
+
+def _validated_cmake_option_args(repo: Path, options: tuple[str, ...]) -> str:
+    if not options:
+        return ""
+    source = (repo / "CMakeLists.txt").read_text(encoding="utf-8", errors="replace")
+    normalized: list[str] = []
+    names: set[str] = set()
+    for option in options:
+        match = re.fullmatch(r"([A-Z][A-Z0-9_]*)=(ON|OFF)", option)
+        if match is None:
+            raise ValueError("native CMake options must use DECLARED_BOOLEAN=ON|OFF")
+        name, value = match.groups()
+        if name in names:
+            raise ValueError("native CMake option names must be unique")
+        names.add(name)
+        if re.search(rf"\boption\s*\(\s*{re.escape(name)}(?:\s|\))", source, re.I) is None:
+            raise ValueError(f"native CMake option is not declared by the source: {name}")
+        normalized.append(f"-D{name}={value}")
+    return " " + " ".join(sorted(normalized))
 
 
 def _canonical_sha256(value: Any) -> str:

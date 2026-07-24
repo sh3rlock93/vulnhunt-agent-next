@@ -145,6 +145,14 @@ jobs:
           -c user.name=VulnHunt-CI
           -c user.email=vulnhunt-ci@example.invalid
           revert --no-edit 73331a6a0481067628f065ffe87bb1d8f787d10c
+      - name: Verify CMake preparation for both protected revisions
+        run: |
+          python -m benchmarks.m12.prepared_build prepare \
+            --repo .benchmark/zlib-vulnerable \
+            --run-dir .benchmark/zlib-vulnerable-prepared
+          python -m benchmarks.m12.prepared_build prepare \
+            --repo .benchmark/zlib-fixed \
+            --run-dir .benchmark/zlib-fixed-prepared
       - name: Require change-focused target coverage and bounded context
         run: |
           python benchmarks/run_zlib_cve_benchmark.py \
@@ -366,6 +374,14 @@ jobs:
           python benchmarks/run_libcue_specialist_benchmark.py freeze
           --discovery .benchmark/m11-5-discovery
           --frozen .benchmark/m11-5-frozen
+      - name: Prepare verified generated-parser images
+        run: |
+          python -m benchmarks.m12.prepared_build prepare \
+            --repo .benchmark/libcue-m11-5-vulnerable \
+            --run-dir .benchmark/libcue-m11-5-vulnerable-prepared
+          python -m benchmarks.m12.prepared_build prepare \
+            --repo .benchmark/libcue-m11-5-fixed \
+            --run-dir .benchmark/libcue-m11-5-fixed-prepared
       - name: Require both libcue specialists within the locked budget
         run: >-
           python benchmarks/run_libcue_specialist_benchmark.py evaluate
@@ -375,6 +391,9 @@ jobs:
           --vulnerable-repo .benchmark/libcue-m11-5-vulnerable
           --fixed-repo .benchmark/libcue-m11-5-fixed
           --output .benchmark/m11-5-evaluation
+          --run-reproduction
+          --vulnerable-prepare-run .benchmark/libcue-m11-5-vulnerable-prepared
+          --fixed-prepare-run .benchmark/libcue-m11-5-fixed-prepared
 
   m11-7-cjson-cursor:
     name: M11.7 cJSON cursor-state recovery gates
@@ -413,17 +432,16 @@ jobs:
           python benchmarks/run_cjson_cursor_benchmark.py freeze
           --discovery .benchmark/m11-7-discovery
           --frozen .benchmark/m11-7-frozen
-      - name: Prepare clean source-baked reproduction images
+      - name: Prepare verified source-baked reproduction images
         run: |
-          set -euo pipefail
-          docker create --name cjson-m11-7-vulnerable gcc:13-bookworm sleep infinity
-          docker cp .benchmark/cjson-m11-7-vulnerable/. cjson-m11-7-vulnerable:/code
-          docker commit cjson-m11-7-vulnerable scanner/prepared:cjson-m11-7-vulnerable
-          docker rm cjson-m11-7-vulnerable
-          docker create --name cjson-m11-7-fixed gcc:13-bookworm sleep infinity
-          docker cp .benchmark/cjson-m11-7-fixed/. cjson-m11-7-fixed:/code
-          docker commit cjson-m11-7-fixed scanner/prepared:cjson-m11-7-fixed
-          docker rm cjson-m11-7-fixed
+          python -m benchmarks.m12.prepared_build prepare \
+            --repo .benchmark/cjson-m11-7-vulnerable \
+            --run-dir .benchmark/cjson-m11-7-vulnerable-prepared \
+            --cmake-option ENABLE_CJSON_TEST=OFF
+          python -m benchmarks.m12.prepared_build prepare \
+            --repo .benchmark/cjson-m11-7-fixed \
+            --run-dir .benchmark/cjson-m11-7-fixed-prepared \
+            --cmake-option ENABLE_CJSON_TEST=OFF
       - name: Require cursor target, Parser-State admission, and differential proof
         run: >-
           python benchmarks/run_cjson_cursor_benchmark.py evaluate
@@ -434,8 +452,35 @@ jobs:
           --fixed-repo .benchmark/cjson-m11-7-fixed
           --output .benchmark/m11-7-evaluation
           --run-reproduction
-          --vulnerable-image scanner/prepared:cjson-m11-7-vulnerable
-          --fixed-image scanner/prepared:cjson-m11-7-fixed
+          --vulnerable-prepare-run .benchmark/cjson-m11-7-vulnerable-prepared
+          --fixed-prepare-run .benchmark/cjson-m11-7-fixed-prepared
+
+  m12-1-autotools-prepared-build:
+    name: M12.1 Autotools verified preparation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install project
+        run: python -m pip install -e .
+      - name: Configure default model catalog
+        run: cp settings.example.toml settings.toml
+      - name: Checkout pinned Autotools project
+        uses: actions/checkout@v6
+        with:
+          repository: stephane/libmodbus
+          ref: b4ef4c17d618eba0adccc4c7d9e9a1ef809fc9b6
+          path: .benchmark/libmodbus-autotools
+      - name: Require verified offline Autotools preparation
+        run: |
+          python -m benchmarks.m12.prepared_build prepare \
+            --repo .benchmark/libmodbus-autotools \
+            --run-dir .benchmark/libmodbus-autotools-prepared
+          python -m benchmarks.m12.prepared_build verify \
+            --run-dir .benchmark/libmodbus-autotools-prepared
 
   m11-5-release-matrix:
     name: Protected detection release matrix
@@ -446,6 +491,7 @@ jobs:
       - m11-3-libjpeg-alias-blind
       - m11-5-libcue-specialist
       - m11-7-cjson-cursor
+      - m12-1-autotools-prepared-build
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -464,10 +510,12 @@ jobs:
           LIBJPEG_STATUS: ${{ needs['m11-3-libjpeg-alias-blind'].result }}
           LIBCUE_STATUS: ${{ needs['m11-5-libcue-specialist'].result }}
           CJSON_STATUS: ${{ needs['m11-7-cjson-cursor'].result }}
-        run: >-
-          python benchmarks/run_detection_release_matrix.py evaluate
-          --status m9-zlib-regression=${ZLIB_STATUS}
-          --status m11-2-libwebp-blind=${LIBWEBP_STATUS}
-          --status m11-3-libjpeg-alias-blind=${LIBJPEG_STATUS}
-          --status m11-5-libcue-specialist=${LIBCUE_STATUS}
-          --status m11-7-cjson-cursor=${CJSON_STATUS}
+          AUTOTOOLS_STATUS: ${{ needs['m12-1-autotools-prepared-build'].result }}
+        run: |
+          test "${AUTOTOOLS_STATUS}" = success
+          python benchmarks/run_detection_release_matrix.py evaluate \
+            --status m9-zlib-regression=${ZLIB_STATUS} \
+            --status m11-2-libwebp-blind=${LIBWEBP_STATUS} \
+            --status m11-3-libjpeg-alias-blind=${LIBJPEG_STATUS} \
+            --status m11-5-libcue-specialist=${LIBCUE_STATUS} \
+            --status m11-7-cjson-cursor=${CJSON_STATUS}

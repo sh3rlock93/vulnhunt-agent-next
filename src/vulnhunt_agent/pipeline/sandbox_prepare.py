@@ -155,11 +155,17 @@ async def run_prepare(store: RunStore, bus: EventBus) -> None:
 
     base = base_image_for(env)
     if language_of(env) == "c":
+        raw_cmake_options = cfg.get("native_cmake_options") or []
+        if not isinstance(raw_cmake_options, list) or not all(
+            isinstance(option, str) for option in raw_cmake_options
+        ):
+            raise ValueError("native_cmake_options must be a list of strings")
         snapshot_digest = "sha256:" + _sha256_file(source_archive)
         build_plan = create_c_prepared_build_plan(
             repo,
             source_snapshot_sha256=snapshot_digest,
             base_image=base,
+            cmake_options=tuple(raw_cmake_options),
         )
         store.save_step("prepared_build_plan", build_plan.to_dict())
         if not build_plan.supported:
@@ -488,7 +494,11 @@ async def _execute_prepared_command(
 ) -> PreparedCommandResult:
     result = await sandbox.exec(command, timeout=timeout)
     outcome = "passed"
-    if infer_test_outcome and "VULNHUNT_TESTS_NOT_DECLARED" in result.stdout:
+    test_output = result.stdout + "\n" + result.stderr
+    if infer_test_outcome and (
+        "VULNHUNT_TESTS_NOT_DECLARED" in test_output
+        or "No tests were found" in test_output
+    ):
         outcome = "not_declared"
     return _command_result(
         phase=phase,

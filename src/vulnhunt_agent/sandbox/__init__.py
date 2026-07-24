@@ -13,6 +13,7 @@ from .prepared_build import (
     PreparedBuildUnsupportedReason,
     PreparedBuildVerificationError,
     create_c_prepared_build_plan,
+    verify_prepared_build_receipt,
 )
 from ..core.settings import ENVIRONMENTS
 
@@ -35,6 +36,7 @@ __all__ = [
     "PreparedBuildVerificationError",
     "base_image_for",
     "create_c_prepared_build_plan",
+    "verify_prepared_build_receipt",
     "language_of",
     "cleanup",
 ]
