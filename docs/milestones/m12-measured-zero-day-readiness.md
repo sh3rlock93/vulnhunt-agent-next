@@ -1,7 +1,8 @@
 # M12 — Measured zero-day readiness
 
-Status: in progress; M12.0 and M12.1 are complete, and the M12.2 calibration
-corpus and 4-by-3 cohort runner are frozen before authenticated execution
+Status: M12.0 and M12.1 are complete. M12.2 completed its 12-run calibration
+pilot but failed the detection and median-cost gates, so M12.3 is blocked
+pending a focused M12.2.x recovery milestone.
 
 ## Goal
 
@@ -247,6 +248,49 @@ upgrade.
 If a threshold fails because of one coherent reasoning gap, work stops and one
 small `M12.2.x` recovery milestone is designed for that gap using calibration
 cases only.  Other missing families and the sealed holdout remain untouched.
+
+## M12.2.x — Target-cluster invariant completion recovery
+
+Status: designed, not started. The M12.2 report measured 0/12 exact target
+detections despite target-covering admission in 8/12 runs. M12.3 remains
+blocked until this recovery passes.
+
+### Single objective
+
+Complete capacity/state and cursor/length invariants inside already selected
+target file clusters before spending sessions on unrelated high-risk sinks.
+This recovery does not add a vulnerability family, use oracle locations during
+discovery, increase any run budget, or change reportability policy.
+
+### PR sequence
+
+1. Derive deterministic, oracle-free invariant obligations from the existing
+   analysis graph. Pair allocation or required-capacity calculations with
+   downstream writes, capacity-state mutations with their failure paths, and
+   parser extension-byte reads with the preceding remaining-length checks.
+   Attach obligations only to existing file clusters and add no model calls.
+2. Replace the lowest-ranked non-target work in each admitted cluster with at
+   most one required-Hunter invariant-completion session. The session must
+   close every attached obligation as `proved-safe`, `candidate`, or
+   `unresolved-with-evidence`; it may not widen repository scope. Use a
+   1,500,000-token soft stop while preserving the existing hard ceilings.
+3. Run a new 4-by-3 calibration cohort under new run IDs. Reuse the M12.2
+   evaluator unchanged, publish exact target and cost metrics, and promote no
+   case unless target detection and differential reproduction succeed in at
+   least two of three repetitions.
+
+### Recovery gates
+
+- all original protected detections stay green;
+- the deterministic obligation tests cover each of the three supported
+  families without oracle or fixed-tree input;
+- at least 3/4 target Hunters are admitted in at least two repetitions;
+- `hunter_detection_at_12` is at least 75% and
+  `reportable_detection_at_12` is at least 50%;
+- no supported family has zero target detections;
+- median input tokens including cache are at most 1,500,000 and no run exceeds
+  2,000,000; and
+- no new reportable non-target candidate is treated as an oracle match.
 
 ## M12.3 — Canonical findings and reviewer consensus
 

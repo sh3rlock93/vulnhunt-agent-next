@@ -46,7 +46,13 @@
           "candidates": {"$ref": "#/$defs/reference"},
           "candidates_sha256": {"$ref": "#/$defs/sha256"},
           "adjudications": {"$ref": "#/$defs/reference"},
-          "adjudications_sha256": {"$ref": "#/$defs/sha256"}
+          "adjudications_sha256": {"$ref": "#/$defs/sha256"},
+          "evaluation_reference": {"$ref": "#/$defs/reference"},
+          "evaluation_sha256": {"$ref": "#/$defs/sha256"}
+        },
+        "dependentRequired": {
+          "evaluation_reference": ["evaluation_sha256"],
+          "evaluation_sha256": ["evaluation_reference"]
         }
       }
     }
