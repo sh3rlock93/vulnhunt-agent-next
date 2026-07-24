@@ -1,0 +1,22 @@
+[catalog]
+schema_version = 1
+policy_version = "calibration-catalog-v1"
+partition = "calibration"
+repetitions_per_case = 3
+selection_registry_sha256 = "sha256:3fa8fa0c538fa52ecec575a032de9f60d36869cb3f471a60ca48e52e273e92b2"
+
+[[case]]
+manifest = "benchmarks/m12/calibration/cases/case_793a704d3845b63e.toml"
+sha256 = "sha256:26f068f55e92d29788ec808b46542ce6e267186e26534ed77c874bc8b12a465b"
+
+[[case]]
+manifest = "benchmarks/m12/calibration/cases/case_82b3a769de36034c.toml"
+sha256 = "sha256:534be45025fb45f3935223e9a2e6946e8aa94e0bb080435c37f07ccdd8572c29"
+
+[[case]]
+manifest = "benchmarks/m12/calibration/cases/case_e9366d85b7c31f73.toml"
+sha256 = "sha256:ef18afa7d285aef81cfb40cbf98adcb08229aa1c2d8276faeb69c583acb8c89d"
+
+[[case]]
+manifest = "benchmarks/m12/calibration/cases/case_f521543734c7e34a.toml"
+sha256 = "sha256:2bb9525e8594ab2a40dccaa35d61722c164ae9b402902bc1b13946c99cc1826f"

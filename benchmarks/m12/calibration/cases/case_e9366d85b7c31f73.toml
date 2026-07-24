@@ -1,0 +1,32 @@
+[case]
+schema_version = 1
+policy_version = "benchmark-case-v1"
+id = "case_e9366d85b7c31f73"
+partition = "calibration"
+supported_family = "parser-cursor-oob-read"
+required_hunter = "c-bounds-integers"
+repetition_index = 1
+
+[source]
+repository = "https://github.com/obgm/libcoap.git"
+commit = "7e6b2a9ec32e2d260a80899a2577e62c2454a55f"
+tree = "db50550945311f6056787b1fbfec8aedd5cb86ef"
+
+[discovery]
+scan_manifest = "benchmarks/m12/calibration/scans/case_e9366d85b7c31f73.toml"
+scan_manifest_sha256 = "sha256:2a4000e1c4195e9167cfc49f89b208bfb8a569dab235481c96d78e804350d5ce"
+
+[budget]
+max_hunter_sessions = 12
+max_input_tokens = 2000000
+max_output_tokens = 200000
+max_wall_clock_minutes = 60
+max_context_bytes = 24000
+max_retries_per_work_item = 1
+max_format_repairs_per_work_item = 1
+max_parallel_hunters = 2
+
+[evaluation]
+kind = "oracle"
+reference = "benchmarks/oracles/m12-calibration/case_e9366d85b7c31f73.toml"
+sha256 = "sha256:5998d361792094ea8fd11c2b6e771343643c2e839b3c1d585a8fb7db1232fc47"

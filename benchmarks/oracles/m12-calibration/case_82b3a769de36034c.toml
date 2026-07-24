@@ -1,0 +1,51 @@
+[oracle]
+schema_version = 1
+policy_version = "calibration-oracle-v1"
+case_id = "case_82b3a769de36034c"
+upstream_reference = "https://github.com/michaelrsweet/mxml/issues/233"
+weakness = "unbounded floating-point formatting writes beyond a fixed-size stack buffer"
+supported_family = "bounded-write-capacity"
+required_hunter = "c-memory-lifetime"
+
+[fixed_source]
+repository = "https://github.com/michaelrsweet/mxml.git"
+commit = "4f5577dd4672d228e4180f06bdbd66f343ea45e0"
+tree = "97e5260dfafd2aabe7c348c2d1758c88c4f4435b"
+
+[location]
+entry_file = "mxml-file.c"
+entry_line_min = 2650
+entry_line_max = 2750
+sink_file = "mxml-file.c"
+sink_line_min = 2890
+sink_line_max = 2930
+required_paths = ["mxml-file.c"]
+
+[reproduction]
+kind = "compiled-driver"
+artifact_glob = "**/libmxml.a"
+compile_argv = ["cc", "-fsanitize=address,undefined", "-I/code", "{source}", "{artifact}", "-pthread", "-lm", "-o", "{executable}"]
+run_argv = ["{executable}"]
+attempts = 2
+timeout_seconds = 30
+expected_vulnerable_sanitizer = "stack-buffer-overflow"
+expected_vulnerable_frame = "mxml_write_node"
+expected_fixed_stdout = "serialized"
+source = '''
+#include <float.h>
+#include <stdio.h>
+#include "mxml.h"
+
+int main(void) {
+    mxml_node_t *node = mxmlNewReal(NULL, DBL_MAX);
+    FILE *output = fopen("/dev/null", "w");
+    int result;
+    if (node == NULL || output == NULL) return 2;
+    result = mxmlSaveFile(node, output, MXML_NO_CALLBACK);
+    fclose(output);
+    mxmlDelete(node);
+    if (result < 0) return 3;
+    puts("serialized");
+    return 0;
+}
+'''

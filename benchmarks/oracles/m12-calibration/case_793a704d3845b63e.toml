@@ -1,0 +1,36 @@
+[oracle]
+schema_version = 1
+policy_version = "calibration-oracle-v1"
+case_id = "case_793a704d3845b63e"
+upstream_reference = "https://github.com/dbry/WavPack/issues/91"
+weakness = "a signed sample-rate value reaches block arithmetic and under-allocates an encoder buffer before writes"
+supported_family = "integer-signedness-memory"
+required_hunter = "c-bounds-integers"
+
+[fixed_source]
+repository = "https://github.com/dbry/WavPack.git"
+commit = "63f3ec70129843dd64e11aa4c21c4a1cf00c9f1c"
+tree = "b90845e0cb0e652cb5062118e3000490ac291178"
+
+[location]
+entry_file = "src/pack_utils.c"
+entry_line_min = 185
+entry_line_max = 570
+sink_file = "src/pack_utils.c"
+sink_line_min = 635
+sink_line_max = 680
+required_paths = ["src/pack_utils.c"]
+
+[reproduction]
+kind = "upstream-input"
+artifact_glob = "**/wavpack"
+run_argv = ["{artifact}", "-y", "{input}", "-o", "/workspace/output.wv"]
+attempts = 2
+timeout_seconds = 30
+expected_vulnerable_sanitizer = "heap-buffer-overflow"
+expected_vulnerable_frame = "WavpackPackSamples"
+expected_fixed_stdout = "created"
+input_url = "https://github.com/dbry/WavPack/files/5745022/crash.wav.tar.gz"
+input_sha256 = "sha256:385ac3a107dcd0439adf8ab1a97ffa133cf4631ddb400ce8a8f92e6af3418ed5"
+input_size = 463729
+archive_member = "crash.wav"
