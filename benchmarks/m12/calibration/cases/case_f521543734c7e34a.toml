@@ -1,0 +1,32 @@
+[case]
+schema_version = 1
+policy_version = "benchmark-case-v1"
+id = "case_f521543734c7e34a"
+partition = "calibration"
+supported_family = "bounded-write-capacity"
+required_hunter = "c-bounds-integers"
+repetition_index = 1
+
+[source]
+repository = "https://github.com/uriparser/uriparser.git"
+commit = "f7230d6a0c1b12c9857cf8562a47e2f616713070"
+tree = "debb9a4b0344600221370f65d3ce719581b9b9fc"
+
+[discovery]
+scan_manifest = "benchmarks/m12/calibration/scans/case_f521543734c7e34a.toml"
+scan_manifest_sha256 = "sha256:6da01dda80d4f7f1647ee9ae3d23fb62a677f603d168a8fd0cbe1677c36d37f0"
+
+[budget]
+max_hunter_sessions = 12
+max_input_tokens = 2000000
+max_output_tokens = 200000
+max_wall_clock_minutes = 60
+max_context_bytes = 24000
+max_retries_per_work_item = 1
+max_format_repairs_per_work_item = 1
+max_parallel_hunters = 2
+
+[evaluation]
+kind = "oracle"
+reference = "benchmarks/oracles/m12-calibration/case_f521543734c7e34a.toml"
+sha256 = "sha256:1772ac2d70cb5c6342665a6ca26de6b18265ea81659e8c45f483d7bd5ae83529"

