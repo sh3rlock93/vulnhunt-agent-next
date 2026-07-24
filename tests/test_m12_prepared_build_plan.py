@@ -282,6 +282,57 @@ def test_benchmark_autotools_option_must_be_boolean_and_source_declared(
         )
 
 
+def test_legacy_autotools_without_vpath_builds_from_an_isolated_source_copy(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "configure").write_text("#!/bin/sh\n", encoding="utf-8")
+    (tmp_path / "Makefile.in").write_text(
+        "library.o: library.c\n\t$(CC) -c library.c\n",
+        encoding="utf-8",
+    )
+
+    plan = create_c_prepared_build_plan(
+        tmp_path,
+        source_snapshot_sha256=SNAPSHOT,
+        base_image=BASE_IMAGE,
+    )
+
+    bootstrap = plan.install_commands[0]
+    assert "tar -C /code" in bootstrap
+    assert "--exclude=.git --exclude=.hg --exclude=.svn" in bootstrap
+    assert "| tar -C /opt/vulnhunt/build -xf -" in bootstrap
+    assert "CFLAGS=" in bootstrap
+    assert "LDFLAGS=" in bootstrap
+    assert "./configure --disable-shared --enable-static" in bootstrap
+    assert "cd /code && autoreconf" not in bootstrap
+    assert plan.install_commands[1].startswith("ASAN_OPTIONS=detect_leaks=0 make ")
+
+
+@pytest.mark.parametrize(
+    "makefile",
+    [
+        "VPATH = @srcdir@\nlibrary.o: library.c\n",
+        "srcdir = @srcdir@\nlibrary.o: $(srcdir)/library.c\n",
+    ],
+)
+def test_vpath_capable_autotools_keeps_out_of_tree_build(
+    tmp_path: Path,
+    makefile: str,
+) -> None:
+    (tmp_path / "configure").write_text("#!/bin/sh\n", encoding="utf-8")
+    (tmp_path / "Makefile.in").write_text(makefile, encoding="utf-8")
+
+    plan = create_c_prepared_build_plan(
+        tmp_path,
+        source_snapshot_sha256=SNAPSHOT,
+        base_image=BASE_IMAGE,
+    )
+
+    bootstrap = plan.install_commands[0]
+    assert "tar -C /code" not in bootstrap
+    assert "/code/configure --disable-shared --enable-static" in bootstrap
+
+
 def test_build_options_cannot_cross_build_systems(tmp_path: Path) -> None:
     (tmp_path / "CMakeLists.txt").write_text("", encoding="utf-8")
 

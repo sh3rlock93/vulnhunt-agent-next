@@ -374,18 +374,30 @@ def select_c_build(
             raise ValueError("CMake options require a CMake build descriptor")
         option_args = _validated_configure_option_args(repo, configure_options)
         descriptor = "configure" if (repo / "configure").is_file() else "configure.ac"
-        bootstrap = (
-            "if [ ! -x /code/configure ]; then cd /code && autoreconf -fi; fi; "
-            "mkdir -p /opt/vulnhunt/build && cd /opt/vulnhunt/build && "
-            f"CFLAGS='{flags}' /code/configure --disable-shared --enable-static"
-            f"{option_args}"
-        )
+        if _legacy_autotools_requires_source_copy(repo):
+            bootstrap = (
+                "mkdir -p /opt/vulnhunt/build && "
+                "tar -C /code --exclude=.git --exclude=.hg --exclude=.svn -cf - . "
+                "| tar -C /opt/vulnhunt/build -xf - && "
+                "cd /opt/vulnhunt/build && "
+                f"CFLAGS='{flags}' LDFLAGS='{flags}' "
+                "./configure --disable-shared --enable-static"
+                f"{option_args}"
+            )
+        else:
+            bootstrap = (
+                "if [ ! -x /code/configure ]; then cd /code && autoreconf -fi; fi; "
+                "mkdir -p /opt/vulnhunt/build && cd /opt/vulnhunt/build && "
+                f"CFLAGS='{flags}' LDFLAGS='{flags}' "
+                "/code/configure --disable-shared --enable-static"
+                f"{option_args}"
+            )
         return CBuildSelection(
             build_system=CBuildSystem.AUTOTOOLS,
             descriptor=descriptor,
             install_commands=(
                 bootstrap,
-                "make -C /opt/vulnhunt/build -j2",
+                "ASAN_OPTIONS=detect_leaks=0 make -C /opt/vulnhunt/build -j2",
             ),
             test_commands=(
                 "if make -C /opt/vulnhunt/build -n check >/dev/null 2>&1; then "
@@ -700,6 +712,20 @@ def _validated_configure_option_args(repo: Path, options: tuple[str, ...]) -> st
         prefix = "enable" if value == "ON" else "disable"
         normalized.append(f"--{prefix}-{name}")
     return " " + " ".join(sorted(normalized))
+
+
+def _legacy_autotools_requires_source_copy(repo: Path) -> bool:
+    """Detect a top-level generated Makefile that cannot resolve source files."""
+    makefile = repo / "Makefile.in"
+    if not makefile.is_file():
+        return False
+    source = makefile.read_text(encoding="utf-8", errors="replace")
+    source_dir = re.search(
+        r"(?m)^\s*(?:srcdir|top_srcdir)\s*(?::?=)\s*@(?:top_)?srcdir@\s*$",
+        source,
+    )
+    vpath = re.search(r"(?m)^\s*VPATH\s*(?::?=)", source)
+    return source_dir is None and vpath is None
 
 
 def _reject_foreign_build_options(
