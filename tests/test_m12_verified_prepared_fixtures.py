@@ -6,6 +6,7 @@ import pytest
 
 from benchmarks.m12.prepared_build import (
     VERIFIED_PREPARED_RUN_POLICY,
+    build_parser as prepared_parser,
     load_verified_prepared_run,
     resolve_reproduction_image,
 )
@@ -111,6 +112,17 @@ def test_ci_uses_verified_path_for_all_m12_1_layout_proofs() -> None:
     assert "--cmake-option ENABLE_CJSON_TEST=OFF" in workflow
     assert "--vulnerable-prepare-run" in workflow
     assert "--fixed-prepare-run" in workflow
+
+
+def test_prepare_cli_accepts_declared_autotools_options() -> None:
+    args = prepared_parser().parse_args([
+        "prepare",
+        "--repo", "source",
+        "--run-dir", "run",
+        "--configure-option", "test=OFF",
+    ])
+
+    assert args.configure_option == ["test=OFF"]
 
 
 def _write_verified_run(run_dir: Path) -> Path:
