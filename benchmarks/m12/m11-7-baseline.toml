@@ -1,0 +1,137 @@
+[baseline]
+schema_version = 1
+policy_version = "m12-baseline-freeze-v1"
+implementation_commit = "1e99bd24e779f47e511165c069fd1cc659b01967"
+implementation_tree = "8b4cfc5a592c82117d1b74819543bc7f8e9c96e7"
+action_run_id = 29987233593
+action_run_url = "https://github.com/sh3rlock93/vulnhunt-agent-next/actions/runs/29987233593"
+release_matrix_job_id = 89141917213
+release_matrix_result = "success"
+protected_count = 6
+
+[[file]]
+path = ".github/workflows/ci.yml"
+sha256 = "sha256:237ebbe4c8187b704c1da8031b507a171c891ed18d251a86c2f3879927bd3763"
+
+[[file]]
+path = "benchmarks/historical-detections.toml"
+sha256 = "sha256:3fa8fa0c538fa52ecec575a032de9f60d36869cb3f471a60ca48e52e273e92b2"
+
+[[file]]
+path = "benchmarks/detection-release-matrix.toml"
+sha256 = "sha256:a32b02a09a443f779bfa8f50541e2e566af790181c32ba08fc77aa4d377330ce"
+
+[[file]]
+path = "benchmarks/authenticated-detection-receipts.toml"
+sha256 = "sha256:25eb69899f59693a78785ae058cdb67b31ca1ee617e37b2d91d9d346f71daeca"
+
+[[protected]]
+id = "zlib-cve-2023-45853"
+detection_contract_sha256 = "sha256:f9b0b6a78517a6434c4797ea53fc511bd1d9b9428bbf750b61cd0df87e7841f2"
+release_gate_sha256 = "sha256:bef50b2390233fcb32ffca61f981f7917f679258533a6714de5ef61cf9571f1c"
+ci_check_name = "M9 zlib CVE-2023-45853 gates"
+ci_job_id = 89141697696
+result = "success"
+oracle_tokens = [
+  "zlib-cve-2023-45853",
+  "https://github.com/madler/zlib.git",
+  "6dfa8714a3af40303bf5c6258af28a0eb37fc4ff",
+  "75d0c90b9a6b6639c4d980947b5a99d5712f3635",
+  "726e18943df8c3bd75e6fa91f2ff24ba956a4f95",
+  "73331a6a0481067628f065ffe87bb1d8f787d10c",
+  "CVE-2023-45853",
+  "zipOpenNewFileInZip4_64",
+]
+
+[[protected]]
+id = "libjpeg-turbo-issue-387"
+detection_contract_sha256 = "sha256:f86121bcf825547694b7e1ee84aaa54ea545e08ea31f4e9c01d71b39924fe1bf"
+release_gate_sha256 = "sha256:67a36f39c700142c20a855dfbee58458958530010171ccd7b045a369521c4342"
+ci_check_name = "M11.3 libjpeg blind capacity-alias gates"
+ci_job_id = 89141697660
+result = "success"
+oracle_tokens = [
+  "libjpeg-turbo-issue-387",
+  "https://github.com/libjpeg-turbo/libjpeg-turbo.git",
+  "c30b1e72dac76343ef9029833d1561de07d29bad",
+  "48074ffcebfb949fd22ded3281301259d4c9f265",
+  "bd20344b0ae7d53e1e26e1c4339915032a8ea98f",
+  "dbc026619681e00e07101b1f0f0b2b24047d1ff5",
+  "libjpeg-turbo/libjpeg-turbo#387",
+  "tjDecompressToYUVPlanes",
+]
+
+[[protected]]
+id = "libwebp-cve-2023-4863"
+detection_contract_sha256 = "sha256:b14d8f82c2b19e947462c093139499866de416696e68a2565955f32edddb25fc"
+release_gate_sha256 = "sha256:82b497f17eb5443605f348b03fe01140a1236f7f959ed6163795462b8f9446b4"
+ci_check_name = "M11.2 libwebp blind capacity gates"
+ci_job_id = 89141697672
+result = "success"
+oracle_tokens = [
+  "libwebp-cve-2023-4863",
+  "https://github.com/webmproject/libwebp.git",
+  "7ba44f80f3b94fc0138db159afea770ef06532a0",
+  "5189aba17d0a7df8f385946a4d02dffe702b7224",
+  "902bc9190331343b2017211debcec8d2ab87e17a",
+  "4f26b537e953ef6ba3d465ea96f30eedbac8737e",
+  "CVE-2023-4863",
+  "f2281261ab7c6426eab9e62ac569244994d2fa563d3e2b1de4a0c7abcc00b3e6",
+]
+
+[[protected]]
+id = "libcue-time-global-buffer-overflow"
+detection_contract_sha256 = "sha256:20d881a7ab9a6e93340e24148fbef2152f3b0eae4e021c75efe5bf84934cdf91"
+release_gate_sha256 = "sha256:c73226a877cea044336144a2c3852a01e556ab75ae94761d7d21e22136512043"
+ci_check_name = "M11.5 libcue specialist-preservation gates"
+ci_job_id = 89141697613
+result = "success"
+authenticated_receipt = "libcue-m11-5-authenticated"
+receipt_contract_sha256 = "sha256:1db49894a0e73561077a378ec3199626f73e90497647da06a3562ad4ff5c10ca"
+oracle_tokens = [
+  "libcue-time-global-buffer-overflow",
+  "https://github.com/lipnitsk/libcue.git",
+  "1b0f3917b8f908c81bb646ce42f29cf7c86443a1",
+  "0427ce355c4cc08d478aa1401eff9aa8a9300e6b",
+  "INDEX 4294567296 0",
+  "track_set_index",
+]
+
+[[protected]]
+id = "libcue-cve-2023-43641"
+detection_contract_sha256 = "sha256:73a06fe76f764ec43b767044e9942cdea552f07d096eab93c42cbedd130ca508"
+release_gate_sha256 = "sha256:fa7d91791162203c7b3ebd76931c64f6e4943c81a79c4f518ab7b2f174d85e41"
+ci_check_name = "M11.5 libcue specialist-preservation gates"
+ci_job_id = 89141697613
+result = "success"
+authenticated_receipt = "libcue-m11-5-authenticated"
+receipt_contract_sha256 = "sha256:1db49894a0e73561077a378ec3199626f73e90497647da06a3562ad4ff5c10ca"
+oracle_tokens = [
+  "libcue-cve-2023-43641",
+  "https://github.com/lipnitsk/libcue.git",
+  "1b0f3917b8f908c81bb646ce42f29cf7c86443a1",
+  "0427ce355c4cc08d478aa1401eff9aa8a9300e6b",
+  "cfb98a060fd79dbc3463d85f0f29c3c335dfa0ea",
+  "247f0edd2035a950d1a8f23854b042e822d41188",
+  "CVE-2023-43641",
+  "INDEX 4294567296 0",
+]
+
+[[protected]]
+id = "cjson-issue-800"
+detection_contract_sha256 = "sha256:9a3cb92741a07be4f2a25ef5058ed9c4706c0e6901e2b75e271cb0da3e8a07bc"
+release_gate_sha256 = "sha256:223ea1e865ffe05f4a2fc672b6a1cc4493e9fbb61629ed5231a246286a78053d"
+ci_check_name = "M11.7 cJSON cursor-state recovery gates"
+ci_job_id = 89141697713
+result = "success"
+authenticated_receipt = "cjson-m11-7-authenticated"
+receipt_contract_sha256 = "sha256:23f2f4b29e743d49d5687f1ea27af2c4e736963c080c1f20b841d30a6d34ef2a"
+oracle_tokens = [
+  "cjson-issue-800",
+  "https://github.com/DaveGamble/cJSON.git",
+  "98f9eb0412067a852ec107c68e49180fe4e472dc",
+  "5e10bc6289cb29afd1847278a89359e3e9d5e1f2",
+  "3ef4e4e730e5efd381be612df41e1ff3f5bb3c32",
+  "3d1d654872dff42cfebca69133ef6acdf4354f2b",
+  "DaveGamble/cJSON#800",
+]
