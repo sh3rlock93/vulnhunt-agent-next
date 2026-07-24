@@ -25,6 +25,7 @@ async def prepare_native_benchmark(
     run_dir: Path,
     *,
     cmake_options: tuple[str, ...] = (),
+    configure_options: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     repo = repo.resolve()
     run_dir = run_dir.resolve()
@@ -38,6 +39,7 @@ async def prepare_native_benchmark(
         "environment": "c:gcc-13",
         "prepare_mode": "auto",
         "native_cmake_options": list(cmake_options),
+        "native_configure_options": list(configure_options),
     })
     bus = EventBus(store.dir / "events.jsonl")
     await run_source_snapshot(store, bus)
@@ -140,6 +142,7 @@ def build_parser() -> argparse.ArgumentParser:
     prepare.add_argument("--repo", type=Path, required=True)
     prepare.add_argument("--run-dir", type=Path, required=True)
     prepare.add_argument("--cmake-option", action="append", default=[])
+    prepare.add_argument("--configure-option", action="append", default=[])
     verify = subparsers.add_parser("verify")
     verify.add_argument("--run-dir", type=Path, required=True)
     return parser
@@ -153,6 +156,7 @@ def main(argv: Iterable[str] | None = None) -> int:
                 args.repo,
                 args.run_dir,
                 cmake_options=tuple(args.cmake_option),
+                configure_options=tuple(args.configure_option),
             ))
         else:
             result = load_verified_prepared_run(args.run_dir)

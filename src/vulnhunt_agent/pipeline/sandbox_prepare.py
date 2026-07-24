@@ -160,12 +160,18 @@ async def run_prepare(store: RunStore, bus: EventBus) -> None:
             isinstance(option, str) for option in raw_cmake_options
         ):
             raise ValueError("native_cmake_options must be a list of strings")
+        raw_configure_options = cfg.get("native_configure_options") or []
+        if not isinstance(raw_configure_options, list) or not all(
+            isinstance(option, str) for option in raw_configure_options
+        ):
+            raise ValueError("native_configure_options must be a list of strings")
         snapshot_digest = "sha256:" + _sha256_file(source_archive)
         build_plan = create_c_prepared_build_plan(
             repo,
             source_snapshot_sha256=snapshot_digest,
             base_image=base,
             cmake_options=tuple(raw_cmake_options),
+            configure_options=tuple(raw_configure_options),
         )
         store.save_step("prepared_build_plan", build_plan.to_dict())
         if not build_plan.supported:

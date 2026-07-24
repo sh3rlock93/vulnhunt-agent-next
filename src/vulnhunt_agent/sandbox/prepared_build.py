@@ -330,10 +330,13 @@ def select_c_build(
     repo: Path,
     *,
     cmake_options: tuple[str, ...] = (),
+    configure_options: tuple[str, ...] = (),
 ) -> CBuildSelection:
     """Select the first existing native layout using the historical precedence."""
     flags = C_SANITIZER_FLAGS
     if (repo / "CMakeLists.txt").is_file():
+        if configure_options:
+            raise ValueError("Autotools options require an Autotools build descriptor")
         option_args = _validated_cmake_option_args(repo, cmake_options)
         cmake_flags = f"{flags} {C_CMAKE_COMPATIBILITY_FLAG}"
         return CBuildSelection(
@@ -353,8 +356,7 @@ def select_c_build(
             expected_artifact_roots=("/opt/vulnhunt/build",),
         )
     if (repo / "meson.build").is_file():
-        if cmake_options:
-            raise ValueError("CMake options require a CMake build descriptor")
+        _reject_foreign_build_options(cmake_options, configure_options)
         return CBuildSelection(
             build_system=CBuildSystem.MESON,
             descriptor="meson.build",
@@ -370,11 +372,13 @@ def select_c_build(
     if (repo / "configure").is_file() or (repo / "configure.ac").is_file():
         if cmake_options:
             raise ValueError("CMake options require a CMake build descriptor")
+        option_args = _validated_configure_option_args(repo, configure_options)
         descriptor = "configure" if (repo / "configure").is_file() else "configure.ac"
         bootstrap = (
             "if [ ! -x /code/configure ]; then cd /code && autoreconf -fi; fi; "
             "mkdir -p /opt/vulnhunt/build && cd /opt/vulnhunt/build && "
             f"CFLAGS='{flags}' /code/configure --disable-shared --enable-static"
+            f"{option_args}"
         )
         return CBuildSelection(
             build_system=CBuildSystem.AUTOTOOLS,
@@ -391,8 +395,7 @@ def select_c_build(
             expected_artifact_roots=("/opt/vulnhunt/build",),
         )
     if (repo / "Makefile").is_file() or (repo / "GNUmakefile").is_file():
-        if cmake_options:
-            raise ValueError("CMake options require a CMake build descriptor")
+        _reject_foreign_build_options(cmake_options, configure_options)
         descriptor = "Makefile" if (repo / "Makefile").is_file() else "GNUmakefile"
         return CBuildSelection(
             build_system=CBuildSystem.MAKE,
@@ -407,8 +410,7 @@ def select_c_build(
             ),
             expected_artifact_roots=("/code",),
         )
-    if cmake_options:
-        raise ValueError("CMake options require a CMake build descriptor")
+    _reject_foreign_build_options(cmake_options, configure_options)
     return CBuildSelection(
         build_system=CBuildSystem.UNSUPPORTED,
         descriptor="",
@@ -425,12 +427,17 @@ def create_c_prepared_build_plan(
     source_snapshot_sha256: str,
     base_image: str,
     cmake_options: tuple[str, ...] = (),
+    configure_options: tuple[str, ...] = (),
 ) -> PreparedBuildPlan:
     if _SHA256.fullmatch(source_snapshot_sha256) is None:
         raise ValueError("prepared build source snapshot must be a SHA-256 digest")
     if not base_image or "\0" in base_image:
         raise ValueError("prepared build base image is invalid")
-    selection = select_c_build(repo, cmake_options=cmake_options)
+    selection = select_c_build(
+        repo,
+        cmake_options=cmake_options,
+        configure_options=configure_options,
+    )
     support = (C_TOOLCHAIN_COMMAND,) if selection.supported else ()
     return PreparedBuildPlan(
         source_snapshot_sha256=source_snapshot_sha256,
@@ -658,6 +665,51 @@ def _validated_cmake_option_args(repo: Path, options: tuple[str, ...]) -> str:
             raise ValueError(f"native CMake option is not declared by the source: {name}")
         normalized.append(f"-D{name}={value}")
     return " " + " ".join(sorted(normalized))
+
+
+def _validated_configure_option_args(repo: Path, options: tuple[str, ...]) -> str:
+    if not options:
+        return ""
+    descriptor = repo / "configure.ac"
+    if not descriptor.is_file():
+        descriptor = repo / "configure"
+    source = descriptor.read_text(encoding="utf-8", errors="replace")
+    normalized: list[str] = []
+    names: set[str] = set()
+    for option in options:
+        match = re.fullmatch(r"([a-z][a-z0-9-]*)=(ON|OFF)", option)
+        if match is None:
+            raise ValueError("native Autotools options must use declared-option=ON|OFF")
+        name, value = match.groups()
+        if name in names:
+            raise ValueError("native Autotools option names must be unique")
+        names.add(name)
+        declared = (
+            re.search(
+                rf"\bAC_ARG_ENABLE\s*\(\s*\[?{re.escape(name)}\]?\s*(?:,|\))",
+                source,
+                re.I,
+            )
+            if descriptor.name == "configure.ac"
+            else re.search(rf"--(?:enable|disable)-{re.escape(name)}\b", source)
+        )
+        if declared is None:
+            raise ValueError(
+                f"native Autotools option is not declared by the source: {name}"
+            )
+        prefix = "enable" if value == "ON" else "disable"
+        normalized.append(f"--{prefix}-{name}")
+    return " " + " ".join(sorted(normalized))
+
+
+def _reject_foreign_build_options(
+    cmake_options: tuple[str, ...],
+    configure_options: tuple[str, ...],
+) -> None:
+    if cmake_options:
+        raise ValueError("CMake options require a CMake build descriptor")
+    if configure_options:
+        raise ValueError("Autotools options require an Autotools build descriptor")
 
 
 def _canonical_sha256(value: Any) -> str:

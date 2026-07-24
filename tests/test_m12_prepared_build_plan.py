@@ -242,6 +242,58 @@ def test_benchmark_cmake_option_must_be_boolean_and_source_declared(
         )
 
 
+def test_benchmark_autotools_option_must_be_boolean_and_source_declared(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "configure.ac").write_text(
+        "AC_ARG_ENABLE([test], [AS_HELP_STRING([--disable-test], [skip tests])])\n",
+        encoding="utf-8",
+    )
+
+    plan = create_c_prepared_build_plan(
+        tmp_path,
+        source_snapshot_sha256=SNAPSHOT,
+        base_image=BASE_IMAGE,
+        configure_options=("test=OFF",),
+    )
+
+    assert plan.build_system is CBuildSystem.AUTOTOOLS
+    assert plan.install_commands[0].endswith("--disable-test")
+    with pytest.raises(ValueError, match="not declared"):
+        create_c_prepared_build_plan(
+            tmp_path,
+            source_snapshot_sha256=SNAPSHOT,
+            base_image=BASE_IMAGE,
+            configure_options=("examples=OFF",),
+        )
+    with pytest.raises(ValueError, match=r"declared-option=ON\|OFF"):
+        create_c_prepared_build_plan(
+            tmp_path,
+            source_snapshot_sha256=SNAPSHOT,
+            base_image=BASE_IMAGE,
+            configure_options=("test=../../escape",),
+        )
+    with pytest.raises(ValueError, match="names must be unique"):
+        create_c_prepared_build_plan(
+            tmp_path,
+            source_snapshot_sha256=SNAPSHOT,
+            base_image=BASE_IMAGE,
+            configure_options=("test=ON", "test=OFF"),
+        )
+
+
+def test_build_options_cannot_cross_build_systems(tmp_path: Path) -> None:
+    (tmp_path / "CMakeLists.txt").write_text("", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="Autotools options require"):
+        create_c_prepared_build_plan(
+            tmp_path,
+            source_snapshot_sha256=SNAPSHOT,
+            base_image=BASE_IMAGE,
+            configure_options=("test=OFF",),
+        )
+
+
 async def test_prepare_step_persists_plan_and_uses_content_addressed_image(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
