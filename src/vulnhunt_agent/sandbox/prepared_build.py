@@ -5,22 +5,38 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from dataclasses import dataclass
+import shlex
+from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
 PREPARED_BUILD_PLAN_POLICY = "prepared-build-plan-v1"
+PREPARED_BUILD_RECEIPT_POLICY = "prepared-build-v1"
 C_SANITIZER_FLAGS = "-O1 -g -fno-omit-frame-pointer -fsanitize=address,undefined"
+PACKAGE_LOCK_PATH = "/opt/vulnhunt/apt-packages.lock"
+_C_PACKAGES = (
+    "autoconf automake bison cmake file flex libtool meson ninja-build "
+    "pkg-config ripgrep"
+)
+C_TOOLCHAIN_COMMAND = (
+    "set -eu; apt-get update; mkdir -p /opt/vulnhunt; "
+    f"packages='{_C_PACKAGES}'; "
+    "apt-get --simulate install -y --no-install-recommends $packages "
+    "| awk '/^Inst / { version=$3; gsub(/[()]/, \"\", version); "
+    "print $2 \"=\" version }' | LC_ALL=C sort -u "
+    f"> {PACKAGE_LOCK_PATH}; "
+    f"test -s {PACKAGE_LOCK_PATH}; "
+    f"xargs apt-get install -y --no-install-recommends < {PACKAGE_LOCK_PATH}; "
+    f"while IFS= read -r locked; do pkg=${{locked%%=*}}; version=${{locked#*=}}; "
+    "test \"$(dpkg-query -W -f='${Version}' \"$pkg\")\" = \"$version\"; "
+    f"done < {PACKAGE_LOCK_PATH}; "
+    "rm -rf /var/lib/apt/lists/*"
+)
 RIPGREP_INSTALL_COMMAND = (
     "if ! command -v rg >/dev/null 2>&1; then "
     "apt-get update && apt-get install -y --no-install-recommends ripgrep "
     "&& rm -rf /var/lib/apt/lists/*; fi"
-)
-C_TOOLCHAIN_COMMAND = (
-    "apt-get update && apt-get install -y --no-install-recommends "
-    "cmake ninja-build meson flex bison autoconf automake libtool pkg-config "
-    "&& rm -rf /var/lib/apt/lists/*"
 )
 _SHA256 = re.compile(r"^sha256:[0-9a-f]{64}$")
 
@@ -38,11 +54,31 @@ class PreparedBuildUnsupportedReason(StrEnum):
     MISSING_BUILD_DESCRIPTOR = "missing_build_descriptor"
 
 
+class PreparedBuildFailureCode(StrEnum):
+    PACKAGE_LOCK_MISSING = "package_lock_missing"
+    PACKAGE_INSTALL_FAILED = "package_install_failed"
+    NETWORK_ISOLATION_FAILED = "network_isolation_failed"
+    BUILD_COMMAND_FAILED = "build_command_failed"
+    TEST_COMMAND_FAILED = "test_command_failed"
+    VERIFY_COMMAND_FAILED = "verify_command_failed"
+    ARTIFACT_ROOT_MISSING = "artifact_root_missing"
+    ARTIFACT_MISSING = "artifact_missing"
+    SANITIZER_PROVENANCE_MISSING = "sanitizer_provenance_missing"
+    IMAGE_DIGEST_UNAVAILABLE = "image_digest_unavailable"
+
+
+class PreparedBuildVerificationError(RuntimeError):
+    def __init__(self, code: PreparedBuildFailureCode, message: str):
+        super().__init__(message)
+        self.code = code
+
+
 @dataclass(frozen=True)
 class CBuildSelection:
     build_system: CBuildSystem
     descriptor: str
     install_commands: tuple[str, ...]
+    test_commands: tuple[str, ...]
     expected_artifact_roots: tuple[str, ...]
     unsupported_reason: PreparedBuildUnsupportedReason = PreparedBuildUnsupportedReason.NONE
 
@@ -59,6 +95,7 @@ class PreparedBuildPlan:
     descriptor: str
     support_commands: tuple[str, ...]
     install_commands: tuple[str, ...]
+    test_commands: tuple[str, ...]
     verify_commands: tuple[str, ...]
     compiler: str
     compiler_flags: tuple[str, ...]
@@ -84,6 +121,7 @@ class PreparedBuildPlan:
             "commands": {
                 "support": list(self.support_commands),
                 "install": list(self.install_commands),
+                "test": list(self.test_commands),
                 "verify": list(self.verify_commands),
             },
             "compiler": {
@@ -92,6 +130,14 @@ class PreparedBuildPlan:
                 "sanitizers": list(self.sanitizers),
             },
             "expected_artifact_roots": list(self.expected_artifact_roots),
+            "network": {
+                "preparation": "bridge",
+                "networked_phases": ["package_install"],
+                "offline_phases": ["build", "test", "verify", "artifact_verification"],
+                "hunt": "none",
+                "reproduction": "none",
+            },
+            "package_lock_path": PACKAGE_LOCK_PATH if self.supported else "",
             "unsupported_reason": self.unsupported_reason.value,
         }
 
@@ -132,6 +178,149 @@ class PreparedBuildPlan:
         ).encode("utf-8")
 
 
+@dataclass(frozen=True)
+class PreparedCommandResult:
+    phase: str
+    command: str
+    exit_code: int
+    timed_out: bool
+    duration_ms: int
+    stdout_sha256: str
+    stderr_sha256: str
+    outcome: str = "passed"
+    stdout: str = field(default="", repr=False, compare=False)
+    stderr: str = field(default="", repr=False, compare=False)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "phase": self.phase,
+            "command": self.command,
+            "exit_code": self.exit_code,
+            "timed_out": self.timed_out,
+            "duration_ms": self.duration_ms,
+            "stdout_sha256": self.stdout_sha256,
+            "stderr_sha256": self.stderr_sha256,
+            "outcome": self.outcome,
+        }
+
+
+@dataclass(frozen=True)
+class PreparedArtifact:
+    path: str
+    size_bytes: int
+    sha256: str
+    sanitizer_markers: tuple[str, ...]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "path": self.path,
+            "size_bytes": self.size_bytes,
+            "sha256": self.sha256,
+            "sanitizer_markers": list(self.sanitizer_markers),
+        }
+
+
+@dataclass(frozen=True)
+class PreparedBuildReceipt:
+    source_snapshot_sha256: str
+    plan_sha256: str
+    build_system: CBuildSystem
+    base_image: str
+    base_image_digest: str
+    final_image: str
+    final_image_digest: str
+    package_lock_entries: tuple[str, ...]
+    package_lock_sha256: str
+    compiler_version: str
+    command_results: tuple[PreparedCommandResult, ...]
+    test_results: tuple[PreparedCommandResult, ...]
+    artifacts: tuple[PreparedArtifact, ...]
+    policy_version: str = PREPARED_BUILD_RECEIPT_POLICY
+
+    def _core_dict(self) -> dict[str, Any]:
+        sanitizer_artifacts = [
+            artifact.path for artifact in self.artifacts if artifact.sanitizer_markers
+        ]
+        return {
+            "schema_version": 1,
+            "policy_version": self.policy_version,
+            "status": "verified",
+            "source_snapshot_sha256": self.source_snapshot_sha256,
+            "plan_sha256": self.plan_sha256,
+            "build_system": self.build_system.value,
+            "images": {
+                "base": {"reference": self.base_image, "digest": self.base_image_digest},
+                "final": {"reference": self.final_image, "digest": self.final_image_digest},
+            },
+            "network": {
+                "preparation": "bridge",
+                "networked_phases": ["package_install"],
+                "isolated_before": ["build", "test", "verify", "artifact_verification", "commit"],
+                "hunt": "none",
+                "reproduction": "none",
+            },
+            "package_lock": {
+                "path": PACKAGE_LOCK_PATH,
+                "sha256": self.package_lock_sha256,
+                "entries": list(self.package_lock_entries),
+            },
+            "compiler": {
+                "executable": "cc",
+                "version": self.compiler_version,
+                "version_sha256": _text_sha256(self.compiler_version),
+            },
+            "commands": [result.to_dict() for result in self.command_results],
+            "tests": [result.to_dict() for result in self.test_results],
+            "artifacts": [artifact.to_dict() for artifact in self.artifacts],
+            "sanitizer_provenance": {
+                "required": ["address", "undefined"],
+                "observed": sorted({
+                    marker
+                    for artifact in self.artifacts
+                    for marker in artifact.sanitizer_markers
+                }),
+                "artifacts": sanitizer_artifacts,
+            },
+            "equivalence_exclusions": [
+                "images.final.digest",
+                "commands[*].duration_ms",
+                "commands[*].stdout_sha256",
+                "commands[*].stderr_sha256",
+                "tests[*].duration_ms",
+                "tests[*].stdout_sha256",
+                "tests[*].stderr_sha256",
+            ],
+        }
+
+    def _equivalence_dict(self) -> dict[str, Any]:
+        value = self._core_dict()
+        value["images"]["final"]["digest"] = "<excluded>"
+        for key in ("commands", "tests"):
+            for result in value[key]:
+                result["duration_ms"] = 0
+                result["stdout_sha256"] = "<excluded>"
+                result["stderr_sha256"] = "<excluded>"
+        return value
+
+    @property
+    def equivalence_sha256(self) -> str:
+        return _canonical_sha256(self._equivalence_dict())
+
+    @property
+    def receipt_sha256(self) -> str:
+        return _canonical_sha256({
+            **self._core_dict(),
+            "equivalence_sha256": self.equivalence_sha256,
+        })
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            **self._core_dict(),
+            "equivalence_sha256": self.equivalence_sha256,
+            "receipt_sha256": self.receipt_sha256,
+        }
+
+
 def select_c_build(repo: Path) -> CBuildSelection:
     """Select the first existing native layout using the historical precedence."""
     flags = C_SANITIZER_FLAGS
@@ -140,11 +329,15 @@ def select_c_build(repo: Path) -> CBuildSelection:
             build_system=CBuildSystem.CMAKE,
             descriptor="CMakeLists.txt",
             install_commands=(
-                C_TOOLCHAIN_COMMAND,
                 "cmake -S /code -B /opt/vulnhunt/build "
                 "-DCMAKE_BUILD_TYPE=Debug -DBUILD_SHARED_LIBS=OFF "
                 f"-DCMAKE_C_FLAGS='{flags}'",
                 "cmake --build /opt/vulnhunt/build --parallel 2",
+            ),
+            test_commands=(
+                "if [ -f /opt/vulnhunt/build/CTestTestfile.cmake ]; then "
+                "ctest --test-dir /opt/vulnhunt/build --output-on-failure; "
+                "else printf 'VULNHUNT_TESTS_NOT_DECLARED\\n'; fi",
             ),
             expected_artifact_roots=("/opt/vulnhunt/build",),
         )
@@ -153,12 +346,12 @@ def select_c_build(repo: Path) -> CBuildSelection:
             build_system=CBuildSystem.MESON,
             descriptor="meson.build",
             install_commands=(
-                C_TOOLCHAIN_COMMAND,
                 "meson setup /opt/vulnhunt/build /code "
                 "--buildtype=debug --default-library=static "
                 f"-Dc_args='{flags}'",
                 "meson compile -C /opt/vulnhunt/build -j 2",
             ),
+            test_commands=("meson test -C /opt/vulnhunt/build --print-errorlogs",),
             expected_artifact_roots=("/opt/vulnhunt/build",),
         )
     if (repo / "configure").is_file() or (repo / "configure.ac").is_file():
@@ -172,9 +365,13 @@ def select_c_build(repo: Path) -> CBuildSelection:
             build_system=CBuildSystem.AUTOTOOLS,
             descriptor=descriptor,
             install_commands=(
-                C_TOOLCHAIN_COMMAND,
                 bootstrap,
                 "make -C /opt/vulnhunt/build -j2",
+            ),
+            test_commands=(
+                "if make -C /opt/vulnhunt/build -n check >/dev/null 2>&1; then "
+                "make -C /opt/vulnhunt/build check; "
+                "else printf 'VULNHUNT_TESTS_NOT_DECLARED\\n'; fi",
             ),
             expected_artifact_roots=("/opt/vulnhunt/build",),
         )
@@ -184,8 +381,12 @@ def select_c_build(repo: Path) -> CBuildSelection:
             build_system=CBuildSystem.MAKE,
             descriptor=descriptor,
             install_commands=(
-                C_TOOLCHAIN_COMMAND,
                 f"make -C /code -j2 CFLAGS='{flags}'",
+            ),
+            test_commands=(
+                "if make -C /code -n check >/dev/null 2>&1; then make -C /code check; "
+                "elif make -C /code -n test >/dev/null 2>&1; then make -C /code test; "
+                "else printf 'VULNHUNT_TESTS_NOT_DECLARED\\n'; fi",
             ),
             expected_artifact_roots=("/code",),
         )
@@ -193,6 +394,7 @@ def select_c_build(repo: Path) -> CBuildSelection:
         build_system=CBuildSystem.UNSUPPORTED,
         descriptor="",
         install_commands=(),
+        test_commands=(),
         expected_artifact_roots=(),
         unsupported_reason=PreparedBuildUnsupportedReason.MISSING_BUILD_DESCRIPTOR,
     )
@@ -209,7 +411,7 @@ def create_c_prepared_build_plan(
     if not base_image or "\0" in base_image:
         raise ValueError("prepared build base image is invalid")
     selection = select_c_build(repo)
-    support = (RIPGREP_INSTALL_COMMAND,) if selection.supported else ()
+    support = (C_TOOLCHAIN_COMMAND,) if selection.supported else ()
     return PreparedBuildPlan(
         source_snapshot_sha256=source_snapshot_sha256,
         base_image=base_image,
@@ -217,6 +419,7 @@ def create_c_prepared_build_plan(
         descriptor=selection.descriptor,
         support_commands=support,
         install_commands=selection.install_commands,
+        test_commands=selection.test_commands,
         verify_commands=("cc --version",) if selection.supported else (),
         compiler="cc",
         compiler_flags=(
@@ -231,6 +434,102 @@ def create_c_prepared_build_plan(
     )
 
 
+def artifact_inventory_command(roots: tuple[str, ...]) -> str:
+    """Return the approved offline command that inventories native outputs."""
+    if not roots or any(not root.startswith("/") or "\0" in root for root in roots):
+        raise ValueError("artifact roots must be non-empty absolute container paths")
+    quoted_roots = " ".join(shlex.quote(root) for root in roots)
+    return (
+        "set -eu; count=0; "
+        f"find {quoted_roots} -type f -readable -print | LC_ALL=C sort | "
+        "while IFS= read -r artifact; do "
+        "case \"$artifact\" in "
+        "*/CMakeFiles/*/CompilerIdC/*|*/CMakeFiles/*/CMakeDetermineCompilerABI_C.bin|"
+        "*/CMakeFiles/CMakeScratch/*|*/CMakeFiles/CMakeTmp/*|"
+        "*/meson-private/sanitycheckc*) continue ;; esac; "
+        "kind=$(file -b -- \"$artifact\"); "
+        "case \"$kind\" in *ELF*|*current\\ ar\\ archive*) ;; *) continue ;; esac; "
+        "count=$((count + 1)); test \"$count\" -le 4096; "
+        "size=$(wc -c < \"$artifact\" | tr -d ' '); "
+        "digest=$(sha256sum \"$artifact\" | awk '{print $1}'); "
+        "symbols=$({ nm -A \"$artifact\" 2>/dev/null || true; "
+        "nm -D -A \"$artifact\" 2>/dev/null || true; }); "
+        "markers=''; "
+        "if printf '%s' \"$symbols\" | grep -q '__asan_'; then markers='address'; fi; "
+        "if printf '%s' \"$symbols\" | grep -q '__ubsan_'; then "
+        "if [ -n \"$markers\" ]; then markers=\"$markers,undefined\"; "
+        "else markers='undefined'; fi; fi; "
+        "printf '%s\\t%s\\t%s\\t%s\\n' \"$artifact\" \"$size\" \"$digest\" \"$markers\"; "
+        "done"
+    )
+
+
+def parse_artifact_inventory(output: str) -> tuple[PreparedArtifact, ...]:
+    artifacts: list[PreparedArtifact] = []
+    for line in output.splitlines():
+        fields = line.split("\t")
+        if len(fields) != 4:
+            raise PreparedBuildVerificationError(
+                PreparedBuildFailureCode.ARTIFACT_MISSING,
+                "native artifact inventory contains an unsafe or malformed path",
+            )
+        path, size_text, digest, marker_text = fields
+        if (
+            not path.startswith("/")
+            or not size_text.isdigit()
+            or int(size_text) < 0
+            or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+        ):
+            raise PreparedBuildVerificationError(
+                PreparedBuildFailureCode.ARTIFACT_MISSING,
+                "native artifact inventory contains invalid metadata",
+            )
+        markers = tuple(marker for marker in marker_text.split(",") if marker)
+        if any(marker not in {"address", "undefined"} for marker in markers):
+            raise PreparedBuildVerificationError(
+                PreparedBuildFailureCode.SANITIZER_PROVENANCE_MISSING,
+                "native artifact inventory contains an unknown sanitizer marker",
+            )
+        artifacts.append(PreparedArtifact(
+            path=path,
+            size_bytes=int(size_text),
+            sha256="sha256:" + digest,
+            sanitizer_markers=markers,
+        ))
+    if not artifacts:
+        raise PreparedBuildVerificationError(
+            PreparedBuildFailureCode.ARTIFACT_MISSING,
+            "prepared build produced no readable native artifacts",
+        )
+    if not any(artifact.sanitizer_markers for artifact in artifacts):
+        raise PreparedBuildVerificationError(
+            PreparedBuildFailureCode.SANITIZER_PROVENANCE_MISSING,
+            "prepared build artifacts have no ASan/UBSan symbol provenance",
+        )
+    return tuple(artifacts)
+
+
+def parse_package_lock(output: str) -> tuple[str, ...]:
+    entries = tuple(line.strip() for line in output.splitlines() if line.strip())
+    if (
+        not entries
+        or entries != tuple(sorted(set(entries)))
+        or any(
+            re.fullmatch(r"[a-z0-9][a-z0-9+.-]*(?::[a-z0-9]+)?=[^\s=]+", entry) is None
+            for entry in entries
+        )
+    ):
+        raise PreparedBuildVerificationError(
+            PreparedBuildFailureCode.PACKAGE_LOCK_MISSING,
+            "prepared build package lock is missing or invalid",
+        )
+    return entries
+
+
 def _canonical_sha256(value: Any) -> str:
     encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
     return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
+def _text_sha256(value: str) -> str:
+    return "sha256:" + hashlib.sha256(value.encode()).hexdigest()

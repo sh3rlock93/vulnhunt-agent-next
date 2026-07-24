@@ -3,11 +3,14 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from vulnhunt_agent.core.events import EventBus
 from vulnhunt_agent.core.run_store import RunStore
+from vulnhunt_agent.core.v2_run import v2_repository
+from vulnhunt_agent.domain.states import RunState
 from vulnhunt_agent.pipeline import sandbox_prepare
 from vulnhunt_agent.pipeline.sandbox_prepare import run_prepare
 from vulnhunt_agent.pipeline.source_snapshot import run_source_snapshot
@@ -15,8 +18,15 @@ from vulnhunt_agent.sandbox.base import ExecResult
 from vulnhunt_agent.sandbox.prepared_build import (
     CBuildSystem,
     PREPARED_BUILD_PLAN_POLICY,
+    PREPARED_BUILD_RECEIPT_POLICY,
+    PreparedArtifact,
+    PreparedBuildFailureCode,
+    PreparedBuildReceipt,
     PreparedBuildUnsupportedReason,
+    PreparedBuildVerificationError,
+    PreparedCommandResult,
     create_c_prepared_build_plan,
+    parse_artifact_inventory,
     select_c_build,
 )
 
@@ -162,7 +172,12 @@ def test_unknown_layout_has_typed_unsupported_plan(tmp_path: Path) -> None:
     assert plan.supported is False
     assert plan.build_system is CBuildSystem.UNSUPPORTED
     assert plan.unsupported_reason is PreparedBuildUnsupportedReason.MISSING_BUILD_DESCRIPTOR
-    assert payload["commands"] == {"support": [], "install": [], "verify": []}
+    assert payload["commands"] == {
+        "support": [],
+        "install": [],
+        "test": [],
+        "verify": [],
+    }
     assert payload["expected_artifact_roots"] == []
 
 
@@ -208,12 +223,33 @@ async def test_prepare_step_persists_plan_and_uses_content_addressed_image(
         async def start(self) -> None:
             return None
 
+        async def image_digest(self, image: str | None = None) -> str:
+            return "sha256:" + ("b" if image is None else "f") * 64
+
+        async def disconnect_network(self) -> None:
+            return None
+
         async def exec(self, command: str, timeout: int) -> ExecResult:
             self.commands.append(command)
+            if command.startswith("cat -- /opt/vulnhunt/apt-packages.lock"):
+                return ExecResult(exit_code=0, stdout="cmake=3.25.1-1\n", stderr="")
+            if command == "cc --version":
+                return ExecResult(exit_code=0, stdout="cc 13.2.0\n", stderr="")
+            if command.startswith("set -eu; count=0; find"):
+                return ExecResult(
+                    exit_code=0,
+                    stdout=(
+                        "/opt/vulnhunt/build/target.o\t123\t"
+                        + "1" * 64
+                        + "\taddress,undefined\n"
+                    ),
+                    stderr="",
+                )
             return ExecResult(exit_code=0, stdout="ok", stderr="")
 
-        async def commit(self, image: str) -> None:
+        async def commit(self, image: str) -> str:
             self.committed_image = image
+            return "sha256:" + "f" * 64
 
         async def stop(self) -> None:
             return None
@@ -233,4 +269,160 @@ async def test_prepare_step_persists_plan_and_uses_content_addressed_image(
     assert plan["source_snapshot_sha256"] == snapshot["snapshot_artifact"]
     assert plan["image_tag"] == executors[0].committed_image == result["image"]
     assert result["build_plan_sha256"] == plan["plan_sha256"]
+    receipt = store.load_step("prepared_build_receipt")
+    assert isinstance(receipt, dict)
+    assert receipt["policy_version"] == PREPARED_BUILD_RECEIPT_POLICY
+    assert receipt["receipt_sha256"] == result["build_receipt_sha256"]
+    assert receipt["network"]["isolated_before"][0] == "build"
+    assert receipt["sanitizer_provenance"]["observed"] == ["address", "undefined"]
     assert str(repo) not in json.dumps(plan, sort_keys=True)
+
+
+def test_receipt_equivalence_excludes_only_declared_runtime_metadata() -> None:
+    artifact = PreparedArtifact(
+        path="/opt/vulnhunt/build/target.o",
+        size_bytes=123,
+        sha256="sha256:" + "3" * 64,
+        sanitizer_markers=("address", "undefined"),
+    )
+    first_command = PreparedCommandResult(
+        phase="build",
+        command="cmake --build /opt/vulnhunt/build",
+        exit_code=0,
+        timed_out=False,
+        duration_ms=10,
+        stdout_sha256="sha256:" + "4" * 64,
+        stderr_sha256="sha256:" + "5" * 64,
+    )
+    second_command = PreparedCommandResult(
+        phase=first_command.phase,
+        command=first_command.command,
+        exit_code=0,
+        timed_out=False,
+        duration_ms=999,
+        stdout_sha256="sha256:" + "6" * 64,
+        stderr_sha256="sha256:" + "7" * 64,
+    )
+    common: dict[str, Any] = {
+        "source_snapshot_sha256": SNAPSHOT,
+        "plan_sha256": "sha256:" + "2" * 64,
+        "build_system": CBuildSystem.CMAKE,
+        "base_image": BASE_IMAGE,
+        "base_image_digest": "sha256:" + "8" * 64,
+        "final_image": "scanner/prepared:c-example",
+        "package_lock_entries": ("cmake=3.25.1-1",),
+        "package_lock_sha256": "sha256:" + "9" * 64,
+        "compiler_version": "cc 13.2.0",
+        "test_results": (),
+        "artifacts": (artifact,),
+    }
+    first = PreparedBuildReceipt(
+        **common,
+        final_image_digest="sha256:" + "a" * 64,
+        command_results=(first_command,),
+    )
+    second = PreparedBuildReceipt(
+        **common,
+        final_image_digest="sha256:" + "b" * 64,
+        command_results=(second_command,),
+    )
+
+    assert first.receipt_sha256 != second.receipt_sha256
+    assert first.equivalence_sha256 == second.equivalence_sha256
+    assert first.to_dict()["equivalence_exclusions"] == [
+        "images.final.digest",
+        "commands[*].duration_ms",
+        "commands[*].stdout_sha256",
+        "commands[*].stderr_sha256",
+        "tests[*].duration_ms",
+        "tests[*].stdout_sha256",
+        "tests[*].stderr_sha256",
+    ]
+
+
+def test_artifact_inventory_requires_sanitizer_provenance() -> None:
+    output = "/opt/vulnhunt/build/target.o\t12\t" + "1" * 64 + "\t\n"
+
+    with pytest.raises(PreparedBuildVerificationError) as raised:
+        parse_artifact_inventory(output)
+
+    assert raised.value.code is PreparedBuildFailureCode.SANITIZER_PROVENANCE_MISSING
+
+
+@pytest.mark.parametrize(
+    ("failure_at", "expected_code"),
+    [
+        ("test", PreparedBuildFailureCode.TEST_COMMAND_FAILED),
+        ("artifact_root", PreparedBuildFailureCode.ARTIFACT_ROOT_MISSING),
+    ],
+)
+async def test_failed_test_or_missing_artifact_never_admits_hunter(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_at: str,
+    expected_code: PreparedBuildFailureCode,
+) -> None:
+    repo = tmp_path / "source"
+    repo.mkdir()
+    (repo / "CMakeLists.txt").write_text("", encoding="utf-8")
+    store = RunStore(tmp_path / "run")
+    store.save_config({"repo_path": str(repo), "environment": "c:gcc-13"})
+    bus = EventBus(store.dir / "events.jsonl")
+    await run_source_snapshot(store, bus)
+    events: list[str] = []
+
+    class FailingExecutor:
+        name = "m12-failure-test"
+
+        def __init__(self, **kwargs: object) -> None:
+            return None
+
+        async def image_digest(self, image: str | None = None) -> str:
+            return "sha256:" + "b" * 64
+
+        async def start(self) -> None:
+            events.append("start")
+
+        async def disconnect_network(self) -> None:
+            events.append("disconnect")
+
+        async def exec(self, command: str, timeout: int) -> ExecResult:
+            if command.startswith("cat --"):
+                return ExecResult(0, "cmake=3.25.1-1\n", "")
+            if "ctest --test-dir" in command and failure_at == "test":
+                events.append("test")
+                return ExecResult(1, "", "test failed")
+            if command.startswith("test -d ") and failure_at == "artifact_root":
+                events.append("artifact_root")
+                return ExecResult(1, "", "missing")
+            if command.startswith("cmake -S"):
+                events.append("build")
+            if command == "cc --version":
+                return ExecResult(0, "cc 13.2.0\n", "")
+            return ExecResult(0, "ok", "")
+
+        async def commit(self, image: str) -> str:
+            events.append("commit")
+            return "sha256:" + "f" * 64
+
+        async def stop(self) -> None:
+            events.append("stop")
+
+    monkeypatch.setattr(sandbox_prepare, "ContainerExecutor", FailingExecutor)
+    monkeypatch.setattr(sandbox_prepare, "base_image_for", lambda environment: BASE_IMAGE)
+
+    with pytest.raises(PreparedBuildVerificationError) as raised:
+        await run_prepare(store, bus)
+
+    assert raised.value.code is expected_code
+    assert events.index("disconnect") < events.index("build")
+    assert "commit" not in events
+    result = store.load_step("sandbox_prepare")
+    assert isinstance(result, dict)
+    assert result["status"] == "failed"
+    assert result["error_code"] == expected_code.value
+    assert not store.has_step("prepared_build_receipt")
+    with v2_repository(store) as repository:
+        run = repository.get_run(store.dir.name)
+    assert run is not None
+    assert run.state is RunState.BUILDING
