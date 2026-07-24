@@ -355,7 +355,10 @@ class CodexSubscriptionClient:
                 )
             if process.returncode != 0:
                 category, retryable, hint = _classify_failure(
-                    stderr.decode(errors="replace")
+                    "\n".join((
+                        stdout.decode(errors="replace"),
+                        stderr.decode(errors="replace"),
+                    ))
                 )
                 raise ModelClientError(
                     category,

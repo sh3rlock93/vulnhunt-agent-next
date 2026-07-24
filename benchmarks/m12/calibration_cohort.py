@@ -30,6 +30,7 @@ from benchmarks.run_libtiff_blind_benchmark import (
     run_discover_parent,
     verify_frozen,
 )
+from vulnhunt_agent.domain.compat import candidate_from_legacy
 
 COHORT_PLAN_POLICY = "calibration-cohort-plan-v1"
 COHORT_FREEZE_POLICY = "calibration-cohort-freeze-v1"
@@ -204,6 +205,18 @@ def execute_cohort(
         discovery = _resolve(root, raw["discovery_root"], file=False)
         frozen = _resolve(root, raw["freeze_root"], file=False)
         receipt_path = _resolve(root, raw["receipt"], file=False)
+        if frozen.exists() and not receipt_path.exists():
+            if not frozen.is_dir() or not discovery.is_dir():
+                raise BenchmarkContractError(
+                    f"partial immutable run cannot be retried: {raw['run_id']}"
+                )
+            _require_discovery_complete(discovery)
+            verify_frozen(frozen)
+            receipt = _build_receipt(str(raw["run_id"]), case, frozen)
+            _write_json(receipt_path, receipt)
+            _validate_schema(receipt, "authenticated-benchmark-receipt-v1.schema.json")
+            _verify_run_artifacts(raw, case, frozen, receipt_path)
+            continue
         if receipt_path.exists() or frozen.exists():
             if not (receipt_path.is_file() and frozen.is_dir()):
                 raise BenchmarkContractError(
@@ -334,7 +347,14 @@ def _build_receipt(run_id: str, case: BenchmarkCase, frozen: Path) -> dict[str, 
         or audit.get("denied_attempts")
     ):
         raise BenchmarkContractError("calibration discovery was not oracle isolated")
-    if (discovery.get("run_identity") or {}).get("source") != asdict(case.source):
+    discovered_source = (discovery.get("run_identity") or {}).get("source") or {}
+    normalized_source = {
+        "repository": discovered_source.get("repository")
+        or discovered_source.get("origin"),
+        "commit": discovered_source.get("commit"),
+        "tree": discovered_source.get("tree"),
+    }
+    if normalized_source != asdict(case.source):
         raise BenchmarkContractError("calibration discovery source differs from its case")
     plan = _load_json(frozen / "plan.json", "frozen hunt plan")
     work = {str(item["work_id"]): item for item in plan.get("work_items") or []}
@@ -355,19 +375,22 @@ def _build_receipt(run_id: str, case: BenchmarkCase, frozen: Path) -> dict[str, 
         raise BenchmarkContractError("frozen findings are not a list")
     hunter_findings: list[dict[str, Any]] = []
     for finding in findings:
-        work_id = str(finding.get("task_key") or "")
-        item = work.get(work_id)
-        if item is None or work_id not in start_order:
-            raise BenchmarkContractError("Hunter finding has no executed work provenance")
         candidate_id = str(finding.get("candidate_id") or "")
         if not candidate_id:
             raise BenchmarkContractError("Hunter finding has no candidate identity")
-        hunter_findings.append({
-            "finding_id": candidate_id,
-            "hunter": str(item["hunter"]),
-            "session_index": start_order[work_id],
-            "canonical_candidate_id": candidate_id,
-        })
+        work_ids = _finding_work_ids(finding, frozen, discovery, work, start_order)
+        for index, work_id in enumerate(work_ids, start=1):
+            item = work[work_id]
+            hunter_findings.append({
+                "finding_id": (
+                    candidate_id
+                    if len(work_ids) == 1
+                    else f"{candidate_id}:{index}:{work_id}"
+                ),
+                "hunter": str(item["hunter"]),
+                "session_index": start_order[work_id],
+                "canonical_candidate_id": candidate_id,
+            })
     usage = discovery.get("usage") or {}
     sessions = int(usage.get("sessions", 0))
     if start_order and sessions < max(start_order.values()):
@@ -411,6 +434,52 @@ def _build_receipt(run_id: str, case: BenchmarkCase, frozen: Path) -> dict[str, 
         "admission": admission,
         "hunter_findings": hunter_findings,
     }
+
+
+def _finding_work_ids(
+    finding: dict[str, Any],
+    frozen: Path,
+    discovery: dict[str, Any],
+    work: Mapping[str, dict[str, Any]],
+    start_order: Mapping[str, int],
+) -> list[str]:
+    """Resolve verified V2 candidates back to immutable Hunter work artifacts."""
+    task_key = str(finding.get("task_key") or "")
+    if task_key in work and task_key in start_order:
+        return [task_key]
+    match = re.fullmatch(r"verified:([0-9a-f]{64})", task_key)
+    run_id = str((discovery.get("run_identity") or {}).get("run_id") or "")
+    if match is None or not run_id:
+        raise BenchmarkContractError("Hunter finding has no executed work provenance")
+    run_root = (frozen / run_id).resolve()
+    if not run_root.is_relative_to(frozen.resolve()) or not run_root.is_dir():
+        raise BenchmarkContractError("verified Hunter artifact root is missing")
+
+    fingerprint = match.group(1)
+    matched: set[str] = set()
+    for path in sorted(run_root.glob("hunters/*/hunts/*/findings.json")):
+        relative = path.relative_to(run_root).as_posix()
+        parts = PurePosixPath(relative).parts
+        if len(parts) != 5 or parts[0] != "hunters" or parts[2] != "hunts":
+            raise BenchmarkContractError("verified Hunter artifact path is invalid")
+        work_id = parts[1]
+        payload = _load_json(path, "verified Hunter findings")
+        raw_findings = payload.get("findings") if isinstance(payload, dict) else None
+        if not isinstance(raw_findings, list):
+            raise BenchmarkContractError("verified Hunter findings are invalid")
+        for raw in raw_findings:
+            if not isinstance(raw, dict):
+                raise BenchmarkContractError("verified Hunter finding is invalid")
+            seed = candidate_from_legacy(raw, run_id=run_id, task_key=relative)
+            if seed.fingerprint == fingerprint:
+                if work_id not in work or work_id not in start_order:
+                    raise BenchmarkContractError(
+                        "verified Hunter finding references unexecuted work"
+                    )
+                matched.add(work_id)
+    if not matched:
+        raise BenchmarkContractError("verified Hunter finding provenance is missing")
+    return sorted(matched, key=lambda work_id: (start_order[work_id], work_id))
 
 
 def _provider_start_order(plan: dict[str, Any]) -> dict[str, int]:
