@@ -18,7 +18,7 @@ from vulnhunt_agent.core.codex_client import (
     _failure_hint,
     _parse_codex_response,
 )
-from vulnhunt_agent.core.model_errors import ModelFailureCategory
+from vulnhunt_agent.core.model_errors import ModelClientError, ModelFailureCategory
 from vulnhunt_agent.core.openai_client import (
     OpenAIResponsesClient,
     _classify_openai_failure,
@@ -366,6 +366,40 @@ def test_codex_failure_hint_does_not_echo_diagnostics() -> None:
 
     assert secret_diagnostic not in hint
     assert "codex login status" in hint
+
+
+@pytest.mark.asyncio
+async def test_codex_classifies_usage_limit_emitted_on_json_stdout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = _auto_provider(codex_timeout_seconds=30, codex_max_parallel=1)
+    monkeypatch.setattr(
+        "vulnhunt_agent.core.codex_client._settings.resolve",
+        lambda model_id: (None, provider),
+    )
+
+    class _Process:
+        returncode = 1
+
+        async def communicate(self, _input: bytes):
+            return b'{"type":"error","message":"usage limit reached"}\n', b""
+
+    async def fake_subprocess(*_args, **_kwargs):
+        return _Process()
+
+    monkeypatch.setattr(
+        "vulnhunt_agent.core.codex_client.asyncio.create_subprocess_exec",
+        fake_subprocess,
+    )
+    client = CodexSubscriptionClient("gpt-5.6-sol", max_tokens=10)
+
+    with pytest.raises(ModelClientError) as raised:
+        await client.chat(
+            messages=[{"role": "user", "content": [{"text": "review"}]}],
+        )
+
+    assert raised.value.category is ModelFailureCategory.BUDGET
+    assert raised.value.retryable is False
 
 
 def test_model_failures_classify_transient_and_terminal_categories() -> None:

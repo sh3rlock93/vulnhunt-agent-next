@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +16,7 @@ from benchmarks.m12.calibration_cohort import (
     verify_cohort_plan,
 )
 from benchmarks.run_libtiff_blind_benchmark import BenchmarkContractError
+from vulnhunt_agent.domain.compat import candidate_from_legacy
 
 
 def _ids() -> Any:
@@ -82,7 +82,11 @@ def _fake_discover(calls: list[tuple[str, int]]):
             "mode": "authenticated",
             "run_identity": {
                 "run_id": f"internal-{case.case_id}-{case.repetition_index}",
-                "source": asdict(case.source),
+                "source": {
+                    "origin": case.source.repository,
+                    "commit": case.source.commit,
+                    "tree": case.source.tree,
+                },
             },
             "model": {
                 "adapter": "codex_subscription",
@@ -107,6 +111,51 @@ def _fake_discover(calls: list[tuple[str, int]]):
         }
         _write_json(output / "discovery.json", discovery_result)
         return discovery_result
+
+    return discover
+
+
+def _fake_verified_discover(calls: list[tuple[str, int]]):
+    base = _fake_discover(calls)
+
+    def discover(
+        case: BenchmarkCase,
+        repo: Path,
+        output: Path,
+        image: str,
+        model_id: str | None,
+    ) -> dict[str, Any]:
+        result = base(case, repo, output, image, model_id)
+        plan = json.loads((output / "plan.json").read_text(encoding="utf-8"))
+        work_id = str(plan["work_items"][0]["work_id"])
+        run_id = str(result["run_identity"]["run_id"])
+        relative = Path(
+            "hunters",
+            work_id,
+            "hunts",
+            case.required_hunter,
+            "findings.json",
+        )
+        raw = {
+            "title": "verified test finding",
+            "type": "memory_safety",
+            "status": "unverified",
+            "entry_file": "parser.c",
+            "entry_line": 10,
+            "sink_file": "parser.c",
+            "sink_line": 20,
+        }
+        _write_json(output / run_id / relative, {"findings": [raw]})
+        seed = candidate_from_legacy(
+            raw,
+            run_id=run_id,
+            task_key=relative.as_posix(),
+        )
+        _write_json(output / "findings.json", [{
+            "candidate_id": "cand_verified_test",
+            "task_key": f"verified:{seed.fingerprint}",
+        }])
+        return result
 
     return discover
 
@@ -168,6 +217,62 @@ def test_runner_freezes_every_valid_miss_once_and_writes_immutable_receipts(
         discover_runner=lambda *_args: pytest.fail("valid miss was retried"),
         prepared_image_loader=lambda path: f"prepared:{path.name}",
     )
+    assert len(calls) == 12
+
+
+def test_runner_deterministically_recovers_a_missing_receipt_without_retry(
+    tmp_path: Path,
+) -> None:
+    plan_path, plan = _plan(tmp_path)
+    repositories, prepared = _maps(plan, tmp_path)
+    calls: list[tuple[str, int]] = []
+    execute_cohort(
+        plan_path,
+        repositories=repositories,
+        prepared_runs=prepared,
+        discover_runner=_fake_discover(calls),
+        prepared_image_loader=lambda path: f"prepared:{path.name}",
+    )
+    first = plan["run"][0]
+    receipt_path = plan_path.parent / first["receipt"]
+    expected = receipt_path.read_bytes()
+    receipt_path.unlink()
+
+    execute_cohort(
+        plan_path,
+        repositories=repositories,
+        prepared_runs=prepared,
+        discover_runner=lambda *_args: pytest.fail("frozen run was retried"),
+        prepared_image_loader=lambda path: f"prepared:{path.name}",
+    )
+
+    assert receipt_path.read_bytes() == expected
+    assert len(calls) == 12
+
+
+def test_receipt_maps_verified_candidates_to_executed_hunter_work(
+    tmp_path: Path,
+) -> None:
+    plan_path, plan = _plan(tmp_path)
+    repositories, prepared = _maps(plan, tmp_path)
+    calls: list[tuple[str, int]] = []
+
+    execute_cohort(
+        plan_path,
+        repositories=repositories,
+        prepared_runs=prepared,
+        discover_runner=_fake_verified_discover(calls),
+        prepared_image_loader=lambda path: f"prepared:{path.name}",
+    )
+
+    first = plan["run"][0]
+    receipt = json.loads((plan_path.parent / first["receipt"]).read_text())
+    assert receipt["hunter_findings"] == [{
+        "canonical_candidate_id": "cand_verified_test",
+        "finding_id": "cand_verified_test",
+        "hunter": load_calibration_catalog(DEFAULT_CATALOG).definitions[0].case.required_hunter,
+        "session_index": 1,
+    }]
     assert len(calls) == 12
 
 
