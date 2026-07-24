@@ -1,6 +1,6 @@
 # M12 — Measured zero-day readiness
 
-Status: in progress; M12.0 measurement contract is active
+Status: in progress; M12.0 measurement contract and baseline freeze are complete
 
 ## Goal
 
