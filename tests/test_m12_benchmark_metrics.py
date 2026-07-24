@@ -408,3 +408,47 @@ def test_duplicate_requested_run_ids_fail_the_closed_contract(tmp_path: Path) ->
 
     with pytest.raises(BenchmarkContractError, match="duplicate run IDs"):
         reduce_metrics(manifest, repository_root=tmp_path)
+
+
+def test_generated_adjudications_remain_bound_to_the_case_evaluator(tmp_path: Path) -> None:
+    run = _build_run(tmp_path, run_id="run_aaaaaaaaaaaaaaaa")
+    evaluator_path = tmp_path / "oracles" / "calibration.toml"
+    evaluator_path.parent.mkdir(parents=True)
+    evaluator_path.write_text("[oracle]\npolicy = 'sealed'\n", encoding="utf-8")
+    evaluator_sha = _sha256(evaluator_path)
+
+    case_path = tmp_path / run["case_manifest"]
+    case_text = case_path.read_text(encoding="utf-8")
+    case_text = case_text.replace(
+        f'reference = "{run["adjudications"]}"',
+        'reference = "oracles/calibration.toml"',
+    ).replace(
+        f'sha256 = "{run["adjudications_sha256"]}"',
+        f'sha256 = "{evaluator_sha}"',
+    )
+    case_path.write_text(case_text, encoding="utf-8")
+    run["case_manifest_sha256"] = _sha256(case_path)
+
+    adjudication_path = tmp_path / run["adjudications"]
+    adjudications = json.loads(adjudication_path.read_text(encoding="utf-8"))
+    for item in adjudications["admission"] + adjudications["adjudication"]:
+        item["evidence_sha256"] = evaluator_sha
+    _write_json(adjudication_path, adjudications)
+    run["adjudications_sha256"] = _sha256(adjudication_path)
+    run["evaluation_reference"] = "oracles/calibration.toml"
+    run["evaluation_sha256"] = evaluator_sha
+
+    metrics = reduce_metrics(_write_input(tmp_path, [run]), repository_root=tmp_path)
+
+    assert metrics["run_accounting"]["valid_run_rate"]["rate"] == 1.0
+
+    adjudications["adjudication"][0]["evidence_sha256"] = "sha256:" + "0" * 64
+    _write_json(adjudication_path, adjudications)
+    run["adjudications_sha256"] = _sha256(adjudication_path)
+    metrics = reduce_metrics(
+        _write_input(tmp_path, [run], name="tampered.toml"),
+        repository_root=tmp_path,
+    )
+
+    assert metrics["run_accounting"]["valid_run_rate"]["rate"] == 0.0
+    assert "adjudication evidence mismatch" in metrics["run_accounting"]["artifact_failures"][0]["reason"]

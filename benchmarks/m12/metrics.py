@@ -278,11 +278,20 @@ def _validate_run_links(
         raise BenchmarkContractError(f"receipt freeze root mismatch: {run_id}")
     if receipt["source"] != asdict(case.source):
         raise BenchmarkContractError(f"receipt source mismatch: {run_id}")
+    evaluation_reference = raw.get("evaluation_reference", raw["adjudications"])
+    evaluation_sha256 = raw.get("evaluation_sha256", raw["adjudications_sha256"])
     if (
-        raw["adjudications"] != case.evaluation.reference
-        or raw["adjudications_sha256"] != case.evaluation.sha256
+        evaluation_reference != case.evaluation.reference
+        or evaluation_sha256 != case.evaluation.sha256
     ):
         raise BenchmarkContractError(f"case evaluator reference mismatch: {run_id}")
+    if "evaluation_reference" in raw:
+        evidence_hashes = {
+            str(item["evidence_sha256"])
+            for item in adjudications["admission"] + adjudications["adjudication"]
+        }
+        if evidence_hashes and evidence_hashes != {evaluation_sha256}:
+            raise BenchmarkContractError(f"adjudication evidence mismatch: {run_id}")
 
     candidate_ids = [str(item["canonical_candidate_id"]) for item in candidates["candidate"]]
     adjudication_ids = [
@@ -452,6 +461,9 @@ def _case_results(runs: Sequence[VerifiedRun]) -> list[dict[str, Any]]:
             "supported_family": case_runs[0].case.supported_family,
             "required_hunter": case_runs[0].case.required_hunter,
             "valid_run_ids": sorted(run.run_id for run in case_runs),
+            "admission_case_success_rate": _run_rate(
+                case_runs, lambda run: _admitted(run, 12)
+            ),
             "hunter_case_success_rate": _run_rate(case_runs, lambda run: _hunter_detected(run, 12)),
             "reportable_case_success_rate": _run_rate(
                 case_runs, lambda run: _reportable_detected(run, 12)
@@ -649,6 +661,7 @@ def _run_provenance(run: VerifiedRun) -> dict[str, Any]:
         "receipt_sha256": run.receipt_sha256,
         "candidates_sha256": run.candidates_sha256,
         "adjudications_sha256": run.adjudications_sha256,
+        "usage": dict(run.usage),
     }
 
 
