@@ -1,0 +1,108 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vulnhunt.local/schemas/benchmark-case-v1.schema.json",
+  "title": "VulnHunt M12 benchmark case",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["case", "source", "discovery", "budget", "evaluation"],
+  "properties": {
+    "case": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "policy_version",
+        "id",
+        "partition",
+        "supported_family",
+        "required_hunter",
+        "repetition_index"
+      ],
+      "properties": {
+        "schema_version": {"const": 1},
+        "policy_version": {"const": "benchmark-case-v1"},
+        "id": {"type": "string", "pattern": "^case_[0-9a-f]{16}$"},
+        "partition": {
+          "enum": [
+            "protected",
+            "calibration",
+            "negative",
+            "sealed_holdout",
+            "prospective"
+          ]
+        },
+        "supported_family": {
+          "enum": [
+            "bounded-write-capacity",
+            "parser-cursor-oob-read",
+            "integer-signedness-memory"
+          ]
+        },
+        "required_hunter": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9-]{2,63}$"
+        },
+        "repetition_index": {"type": "integer", "minimum": 1}
+      }
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "commit", "tree"],
+      "properties": {
+        "repository": {"type": "string", "minLength": 1},
+        "commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "tree": {"type": "string", "pattern": "^[0-9a-f]{40}$"}
+      }
+    },
+    "discovery": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scan_manifest", "scan_manifest_sha256"],
+      "properties": {
+        "scan_manifest": {"type": "string", "minLength": 1},
+        "scan_manifest_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "budget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "max_hunter_sessions",
+        "max_input_tokens",
+        "max_output_tokens",
+        "max_wall_clock_minutes",
+        "max_context_bytes",
+        "max_retries_per_work_item",
+        "max_format_repairs_per_work_item",
+        "max_parallel_hunters"
+      ],
+      "properties": {
+        "max_hunter_sessions": {"type": "integer", "minimum": 1, "maximum": 12},
+        "max_input_tokens": {"type": "integer", "minimum": 1, "maximum": 2000000},
+        "max_output_tokens": {"type": "integer", "minimum": 1, "maximum": 200000},
+        "max_wall_clock_minutes": {"type": "integer", "minimum": 1, "maximum": 60},
+        "max_context_bytes": {"type": "integer", "minimum": 1, "maximum": 24000},
+        "max_retries_per_work_item": {"type": "integer", "minimum": 0, "maximum": 1},
+        "max_format_repairs_per_work_item": {"type": "integer", "minimum": 0, "maximum": 1},
+        "max_parallel_hunters": {"type": "integer", "minimum": 1, "maximum": 2}
+      }
+    },
+    "evaluation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "reference", "sha256"],
+      "properties": {
+        "kind": {"enum": ["oracle", "absence_oracle", "human_adjudication"]},
+        "reference": {"type": "string", "minLength": 1},
+        "sha256": {"$ref": "#/$defs/sha256"}
+      }
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    }
+  }
+}
