@@ -91,14 +91,17 @@ def test_native_layout_becomes_closed_serializable_plan(
     assert payload["descriptor"] == descriptor
     assert command in "\n".join(payload["commands"]["install"])
     assert payload["expected_artifact_roots"] == [artifact_root]
+    expected_flags = [
+        "-O1",
+        "-g",
+        "-fno-omit-frame-pointer",
+        "-fsanitize=address,undefined",
+    ]
+    if system is CBuildSystem.CMAKE:
+        expected_flags.append("-Wno-error=format-overflow")
     assert payload["compiler"] == {
         "executable": "cc",
-        "flags": [
-            "-O1",
-            "-g",
-            "-fno-omit-frame-pointer",
-            "-fsanitize=address,undefined",
-        ],
+        "flags": expected_flags,
         "sanitizers": ["address", "undefined"],
     }
     assert payload["unsupported_reason"] == "none"
@@ -197,6 +200,45 @@ def test_source_snapshot_identity_must_be_content_addressed(tmp_path: Path) -> N
             tmp_path,
             source_snapshot_sha256="local/path/source.tar",
             base_image=BASE_IMAGE,
+        )
+
+
+def test_benchmark_cmake_option_must_be_boolean_and_source_declared(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "CMakeLists.txt").write_text(
+        'option(ENABLE_PROJECT_TESTS "Build tests" ON)\n',
+        encoding="utf-8",
+    )
+
+    plan = create_c_prepared_build_plan(
+        tmp_path,
+        source_snapshot_sha256=SNAPSHOT,
+        base_image=BASE_IMAGE,
+        cmake_options=("ENABLE_PROJECT_TESTS=OFF",),
+    )
+
+    assert "-DENABLE_PROJECT_TESTS=OFF" in plan.install_commands[0]
+    with pytest.raises(ValueError, match="not declared"):
+        create_c_prepared_build_plan(
+            tmp_path,
+            source_snapshot_sha256=SNAPSHOT,
+            base_image=BASE_IMAGE,
+            cmake_options=("UNKNOWN_OPTION=OFF",),
+        )
+    with pytest.raises(ValueError, match="DECLARED_BOOLEAN"):
+        create_c_prepared_build_plan(
+            tmp_path,
+            source_snapshot_sha256=SNAPSHOT,
+            base_image=BASE_IMAGE,
+            cmake_options=("ENABLE_PROJECT_TESTS=../../escape",),
+        )
+    with pytest.raises(ValueError, match="names must be unique"):
+        create_c_prepared_build_plan(
+            tmp_path,
+            source_snapshot_sha256=SNAPSHOT,
+            base_image=BASE_IMAGE,
+            cmake_options=("ENABLE_PROJECT_TESTS=ON", "ENABLE_PROJECT_TESTS=OFF"),
         )
 
 
