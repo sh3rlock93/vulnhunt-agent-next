@@ -15,6 +15,7 @@ from .models import (
     InvariantObligationKind,
     ObligationEvidenceRange,
     RiskChain,
+    StatefulOutputFact,
 )
 
 INVARIANT_OBLIGATION_POLICY = "invariant-obligation-v1"
@@ -41,6 +42,7 @@ def build_invariant_obligations(graph: CAnalysisGraph) -> tuple[InvariantObligat
         *(_capacity_seed(chain) for chain in graph.capacity_risk_chains),
         *(_cursor_seed(chain) for chain in graph.cursor_transition_chains),
         *(_formatted_seed(fact) for fact in graph.formatted_output_facts),
+        *(_stateful_output_seed(fact) for fact in graph.stateful_output_facts),
     ]
     seeds = [
         *(_risk_seed(chain) for chain in graph.risk_chains),
@@ -273,6 +275,48 @@ def _formatted_seed(fact: FormattedOutputFact) -> _ObligationSeed:
         rationale=(
             "Prove that the maximum formatted representation, including the "
             "terminator, fits the actual destination capacity before use."
+        ),
+    )
+
+
+def _stateful_output_seed(fact: StatefulOutputFact) -> _ObligationSeed:
+    structural = (
+        f"transition_ordinal={fact.transition_ordinal}",
+        f"first_iteration_overhead={fact.first_iteration_overhead}",
+        f"subsequent_iteration_overhead={fact.subsequent_iteration_overhead}",
+        f"guarded_subsequent_overhead={fact.guarded_subsequent_overhead}",
+        f"terminator_reserve={fact.terminator_reserve}",
+        "components=" + ",".join(item.value for item in fact.component_kinds),
+        f"transition_updates_guard_term={int(fact.transition_updates_guard_term)}",
+        f"exact_fit_allowed={int(fact.exact_fit_allowed)}",
+        f"empty_list_terminator_safe={int(fact.empty_list_terminator_safe)}",
+        f"guard={fact.guard_state.value}",
+    )
+    return _ObligationSeed(
+        kind=InvariantObligationKind.STATEFUL_OUTPUT_CAPACITY,
+        structural_facts=structural,
+        evidence_ranges=(
+            ObligationEvidenceRange(
+                path=fact.path,
+                line=fact.guard_line,
+                end_line=fact.guard_line,
+                structural_role="guard",
+            ),
+            ObligationEvidenceRange(
+                path=fact.path,
+                line=fact.line,
+                end_line=fact.line,
+                structural_role="state",
+            ),
+        ),
+        required_hunters=("c-bounds-integers",),
+        source_fact_ids=(fact.fact_id,),
+        target_node_ids=(fact.node_id,),
+        target_signal_ids=(),
+        confidence=fact.confidence,
+        rationale=(
+            "Prove that every loop-state transition updates the capacity term "
+            "for separators, escaping, pointer movement, and the terminator."
         ),
     )
 

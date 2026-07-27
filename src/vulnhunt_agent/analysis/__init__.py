@@ -33,6 +33,7 @@ from .cursor import (
 )
 from .incremental import INCREMENTAL_POLICY, build_incremental_scope
 from .formatted_output import FORMATTED_OUTPUT_POLICY, extract_formatted_output_facts
+from .stateful_output import STATEFUL_OUTPUT_POLICY, extract_stateful_output_facts
 from .scope import SCAN_SCOPE_POLICY, build_scan_scope
 from .models import (
     AnalysisSlice,
@@ -61,11 +62,13 @@ from .models import (
     InvariantObligation,
     InvariantObligationDisposition,
     InvariantObligationKind,
+    OutputComponentKind,
     IncrementalScope,
     NodeKind,
     ObligationEvidenceRange,
     RiskChain,
     RiskTransform,
+    StatefulOutputFact,
     SecuritySignal,
     SignalRole,
 )
@@ -100,18 +103,22 @@ __all__ = [
     "InvariantObligation",
     "InvariantObligationDisposition",
     "InvariantObligationKind",
+    "OutputComponentKind",
     "IncrementalScope",
     "NodeKind",
     "ObligationEvidenceRange",
     "RiskChain",
     "RiskTransform",
+    "StatefulOutputFact",
     "SecuritySignal",
     "SignalRole",
     "RISK_CHAIN_POLICY",
     "INVARIANT_OBLIGATION_POLICY",
     "build_invariant_obligations",
     "FORMATTED_OUTPUT_POLICY",
+    "STATEFUL_OUTPUT_POLICY",
     "extract_formatted_output_facts",
+    "extract_stateful_output_facts",
     "build_c_analysis_graph",
     "build_coverage_plan",
     "context_for_file",
