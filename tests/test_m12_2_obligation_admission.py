@@ -301,7 +301,7 @@ def test_input_soft_stop_prevents_new_calls_before_the_hard_limit() -> None:
             input_upper_bound=11,
             requested_output_tokens=10,
         )
-    assert controller.snapshot()["input_tokens"] < 2_000_000
+    assert int(controller.snapshot()["input_tokens"]) < 2_000_000
 
 
 def test_context_packet_names_obligation_and_hydrates_its_evidence(tmp_path: Path) -> None:
