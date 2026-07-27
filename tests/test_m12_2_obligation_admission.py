@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -254,6 +255,33 @@ def test_duplicate_deferred_requires_the_same_obligation_identity() -> None:
     )
 
 
+def test_cursor_specialist_keeps_its_protected_quota_when_obligation_bound() -> None:
+    obligation = _obligation(
+        10,
+        InvariantObligationKind.CURSOR_LENGTH_RELATION,
+        ("c-parser-state",),
+    )
+    item = _work(
+        1,
+        "src/case-10.c",
+        "c-parser-state",
+        obligation_ids=(obligation.obligation_id,),
+    ).model_copy(update={
+        "required": True,
+        "routing_reasons": ("required:cursor-transition",),
+    })
+
+    allocation = allocate_work_items(
+        (item,),
+        BudgetPolicy(max_hunter_sessions=2, max_retries_per_work_item=0),
+        invariant_obligations=(obligation,),
+        native_full_scan=True,
+    )
+
+    assert allocation.decisions[0].quota == "required_specialist"
+    assert allocation.obligation_admissions[0].disposition == "admitted"
+
+
 def test_ledger_closes_obligations_or_preserves_typed_source_backed_deferral() -> None:
     obligations = _four_calibration_obligations()[:2]
     work = bind_invariant_obligations(
@@ -301,7 +329,7 @@ def test_input_soft_stop_prevents_new_calls_before_the_hard_limit() -> None:
             input_upper_bound=11,
             requested_output_tokens=10,
         )
-    assert int(controller.snapshot()["input_tokens"]) < 2_000_000
+    assert cast(int, controller.snapshot()["input_tokens"]) < 2_000_000
 
 
 def test_context_packet_names_obligation_and_hydrates_its_evidence(tmp_path: Path) -> None:

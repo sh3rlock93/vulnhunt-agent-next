@@ -102,6 +102,16 @@ class SharedContextCache:
 
     def get_shards(self, work_item: HunterWorkItem) -> tuple[dict, ...]:
         """Materialize per-chain packets only when fitting loses focus evidence."""
+        if len(work_item.obligation_ids) > 1:
+            obligation_shards = tuple(
+                packet
+                for obligation_id in work_item.obligation_ids
+                for packet in self.get_shards(work_item.model_copy(update={
+                    "obligation_ids": (obligation_id,),
+                }))
+            )
+            self._sharded_work_ids.add(work_item.work_id)
+            return obligation_shards
         combined = self.get(work_item)
         expected = set(work_item.focus_chain_ids)
         if not expected or expected <= _packet_chain_ids(combined):

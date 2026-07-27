@@ -846,8 +846,16 @@ def _allocate_native_diverse(
             for candidate in candidates_for_obligation
             if admit(
                 candidate,
-                quota="obligation_required",
+                quota=(
+                    "required_specialist"
+                    if _is_explicit_required_specialist(candidate)
+                    else "obligation_required"
+                ),
                 reason=(
+                    "required cursor-transition specialist also closes a "
+                    "source-backed invariant obligation"
+                    if _is_explicit_required_specialist(candidate)
+                    else
                     "source-backed high-confidence invariant obligation reserved "
                     "before unrelated lower-priority work"
                 ),
