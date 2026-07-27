@@ -40,6 +40,10 @@ from .pointer_reads import (
     build_length_before_read_chains,
     extract_pointer_read_summaries,
 )
+from .signed_memory import (
+    SIGNED_ALLOCATION_WRITE_POLICY,
+    build_signed_allocation_write_chains,
+)
 from .scope import SCAN_SCOPE_POLICY, build_scan_scope
 from .models import (
     AnalysisSlice,
@@ -76,6 +80,7 @@ from .models import (
     PointerReadSummary,
     RiskChain,
     RiskTransform,
+    SignedAllocationWriteChain,
     StatefulOutputFact,
     SecuritySignal,
     SignalRole,
@@ -119,6 +124,7 @@ __all__ = [
     "PointerReadSummary",
     "RiskChain",
     "RiskTransform",
+    "SignedAllocationWriteChain",
     "StatefulOutputFact",
     "SecuritySignal",
     "SignalRole",
@@ -133,6 +139,8 @@ __all__ = [
     "extract_stateful_output_facts",
     "extract_pointer_read_summaries",
     "build_length_before_read_chains",
+    "SIGNED_ALLOCATION_WRITE_POLICY",
+    "build_signed_allocation_write_chains",
     "build_c_analysis_graph",
     "build_coverage_plan",
     "context_for_file",

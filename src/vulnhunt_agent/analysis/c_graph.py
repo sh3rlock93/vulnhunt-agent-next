@@ -30,6 +30,7 @@ from .pointer_reads import (
     build_length_before_read_chains,
     extract_pointer_read_summaries,
 )
+from .signed_memory import build_signed_allocation_write_chains
 from .models import (
     CAnalysisGraph,
     CapacityCallSite,
@@ -313,6 +314,12 @@ def build_c_analysis_graph(repo: Path, source_files: list[str]) -> CAnalysisGrap
         reads=tuple(pointer_read_summaries),
         calls=tuple(capacity_calls),
     )
+    signed_allocation_write_chains = build_signed_allocation_write_chains(
+        repo=repo,
+        source_files=source_files,
+        nodes=tuple(nodes),
+        summaries=capacity_summaries,
+    )
     signals.extend(_cursor_signals(cursor_facts, cursor_transition_chains))
     signals = sorted(
         {item.signal_id: item for item in signals}.values(),
@@ -341,6 +348,7 @@ def build_c_analysis_graph(repo: Path, source_files: list[str]) -> CAnalysisGrap
         cursor_facts=tuple(cursor_facts),
         cursor_transition_chains=cursor_transition_chains,
         length_before_read_chains=length_before_read_chains,
+        signed_allocation_write_chains=signed_allocation_write_chains,
         unresolved_calls=tuple(sorted(
             unresolved,
             key=lambda item: (item.path, item.line, item.source, item.callee),
