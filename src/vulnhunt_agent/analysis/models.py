@@ -297,6 +297,7 @@ class CapacityCallSite(AnalysisModel):
     callee: str = Field(min_length=1)
     arguments: tuple[str, ...] = ()
     result_subject: str = ""
+    control_subjects: tuple[str, ...] = ()
     direct: bool = True
 
 
@@ -347,6 +348,50 @@ class StatefulOutputFact(AnalysisModel):
     guard_state: GuardState
     evidence: str = Field(min_length=1)
     confidence: str = Field(pattern=r"^(?:low|medium|high)$")
+
+
+class PointerReadSummary(AnalysisModel):
+    fact_id: str = Field(pattern=r"^pointer_read_[0-9a-f]{20}$")
+    policy_version: str = "c-pointer-read-summary-v1"
+    node_id: str = Field(min_length=1)
+    path: str = Field(min_length=1)
+    function: str = Field(min_length=1)
+    pointer_parameter: str = Field(min_length=1)
+    parameter_index: int = Field(ge=0)
+    first_read_line: int = Field(ge=1)
+    maximum_read_line: int = Field(ge=1)
+    maximum_access_index: int = Field(ge=0)
+    minimum_required_bytes: int = Field(ge=1)
+    mutation_lines: tuple[int, ...] = ()
+    local_guard_state: GuardState = GuardState.UNKNOWN
+    evidence: str = Field(min_length=1)
+    confidence: str = Field(pattern=r"^(?:low|medium|high)$")
+
+
+class LengthBeforeReadChain(AnalysisModel):
+    chain_id: str = Field(pattern=r"^length_read_[0-9a-f]{20}$")
+    policy_version: str = "c-length-before-read-v1"
+    caller_node_id: str = Field(min_length=1)
+    reader_node_id: str = Field(min_length=1)
+    paths: tuple[str, ...] = Field(min_length=1)
+    read_fact_id: str = Field(pattern=r"^pointer_read_[0-9a-f]{20}$")
+    decoder_call_id: str = Field(pattern=r"^capacity_call_[0-9a-f]{20}$")
+    check_call_id: str = Field(pattern=r"^capacity_call_[0-9a-f]{20}$")
+    decoder_line: int = Field(ge=1)
+    check_line: int = Field(ge=1)
+    cursor_subject: str = Field(min_length=1)
+    length_subject: str = Field(min_length=1)
+    required_access_index: int = Field(ge=0)
+    checked_before_read: bool
+    checked_after_read: bool
+    pointer_rebased_from_checked_size: bool
+    check_result_controls_read: bool
+    boundary_cases: tuple[str, ...] = Field(min_length=3)
+    guard_state: GuardState
+    evidence_lines: dict[str, tuple[int, ...]] = Field(default_factory=dict)
+    score: int = Field(ge=0, le=100)
+    confidence: str = Field(pattern=r"^(?:low|medium|high)$")
+    rationale: str = Field(min_length=1)
 
 
 class FunctionCapacitySummary(AnalysisModel):
@@ -464,9 +509,11 @@ class CAnalysisGraph(AnalysisModel):
     capacity_summaries: tuple[FunctionCapacitySummary, ...] = ()
     formatted_output_facts: tuple[FormattedOutputFact, ...] = ()
     stateful_output_facts: tuple[StatefulOutputFact, ...] = ()
+    pointer_read_summaries: tuple[PointerReadSummary, ...] = ()
     capacity_risk_chains: tuple[CapacityRiskChain, ...] = ()
     cursor_facts: tuple[CursorFact, ...] = ()
     cursor_transition_chains: tuple[CursorTransitionChain, ...] = ()
+    length_before_read_chains: tuple[LengthBeforeReadChain, ...] = ()
     invariant_obligations: tuple[InvariantObligation, ...] = ()
     unresolved_calls: tuple[UnresolvedCall, ...] = ()
 

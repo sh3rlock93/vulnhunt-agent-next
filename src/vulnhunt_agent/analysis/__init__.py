@@ -34,6 +34,12 @@ from .cursor import (
 from .incremental import INCREMENTAL_POLICY, build_incremental_scope
 from .formatted_output import FORMATTED_OUTPUT_POLICY, extract_formatted_output_facts
 from .stateful_output import STATEFUL_OUTPUT_POLICY, extract_stateful_output_facts
+from .pointer_reads import (
+    LENGTH_BEFORE_READ_POLICY,
+    POINTER_READ_SUMMARY_POLICY,
+    build_length_before_read_chains,
+    extract_pointer_read_summaries,
+)
 from .scope import SCAN_SCOPE_POLICY, build_scan_scope
 from .models import (
     AnalysisSlice,
@@ -62,10 +68,12 @@ from .models import (
     InvariantObligation,
     InvariantObligationDisposition,
     InvariantObligationKind,
+    LengthBeforeReadChain,
     OutputComponentKind,
     IncrementalScope,
     NodeKind,
     ObligationEvidenceRange,
+    PointerReadSummary,
     RiskChain,
     RiskTransform,
     StatefulOutputFact,
@@ -103,10 +111,12 @@ __all__ = [
     "InvariantObligation",
     "InvariantObligationDisposition",
     "InvariantObligationKind",
+    "LengthBeforeReadChain",
     "OutputComponentKind",
     "IncrementalScope",
     "NodeKind",
     "ObligationEvidenceRange",
+    "PointerReadSummary",
     "RiskChain",
     "RiskTransform",
     "StatefulOutputFact",
@@ -117,8 +127,12 @@ __all__ = [
     "build_invariant_obligations",
     "FORMATTED_OUTPUT_POLICY",
     "STATEFUL_OUTPUT_POLICY",
+    "POINTER_READ_SUMMARY_POLICY",
+    "LENGTH_BEFORE_READ_POLICY",
     "extract_formatted_output_facts",
     "extract_stateful_output_facts",
+    "extract_pointer_read_summaries",
+    "build_length_before_read_chains",
     "build_c_analysis_graph",
     "build_coverage_plan",
     "context_for_file",
