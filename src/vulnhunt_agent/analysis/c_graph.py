@@ -26,6 +26,10 @@ from .cursor import (
 )
 from .formatted_output import extract_formatted_output_facts
 from .stateful_output import extract_stateful_output_facts
+from .pointer_reads import (
+    build_length_before_read_chains,
+    extract_pointer_read_summaries,
+)
 from .models import (
     CAnalysisGraph,
     CapacityCallSite,
@@ -36,6 +40,7 @@ from .models import (
     EdgeKind,
     GraphEdge,
     GraphNode,
+    PointerReadSummary,
     GuardState,
     FunctionCapacitySummary,
     FormattedOutputFact,
@@ -134,6 +139,7 @@ class _CallSite:
     callee: str
     arguments: tuple[str, ...] = ()
     result_subject: str = ""
+    control_subjects: tuple[str, ...] = ()
     indirect: bool = False
 
 
@@ -149,6 +155,7 @@ class _Extracted:
     cursor_facts: tuple[CursorFact, ...] = ()
     formatted_output_facts: tuple[FormattedOutputFact, ...] = ()
     stateful_output_facts: tuple[StatefulOutputFact, ...] = ()
+    pointer_read_summaries: tuple[PointerReadSummary, ...] = ()
 
 
 def build_c_analysis_graph(repo: Path, source_files: list[str]) -> CAnalysisGraph:
@@ -199,6 +206,10 @@ def build_c_analysis_graph(repo: Path, source_files: list[str]) -> CAnalysisGrap
     )
     stateful_output_facts = sorted(
         (fact for item in extracted for fact in item.stateful_output_facts),
+        key=lambda item: item.fact_id,
+    )
+    pointer_read_summaries = sorted(
+        (fact for item in extracted for fact in item.pointer_read_summaries),
         key=lambda item: item.fact_id,
     )
     local_capacity_summaries = tuple(sorted(
@@ -298,6 +309,10 @@ def build_c_analysis_graph(repo: Path, source_files: list[str]) -> CAnalysisGrap
         calls=tuple(capacity_calls),
         summaries=capacity_summaries,
     )
+    length_before_read_chains = build_length_before_read_chains(
+        reads=tuple(pointer_read_summaries),
+        calls=tuple(capacity_calls),
+    )
     signals.extend(_cursor_signals(cursor_facts, cursor_transition_chains))
     signals = sorted(
         {item.signal_id: item for item in signals}.values(),
@@ -321,9 +336,11 @@ def build_c_analysis_graph(repo: Path, source_files: list[str]) -> CAnalysisGrap
         capacity_summaries=capacity_summaries,
         formatted_output_facts=tuple(formatted_output_facts),
         stateful_output_facts=tuple(stateful_output_facts),
+        pointer_read_summaries=tuple(pointer_read_summaries),
         capacity_risk_chains=capacity_risk_chains,
         cursor_facts=tuple(cursor_facts),
         cursor_transition_chains=cursor_transition_chains,
+        length_before_read_chains=length_before_read_chains,
         unresolved_calls=tuple(sorted(
             unresolved,
             key=lambda item: (item.path, item.line, item.source, item.callee),
@@ -389,6 +406,7 @@ def _extract_c_function(
                     callee=callee,
                     arguments=_call_arguments(descendant, source),
                     result_subject=_call_result_subject(descendant, source),
+                    control_subjects=_call_control_subjects(descendant, source),
                     indirect=(
                         callee in function_pointer_names
                         or not _is_direct_call(descendant)
@@ -520,6 +538,14 @@ def _extract_c_function(
         function_node=region.container,
         body_nodes=region.body_nodes,
     )
+    pointer_read_summaries = extract_pointer_read_summaries(
+        path=relative,
+        node_id=node_id,
+        function=name,
+        source=function_source,
+        start_line=line,
+        summary=capacity_summary,
+    )
     return _Extracted(
         node=node,
         calls=tuple(call_sites),
@@ -531,6 +557,7 @@ def _extract_c_function(
         cursor_facts=cursor_facts,
         formatted_output_facts=formatted_output_facts,
         stateful_output_facts=stateful_output_facts,
+        pointer_read_summaries=pointer_read_summaries,
     )
 
 
@@ -774,10 +801,33 @@ def _call_result_subject(node: Node, source: bytes) -> str:
     return identifiers[-1] if identifiers else ""
 
 
+def _call_control_subjects(node: Node, source: bytes) -> tuple[str, ...]:
+    current = node.parent
+    while current is not None:
+        if current.type == "conditional_expression":
+            condition = current.child_by_field_name("condition")
+            if condition is not None and not _inside_node(node, condition):
+                return tuple(sorted({
+                    _text(item, source)
+                    for item in (condition, *_walk(condition))
+                    if item.type == "identifier"
+                }))
+        current = current.parent
+    return ()
+
+
+def _inside_node(node: Node, container: Node) -> bool:
+    return (
+        container.start_byte <= node.start_byte
+        and node.end_byte <= container.end_byte
+    )
+
+
 def _capacity_call(call: _CallSite, target_id: str) -> CapacityCallSite:
     identity = "\0".join((
         CAPACITY_SUMMARY_POLICY, call.caller_id, str(call.line), call.callee,
-        *call.arguments, call.result_subject, target_id, str(not call.indirect),
+        *call.arguments, call.result_subject, *call.control_subjects,
+        target_id, str(not call.indirect),
     ))
     return CapacityCallSite(
         call_id="capacity_call_" + hashlib.sha256(identity.encode()).hexdigest()[:20],
@@ -789,6 +839,7 @@ def _capacity_call(call: _CallSite, target_id: str) -> CapacityCallSite:
         callee=call.callee,
         arguments=call.arguments,
         result_subject=call.result_subject,
+        control_subjects=call.control_subjects,
         direct=not call.indirect,
     )
 

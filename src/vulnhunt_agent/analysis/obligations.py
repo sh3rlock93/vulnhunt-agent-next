@@ -13,6 +13,7 @@ from .models import (
     FormattedOutputFact,
     InvariantObligation,
     InvariantObligationKind,
+    LengthBeforeReadChain,
     ObligationEvidenceRange,
     RiskChain,
     StatefulOutputFact,
@@ -43,6 +44,7 @@ def build_invariant_obligations(graph: CAnalysisGraph) -> tuple[InvariantObligat
         *(_cursor_seed(chain) for chain in graph.cursor_transition_chains),
         *(_formatted_seed(fact) for fact in graph.formatted_output_facts),
         *(_stateful_output_seed(fact) for fact in graph.stateful_output_facts),
+        *(_length_before_read_seed(chain) for chain in graph.length_before_read_chains),
     ]
     seeds = [
         *(_risk_seed(chain) for chain in graph.risk_chains),
@@ -317,6 +319,50 @@ def _stateful_output_seed(fact: StatefulOutputFact) -> _ObligationSeed:
         rationale=(
             "Prove that every loop-state transition updates the capacity term "
             "for separators, escaping, pointer movement, and the terminator."
+        ),
+    )
+
+
+def _length_before_read_seed(chain: LengthBeforeReadChain) -> _ObligationSeed:
+    structural = (
+        "precondition_family=length_before_read",
+        f"required_access_index={chain.required_access_index}",
+        f"checked_before_read={int(chain.checked_before_read)}",
+        f"checked_after_read={int(chain.checked_after_read)}",
+        "pointer_rebased_from_checked_size="
+        f"{int(chain.pointer_rebased_from_checked_size)}",
+        f"check_result_controls_read={int(chain.check_result_controls_read)}",
+        "boundary_cases=" + ",".join(chain.boundary_cases),
+        f"cross_file={int(len(chain.paths) > 1)}",
+        f"guard={chain.guard_state.value}",
+    )
+    evidence = tuple(
+        ObligationEvidenceRange(
+            path=path,
+            line=line,
+            end_line=line,
+            structural_role="relation",
+        )
+        for path, lines in sorted(chain.evidence_lines.items())
+        for line in lines
+    )
+    return _ObligationSeed(
+        kind=InvariantObligationKind.CURSOR_LENGTH_RELATION,
+        structural_facts=structural,
+        evidence_ranges=evidence,
+        required_hunters=("c-bounds-integers", "c-parser-state"),
+        source_fact_ids=(
+            chain.chain_id,
+            chain.read_fact_id,
+            chain.decoder_call_id,
+            chain.check_call_id,
+        ),
+        target_node_ids=(chain.caller_node_id, chain.reader_node_id),
+        target_signal_ids=(),
+        confidence=chain.confidence,
+        rationale=(
+            "Prove the callee's maximum extension-byte read is covered by a "
+            "caller length check that executes before the decoder."
         ),
     )
 
