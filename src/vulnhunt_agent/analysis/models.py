@@ -37,6 +37,7 @@ class InvariantObligationKind(StrEnum):
     CAPACITY_RELATION = "capacity_relation"
     CURSOR_LENGTH_RELATION = "cursor_length_relation"
     FORMATTED_OUTPUT_EXPANSION = "formatted_output_expansion"
+    STATEFUL_OUTPUT_CAPACITY = "stateful_output_capacity"
 
 
 class InvariantClosureState(StrEnum):
@@ -145,6 +146,15 @@ class FormattedExpansionClass(StrEnum):
     TYPE_DEPENDENT = "type_dependent"
     INPUT_DEPENDENT = "input_dependent"
     DYNAMIC_FORMAT = "dynamic_format"
+
+
+class OutputComponentKind(StrEnum):
+    DATA = "data"
+    PREFIX = "prefix"
+    SEPARATOR = "separator"
+    ESCAPE = "escape"
+    TERMINATOR = "terminator"
+    POINTER_ADVANCE = "pointer_advance"
 
 
 class CursorFactKind(StrEnum):
@@ -317,6 +327,28 @@ class FormattedOutputFact(AnalysisModel):
     confidence: str = Field(pattern=r"^(?:low|medium|high)$")
 
 
+class StatefulOutputFact(AnalysisModel):
+    fact_id: str = Field(pattern=r"^output_state_[0-9a-f]{20}$")
+    policy_version: str = "c-stateful-output-v1"
+    node_id: str = Field(min_length=1)
+    path: str = Field(min_length=1)
+    function: str = Field(min_length=1)
+    line: int = Field(ge=1)
+    guard_line: int = Field(ge=1)
+    transition_ordinal: int = Field(ge=1)
+    first_iteration_overhead: int = Field(ge=0)
+    subsequent_iteration_overhead: int = Field(ge=0)
+    guarded_subsequent_overhead: int = Field(ge=0)
+    terminator_reserve: int = Field(ge=0)
+    component_kinds: tuple[OutputComponentKind, ...] = Field(min_length=1)
+    transition_updates_guard_term: bool
+    exact_fit_allowed: bool
+    empty_list_terminator_safe: bool
+    guard_state: GuardState
+    evidence: str = Field(min_length=1)
+    confidence: str = Field(pattern=r"^(?:low|medium|high)$")
+
+
 class FunctionCapacitySummary(AnalysisModel):
     summary_id: str = Field(pattern=r"^capacity_summary_[0-9a-f]{20}$")
     policy_version: str = "c-capacity-summary-v2"
@@ -431,6 +463,7 @@ class CAnalysisGraph(AnalysisModel):
     capacity_calls: tuple[CapacityCallSite, ...] = ()
     capacity_summaries: tuple[FunctionCapacitySummary, ...] = ()
     formatted_output_facts: tuple[FormattedOutputFact, ...] = ()
+    stateful_output_facts: tuple[StatefulOutputFact, ...] = ()
     capacity_risk_chains: tuple[CapacityRiskChain, ...] = ()
     cursor_facts: tuple[CursorFact, ...] = ()
     cursor_transition_chains: tuple[CursorTransitionChain, ...] = ()
