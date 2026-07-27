@@ -89,6 +89,12 @@ def context_for_work_item(
         graph,
         matching_cursor_transition_chains(graph, work_item)[:4],
     )
+    obligation_ids = set(work_item.obligation_ids)
+    invariant_obligations = [
+        _compact_invariant_obligation(item)
+        for item in graph.get("invariant_obligations", [])
+        if item.get("obligation_id") in obligation_ids
+    ]
     selected_ids = set(work_item.slice_ids)
     matching = [
         item for item in plan.get("slices", [])
@@ -125,6 +131,8 @@ def context_for_work_item(
         "routing_reasons": list(work_item.routing_reasons),
         "scan_scope_digest": work_item.scan_scope_digest,
         "focus_chain_ids": list(work_item.focus_chain_ids),
+        "obligation_ids": list(work_item.obligation_ids),
+        "invariant_obligations": invariant_obligations,
         "full_snapshot_context": True,
         "related_nodes": related_nodes,
         "constraint_policy_version": (
@@ -147,6 +155,7 @@ def context_for_work_item(
             _compact_cursor_transition(item) for item in cursor_chains
         ],
         "change_focus": {
+            "target_obligation_ids": list(work_item.obligation_ids),
             "target_node_ids": list(work_item.target_node_ids),
             "target_signal_ids": list(work_item.target_signal_ids),
             "changed_line_ranges": {
@@ -165,6 +174,25 @@ def context_for_work_item(
         analysis_context=context,
     )
     return context
+
+
+def _compact_invariant_obligation(obligation: dict) -> dict:
+    """Keep proof inputs while excluding graph identity fan-out from prompts."""
+    structural_facts = list(obligation.get("structural_facts") or ())
+    evidence_ranges = list(obligation.get("evidence_ranges") or ())
+    return {
+        "obligation_id": obligation.get("obligation_id", ""),
+        "policy_version": obligation.get("policy_version", ""),
+        "kind": obligation.get("kind", ""),
+        "structural_facts": structural_facts[:16],
+        "structural_fact_count": len(structural_facts),
+        "evidence_ranges": evidence_ranges[:24],
+        "evidence_range_count": len(evidence_ranges),
+        "required_hunters": list(obligation.get("required_hunters") or ()),
+        "confidence": obligation.get("confidence", ""),
+        "rationale": obligation.get("rationale", ""),
+        "source_fact_count": len(obligation.get("source_fact_ids") or ()),
+    }
 
 
 def matching_risk_chains(graph: dict, work_item: HunterWorkItem) -> list[dict]:

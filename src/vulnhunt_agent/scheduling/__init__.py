@@ -11,6 +11,8 @@ from .budget import (
     CAPACITY_ADMISSION_UNIT_POLICY,
     CapacityAdmissionUnit,
     NATIVE_DIVERSE_POLICY,
+    HUNTER_INPUT_SOFT_STOP,
+    ObligationAdmissionRecord,
     RecyclableAdmissionLedger,
     WORK_INPUT_FAIRNESS_POLICY,
     WorkInputBudgetPlan,
@@ -29,6 +31,11 @@ from .planning import (
     build_native_work_plan,
 )
 from .router import ROUTER_POLICY, build_routing_plan
+from .obligations import (
+    OBLIGATION_ADMISSION_POLICY,
+    bind_invariant_obligations,
+    supported_invariant_obligations,
+)
 from .shadow import build_shadow_plan, work_id_for
 from .slices import (
     MAX_CONTEXT_FILES,
@@ -48,9 +55,12 @@ __all__ = [
     "CAPACITY_ADMISSION_UNIT_POLICY",
     "CapacityAdmissionUnit",
     "NATIVE_DIVERSE_POLICY",
+    "HUNTER_INPUT_SOFT_STOP",
     "NATIVE_PLAN_CONTRACT_POLICY",
+    "OBLIGATION_ADMISSION_POLICY",
     "NativeAdmissionPlan",
     "NativeWorkPlan",
+    "ObligationAdmissionRecord",
     "RecyclableAdmissionLedger",
     "WORK_INPUT_FAIRNESS_POLICY",
     "WorkInputBudgetPlan",
@@ -65,10 +75,12 @@ __all__ = [
     "build_work_input_budget",
     "build_slice_work_items",
     "build_native_work_plan",
+    "bind_invariant_obligations",
     "build_routing_plan",
     "build_shadow_plan",
     "estimate_cost_usd",
     "group_overlapping_slices",
     "total_usage",
+    "supported_invariant_obligations",
     "work_id_for",
 ]

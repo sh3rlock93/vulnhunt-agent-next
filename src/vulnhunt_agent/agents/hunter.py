@@ -79,6 +79,12 @@ When `focus_chain_ids` are present, use `read_file` on at least one matching
 chain evidence range before finalizing. The source-evidence gate will reject a
 finding, no-finding, or deferred result based only on packet excerpts.
 
+When `invariant_obligations` are present, they are exact source-derived proof
+obligations reserved for this specialist session. Read their evidence ranges,
+test the stated relation and boundary cases, and close every associated target
+with current-source evidence. An obligation is a hypothesis, never a finding by
+itself; a safe proof or typed deferral is preferable to an unsupported report.
+
 When `cursor_transition_chains` identify one of your exact target IDs, read the
 recorded guard, advance, call, and read ranges and attach `cursor_proof` to that
 target's disposition. Transcribe the numeric relations from source; do not infer
@@ -149,8 +155,10 @@ When done, STOP calling tools and output ONLY this JSON:
   ]
 }
 
-For every ID in `change_focus.target_signal_ids`, return exactly one target
-disposition. If that list is empty, use `change_focus.target_node_ids` instead.
+Return exactly one target disposition for every ID in
+`change_focus.target_obligation_ids` and `change_focus.target_signal_ids`. If
+there are no signal IDs, also include `change_focus.target_node_ids`. This keeps
+semantic obligation accounting and the pre-existing source target contract.
 `finding` requires at least one valid finding index. `no_finding` requires no
 finding indexes and a concrete reason the target is safe. Use `deferred` only
 when evidence is insufficient; the work will remain incomplete. Do not return
@@ -690,10 +698,14 @@ def _tool_repair_message(invalid_arguments: list[dict]) -> str:
 
 def _expected_target_ids(analysis_context: dict | None) -> tuple[str, ...]:
     focus = (analysis_context or {}).get("change_focus") or {}
+    obligation_ids = tuple(dict.fromkeys(
+        focus.get("target_obligation_ids") or ()
+    ))
     signal_ids = tuple(dict.fromkeys(focus.get("target_signal_ids") or ()))
     if signal_ids:
-        return signal_ids
-    return tuple(dict.fromkeys(focus.get("target_node_ids") or ()))
+        return tuple(dict.fromkeys((*obligation_ids, *signal_ids)))
+    node_ids = tuple(dict.fromkeys(focus.get("target_node_ids") or ()))
+    return tuple(dict.fromkeys((*obligation_ids, *node_ids)))
 
 
 def _focused_source_requirements(
@@ -701,9 +713,18 @@ def _focused_source_requirements(
 ) -> dict[str, tuple[int, ...]]:
     context = analysis_context or {}
     focus_ids = set(context.get("focus_chain_ids") or ())
-    if not focus_ids:
+    obligations = context.get("invariant_obligations") or ()
+    if not focus_ids and not obligations:
         return {}
     requirements: dict[str, set[int]] = {}
+    for obligation in obligations:
+        for evidence in obligation.get("evidence_ranges", ()):
+            path = str(evidence.get("path", ""))
+            if not path:
+                continue
+            start = int(evidence.get("line", 1))
+            end = int(evidence.get("end_line", start))
+            requirements.setdefault(path, set()).update(range(start, end + 1))
     for chain in context.get("risk_chains") or ():
         if str(chain.get("chain_id", "")) not in focus_ids:
             continue

@@ -19,6 +19,7 @@ def work_id_for(
     pass_index: int = 1,
     target_node_ids: tuple[str, ...] = (),
     target_signal_ids: tuple[str, ...] = (),
+    obligation_ids: tuple[str, ...] = (),
     changed_line_ranges: dict[str, tuple[tuple[int, int], ...]] | None = None,
     scan_scope_digest: str | None = None,
 ) -> str:
@@ -36,6 +37,8 @@ def work_id_for(
             for path, ranges in sorted((changed_line_ranges or {}).items())
         },
     }
+    if obligation_ids:
+        identity["obligation_ids"] = sorted(obligation_ids)
     if scan_scope_digest is not None:
         identity["scan_scope_digest"] = scan_scope_digest
     canonical = json.dumps(identity, sort_keys=True, separators=(",", ":"))

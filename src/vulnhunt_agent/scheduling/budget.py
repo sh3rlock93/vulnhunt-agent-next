@@ -12,7 +12,12 @@ from dataclasses import dataclass, replace
 from typing import Callable
 
 from ..core.llm import LLMResponse
-from ..analysis.models import CapacityPriorityClass, CapacityRiskChain, RiskChain
+from ..analysis.models import (
+    CapacityPriorityClass,
+    CapacityRiskChain,
+    InvariantObligation,
+    RiskChain,
+)
 from ..domain.schemas import BudgetPolicy, BudgetUsage, HunterWorkItem
 
 LEGACY_BUDGET_POLICY = "hunter-budget-allocation-v1"
@@ -24,6 +29,7 @@ NATIVE_REQUIRED_SPECIALIST_SHARE = 1 / 12
 NATIVE_EARLY_SEED_CAP = 2
 CAPACITY_ADMISSION_UNIT_POLICY = "capacity-admission-unit-v1"
 WORK_INPUT_FAIRNESS_POLICY = "work-input-fairness-v3"
+HUNTER_INPUT_SOFT_STOP = 1_500_000
 
 
 class BudgetExceededError(RuntimeError):
@@ -55,6 +61,20 @@ class BudgetAllocation:
     decisions: tuple["AdmissionDecision", ...] = ()
     ranking: tuple["AdmissionRankingRecord", ...] = ()
     capacity_units: tuple["CapacityAdmissionUnit", ...] = ()
+    obligation_required_slots: int = 0
+    obligation_admissions: tuple["ObligationAdmissionRecord", ...] = ()
+
+
+@dataclass(frozen=True)
+class ObligationAdmissionRecord:
+    """Admission outcome for one semantic obligation/Hunter pair."""
+
+    obligation_id: str
+    hunter: str
+    work_id: str
+    disposition: str
+    reason: str
+    evidence_ranges: tuple[dict[str, object], ...]
 
 
 @dataclass(frozen=True)
@@ -105,6 +125,7 @@ class AdmissionDecision:
     logical_chain_groups: tuple[str, ...] = ()
     capacity_unit_ids: tuple[str, ...] = ()
     cap_exception: bool = False
+    obligation_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -129,6 +150,7 @@ class AdmissionRankingRecord:
     logical_chain_group: str = ""
     logical_chain_groups: tuple[str, ...] = ()
     capacity_unit_ids: tuple[str, ...] = ()
+    obligation_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -156,6 +178,7 @@ class RecyclableAdmissionLedger:
         self._events: list[AdmissionEvent] = []
         self._retry_slots = allocation.retry_slots
         self._retry_needed = False
+        self._obligation_admissions = allocation.obligation_admissions
 
     def mark_provider_started(self, work_id: str) -> None:
         if work_id not in self._active or work_id in self._terminal:
@@ -215,6 +238,11 @@ class RecyclableAdmissionLedger:
         return promoted
 
     def snapshot(self) -> dict:
+        terminal_by_work = {
+            item.work_id: item
+            for item in self._events
+            if item.event in {"done", "failed", "budget_deferred", "cancelled"}
+        }
         return {
             "policy_version": "recyclable-admission-v1",
             "active_work_ids": sorted(self._active - self._terminal),
@@ -235,6 +263,31 @@ class RecyclableAdmissionLedger:
                     "usage": item.usage,
                 }
                 for item in self._events
+            ],
+            "obligation_dispositions": [
+                {
+                    "obligation_id": item.obligation_id,
+                    "hunter": item.hunter,
+                    "work_id": item.work_id,
+                    "state": (
+                        "budget_deferred"
+                        if item.disposition == "budget_deferred" else
+                        terminal_by_work[item.work_id].event
+                        if item.work_id in terminal_by_work else
+                        "provider_started"
+                        if item.work_id in self._started else
+                        "admitted"
+                    ),
+                    "reason": (
+                        terminal_by_work[item.work_id].reason
+                        if item.work_id in terminal_by_work
+                        else item.reason
+                    ),
+                    "source_evidence": [
+                        dict(evidence) for evidence in item.evidence_ranges
+                    ],
+                }
+                for item in self._obligation_admissions
             ],
         }
 
@@ -281,6 +334,7 @@ class _AdmissionCandidate:
     risk_entrypoint_reachable: bool
     missing_chain_elements: tuple[str, ...]
     guard_states: tuple[str, ...]
+    obligation_ids: tuple[str, ...]
 
     @property
     def chain_score(self) -> int:
@@ -302,6 +356,7 @@ def allocate_work_items(
     consumed_sessions: int = 0,
     risk_chains: tuple[RiskChain, ...] = (),
     capacity_chains: tuple[CapacityRiskChain, ...] = (),
+    invariant_obligations: tuple[InvariantObligation, ...] = (),
     entrypoint_ids: tuple[str, ...] = (),
     native_full_scan: bool = False,
 ) -> BudgetAllocation:
@@ -318,6 +373,7 @@ def allocate_work_items(
             consumed_sessions=consumed_sessions,
             risk_chains=risk_chains,
             capacity_chains=capacity_chains,
+            invariant_obligations=invariant_obligations,
             entrypoint_ids=entrypoint_ids,
         )
 
@@ -488,7 +544,11 @@ def build_work_input_budget(
     priority_protected_work_ids = {
         decision.work_id
         for decision in allocation.decisions
-        if decision.quota in {"chain_critical", "required_specialist"}
+        if decision.quota in {
+            "obligation_required",
+            "chain_critical",
+            "required_specialist",
+        }
     }
     work_input_limits = {
         work_id: min(
@@ -526,6 +586,7 @@ def _allocate_native_diverse(
     consumed_sessions: int,
     risk_chains: tuple[RiskChain, ...],
     capacity_chains: tuple[CapacityRiskChain, ...],
+    invariant_obligations: tuple[InvariantObligation, ...],
     entrypoint_ids: tuple[str, ...],
 ) -> BudgetAllocation:
     """Admit full native work with fair seed and recyclable class reservations."""
@@ -629,6 +690,7 @@ def _allocate_native_diverse(
             } | {
                 chain.guard_state.value for chain in matching_capacity.values()
             })),
+            obligation_ids=item.obligation_ids,
         ))
     candidates, capacity_units = _canonicalize_capacity_candidates(
         candidates,
@@ -654,6 +716,10 @@ def _allocate_native_diverse(
     seed_counts: dict[str, int] = {}
     decisions: list[AdmissionDecision] = []
     cap_exceptions = 0
+    obligation_by_id = {
+        obligation.obligation_id: obligation
+        for obligation in invariant_obligations
+    }
 
     eligible_critical_seeds = {
         candidate.seed_family for candidate in ordered if candidate.item.required
@@ -686,6 +752,17 @@ def _allocate_native_diverse(
     ) -> bool:
         nonlocal cap_exceptions
         if len(selected) >= capacity or candidate.item.work_id in selected_ids:
+            return False
+        candidate_obligations = {
+            (obligation_id, candidate.item.hunter)
+            for obligation_id in candidate.obligation_ids
+        }
+        selected_obligations = {
+            (obligation_id, selected_candidate.item.hunter)
+            for selected_candidate in selected
+            for obligation_id in selected_candidate.obligation_ids
+        }
+        if candidate_obligations and candidate_obligations <= selected_obligations:
             return False
         if (
             not allow_duplicate_group
@@ -736,6 +813,7 @@ def _allocate_native_diverse(
             logical_chain_groups=candidate.logical_chain_groups,
             capacity_unit_ids=candidate.capacity_unit_ids,
             cap_exception=cap_exception,
+            obligation_ids=candidate.obligation_ids,
         ))
         return True
 
@@ -768,6 +846,57 @@ def _allocate_native_diverse(
             cap_exception=exception,
         ):
             chain_slots += 1
+
+    # Existing complete chains remain protected. Obligation sessions replace
+    # only unrelated lower-priority work, so a newly generated obligation
+    # cannot evict a previously detected critical target.
+    obligation_required_slots = 0
+    covered_obligations: set[tuple[str, str]] = {
+        (obligation_id, candidate.item.hunter)
+        for candidate in selected
+        for obligation_id in candidate.obligation_ids
+    }
+    required_obligations = tuple(dict.fromkeys(
+        (obligation_id, candidate.item.hunter)
+        for candidate in ordered
+        for obligation_id in candidate.obligation_ids
+    ))
+    for obligation_id, hunter in required_obligations:
+        pair = (obligation_id, hunter)
+        if pair in covered_obligations:
+            continue
+        candidates_for_obligation = [
+            candidate
+            for candidate in ordered
+            if candidate.item.hunter == hunter
+            and obligation_id in candidate.obligation_ids
+        ]
+        admitted = next((
+            candidate
+            for candidate in candidates_for_obligation
+            if admit(
+                candidate,
+                quota=(
+                    "required_specialist"
+                    if _is_explicit_required_specialist(candidate)
+                    else "obligation_required"
+                ),
+                reason=(
+                    "required cursor-transition specialist also closes a "
+                    "source-backed invariant obligation"
+                    if _is_explicit_required_specialist(candidate)
+                    else
+                    "source-backed high-confidence invariant obligation reserved "
+                    "before unrelated lower-priority work"
+                ),
+            )
+        ), None)
+        if admitted is not None:
+            covered_obligations.update(
+                (item_id, admitted.item.hunter)
+                for item_id in admitted.item.obligation_ids
+            )
+            obligation_required_slots += 1
 
     seed_slots = 0
     seed_target = min(
@@ -886,7 +1015,15 @@ def _allocate_native_diverse(
 
     deferred = {
         candidate.item.work_id: (
-            "duplicate_capacity_chain"
+            "duplicate_obligation_identity"
+            if (
+                candidate.obligation_ids
+                and all(
+                    (obligation_id, candidate.item.hunter) in covered_obligations
+                    for obligation_id in candidate.obligation_ids
+                )
+            )
+            else "duplicate_capacity_chain"
             if (
                 _specialist_chain_groups(candidate)
                 and _specialist_chain_groups(candidate)
@@ -919,7 +1056,11 @@ def _allocate_native_diverse(
         high_risk_non_chain_slots=high_slots,
         borrowed_slots=borrowed_slots,
         duplicate_coverage_deferred=sum(
-            reason in {"duplicate_coverage_group", "duplicate_capacity_chain"}
+            reason in {
+                "duplicate_obligation_identity",
+                "duplicate_coverage_group",
+                "duplicate_capacity_chain",
+            }
             for reason in deferred.values()
         ),
         seed_cap_exceptions=cap_exceptions,
@@ -930,6 +1071,12 @@ def _allocate_native_diverse(
             deferred=deferred,
         ),
         capacity_units=capacity_units,
+        obligation_required_slots=obligation_required_slots,
+        obligation_admissions=_obligation_admission_records(
+            ordered,
+            selected_ids=selected_ids,
+            obligation_by_id=obligation_by_id,
+        ),
     )
 
 
@@ -1024,6 +1171,11 @@ def _canonicalize_capacity_candidates(
             logical_groups = tuple(
                 unit.root_cause_group for unit in associated
             )
+            associated_chain_ids = tuple(sorted({
+                chain_id
+                for unit in associated
+                for chain_id in unit.chain_ids
+            }))
             canonical.append(replace(
                 candidate,
                 capacity_chain_score=0,
@@ -1036,7 +1188,13 @@ def _canonicalize_capacity_candidates(
                 ),
                 logical_chain_group=(logical_groups[0] if logical_groups else ""),
                 logical_chain_groups=logical_groups,
-                chain_ids=candidate.risk_chain_ids,
+                # Obligation-bound work receives these capacity proofs in its
+                # context. Record that coverage without restoring duplicate
+                # capacity score or cost units.
+                chain_ids=tuple(sorted((
+                    *candidate.risk_chain_ids,
+                    *(associated_chain_ids if candidate.obligation_ids else ()),
+                ))),
                 capacity_chain_ids=(),
                 capacity_unit_ids=tuple(unit.unit_id for unit in associated),
                 missing_chain_elements=candidate.risk_missing_chain_elements,
@@ -1166,7 +1324,7 @@ def _native_ranking_records(
             "admitted"
             if decision else
             "duplicate_deferred"
-            if reason in {"duplicate_coverage_group", "duplicate_capacity_chain"} else
+            if reason == "duplicate_obligation_identity" else
             "budget_deferred"
         )
         records.append(AdmissionRankingRecord(
@@ -1188,6 +1346,56 @@ def _native_ranking_records(
             logical_chain_group=candidate.logical_chain_group,
             logical_chain_groups=candidate.logical_chain_groups,
             capacity_unit_ids=candidate.capacity_unit_ids,
+            obligation_ids=candidate.obligation_ids,
+        ))
+    return tuple(records)
+
+
+def _obligation_admission_records(
+    ordered: list[_AdmissionCandidate],
+    *,
+    selected_ids: set[str],
+    obligation_by_id: dict[str, InvariantObligation],
+) -> tuple[ObligationAdmissionRecord, ...]:
+    """Name every exact obligation/Hunter admission with source evidence."""
+    pairs = sorted({
+        (obligation_id, candidate.item.hunter)
+        for candidate in ordered
+        for obligation_id in candidate.obligation_ids
+    })
+    records = []
+    for obligation_id, hunter in pairs:
+        candidates = [
+            candidate
+            for candidate in ordered
+            if candidate.item.hunter == hunter
+            and obligation_id in candidate.obligation_ids
+        ]
+        selected = next(
+            (
+                candidate for candidate in candidates
+                if candidate.item.work_id in selected_ids
+            ),
+            None,
+        )
+        representative = selected or candidates[0]
+        obligation = obligation_by_id.get(obligation_id)
+        records.append(ObligationAdmissionRecord(
+            obligation_id=obligation_id,
+            hunter=hunter,
+            work_id=representative.item.work_id,
+            disposition="admitted" if selected is not None else "budget_deferred",
+            reason=(
+                "obligation_required"
+                if selected is not None else "max_hunter_sessions"
+            ),
+            evidence_ranges=(
+                tuple(
+                    evidence.model_dump(mode="json")
+                    for evidence in obligation.evidence_ranges
+                )
+                if obligation is not None else ()
+            ),
         ))
     return tuple(records)
 
@@ -1459,6 +1667,13 @@ class BudgetController:
             remaining_input = (
                 self.policy.max_input_tokens - self._input_tokens - reserved_input
             )
+            soft_limit = min(
+                HUNTER_INPUT_SOFT_STOP,
+                self.policy.max_input_tokens,
+            )
+            remaining_soft_input = (
+                soft_limit - self._input_tokens - reserved_input
+            )
             remaining_output = (
                 self.policy.max_output_tokens - self._output_tokens - reserved_output
             )
@@ -1482,6 +1697,12 @@ class BudgetController:
                 )
                 if input_upper_bound > remaining_input - protected_critical:
                     raise BudgetExceededError("critical_input_reserve")
+            if input_upper_bound > remaining_soft_input:
+                raise BudgetExceededError(
+                    "soft_input_token_stop"
+                    if soft_limit < self.policy.max_input_tokens
+                    else "max_input_tokens"
+                )
             if input_upper_bound > remaining_input:
                 raise BudgetExceededError("max_input_tokens")
             if remaining_output <= 0:
@@ -1528,6 +1749,10 @@ class BudgetController:
             reserved_output = sum(item.output_tokens for item in self._reservations.values())
             return {
                 "input_tokens": self._input_tokens,
+                "soft_input_token_stop": min(
+                    HUNTER_INPUT_SOFT_STOP,
+                    self.policy.max_input_tokens,
+                ),
                 "output_tokens": self._output_tokens,
                 "reserved_input_tokens": reserved_input,
                 "reserved_output_tokens": reserved_output,

@@ -260,3 +260,68 @@ def test_packet_fit_caps_oversized_focus_selected_ranges() -> None:
     assert len(fitted["selected_ranges"]["focus.c"]) == 32
     assert len(fitted["source_excerpts"][0]["content"]) == 4_000
     assert fitted["truncation"]["trimmed_selected_ranges"] == 3_967
+
+
+def test_packet_fit_compacts_single_focus_proof_metadata_before_failing() -> None:
+    risk_id = "risk_" + "2" * 20
+    cursor_id = "cursor_transition_" + "3" * 20
+    packet = {
+        "focus_chain_ids": [risk_id],
+        "risk_chains": [{
+            "chain_id": risk_id,
+            "path": "focus.c",
+            "transform_steps": [{
+                "path": "focus.c",
+                "line": 10,
+                "operation": "X" * 20_000,
+                "operations": ["Y" * 5_000] * 10,
+                "narrowing_or_wrap": True,
+            }],
+            "rationale": "R" * 20_000,
+        }],
+        "capacity_risk_chains": [],
+        "cursor_transition_chains": [{
+            "chain_id": cursor_id,
+            "paths": ["focus.c"],
+            "guard_state": "absent",
+            "evidence_lines": {"focus.c": list(range(1, 500))},
+            "rationale": "C" * 20_000,
+        }],
+        "vulnerability_knowledge": {"cards": [{
+            "pattern_id": "vpattern_test",
+            "weakness_family": "bounds",
+            "matched_semantic_tags": ["write"],
+            "invariant": "I" * 10_000,
+            "investigation_steps": ["S" * 10_000] * 8,
+            "required_evidence": ["E" * 10_000] * 6,
+            "falsifiers": ["F" * 10_000] * 6,
+        }]},
+        "slices": [],
+        "related_nodes": [],
+        "constraint_facts": [],
+        "source_excerpts": [{
+            "path": "focus.c",
+            "kind": "target",
+            "truncated": False,
+            "content": "source evidence\n" * 300,
+        }],
+        "truncation": _truncation(),
+    }
+
+    fitted = _fit_packet(packet)
+    encoded = (json.dumps(
+        {**fitted, "packet_digest": "sha256:" + "0" * 64},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ) + "\n").encode()
+
+    assert len(encoded) <= MAX_CONTEXT_BYTES
+    assert fitted["risk_chains"][0]["chain_id"] == risk_id
+    assert fitted["cursor_transition_chains"][0]["chain_id"] == cursor_id
+    assert fitted["vulnerability_knowledge"]["cards"][0]["pattern_id"] == (
+        "vpattern_test"
+    )
+    assert len(fitted["source_excerpts"][0]["content"].encode()) >= (
+        MIN_EVIDENCE_EXCERPT_BYTES
+    )
