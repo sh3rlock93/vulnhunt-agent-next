@@ -68,6 +68,13 @@ order. Compare the value that sizes the allocation with any independent value
 that controls the later write. Treat the chain as a prioritization hypothesis,
 not proof: verify reachability and the actual C types before reporting.
 
+When `vulnerability_knowledge.cards` are present, use them as generalized
+hypothesis and falsification checklists. They are not signatures and do not
+prove that the current target resembles an earlier finding. Never search for
+old repository identities, paths, symbols, line numbers, commits, or literal
+triggers. Apply each invariant to the current source and require current-source
+evidence before producing a finding.
+
 When `focus_chain_ids` are present, use `read_file` on at least one matching
 chain evidence range before finalizing. The source-evidence gate will reject a
 finding, no-finding, or deferred result based only on packet excerpts.

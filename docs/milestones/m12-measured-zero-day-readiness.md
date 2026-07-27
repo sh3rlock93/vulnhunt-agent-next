@@ -251,9 +251,12 @@ cases only.  Other missing families and the sealed holdout remain untouched.
 
 ## M12.2.x — Target-cluster invariant completion recovery
 
-Status: designed, not started. The M12.2 report measured 0/12 exact target
-detections despite target-covering admission in 8/12 runs. M12.3 remains
-blocked until this recovery passes.
+Status: replanned after root-cause and reportable-candidate validation. The
+knowledge foundation is implemented locally; recovery PRs are not started. The
+M12.2 report measured 0/12 exact target detections despite target-covering
+admission in 8/12 runs. M12.3 remains blocked until this recovery passes. The
+detailed sequential design and per-target gates are in
+`docs/milestones/m12-2-generalized-knowledge-recovery.md`.
 
 ### Single objective
 
@@ -264,20 +267,17 @@ discovery, increase any run budget, or change reportability policy.
 
 ### PR sequence
 
-1. Derive deterministic, oracle-free invariant obligations from the existing
-   analysis graph. Pair allocation or required-capacity calculations with
-   downstream writes, capacity-state mutations with their failure paths, and
-   parser extension-byte reads with the preceding remaining-length checks.
-   Attach obligations only to existing file clusters and add no model calls.
-2. Replace the lowest-ranked non-target work in each admitted cluster with at
-   most one required-Hunter invariant-completion session. The session must
-   close every attached obligation as `proved-safe`, `candidate`, or
-   `unresolved-with-evidence`; it may not widen repository scope. Use a
-   1,500,000-token soft stop while preserving the existing hard ceilings.
-3. Run a new 4-by-3 calibration cohort under new run IDs. Reuse the M12.2
-   evaluator unchanged, publish exact target and cost metrics, and promote no
-   case unless target detection and differential reproduction succeed in at
-   least two of three repetitions.
+1. Add a repository-agnostic invariant-obligation contract.
+2. Add formatted-output expansion obligations.
+3. Add stateful output-capacity obligations.
+4. Add cross-file length-before-read obligations.
+5. Add signed source-to-allocation-to-write obligations.
+6. Enforce obligation-level admission and completion within existing budgets.
+7. Run a new 4-by-3 differential calibration and knowledge-quality gate.
+
+The runtime knowledge database is a bounded input to these obligations, not a
+signature engine: repository identity and historical trigger details remain in
+the non-runtime provenance ledger.
 
 ### Recovery gates
 

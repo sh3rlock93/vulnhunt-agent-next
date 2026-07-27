@@ -1500,7 +1500,7 @@ def test_shared_context_cache_reuses_cross_hunter_packet_and_snapshot_keys(
 
     assert first == second
     stats = cache.stats()
-    assert stats["policy_version"] == "c-context-v7"
+    assert stats["policy_version"] == "c-context-v8"
     assert stats["entries"] == 1
     assert stats["hits"] == 1
     assert stats["misses"] == 1
