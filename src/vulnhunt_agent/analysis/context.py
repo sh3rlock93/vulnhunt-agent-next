@@ -178,12 +178,16 @@ def context_for_work_item(
 
 def _compact_invariant_obligation(obligation: dict) -> dict:
     """Keep proof inputs while excluding graph identity fan-out from prompts."""
+    structural_facts = list(obligation.get("structural_facts") or ())
+    evidence_ranges = list(obligation.get("evidence_ranges") or ())
     return {
         "obligation_id": obligation.get("obligation_id", ""),
         "policy_version": obligation.get("policy_version", ""),
         "kind": obligation.get("kind", ""),
-        "structural_facts": list(obligation.get("structural_facts") or ()),
-        "evidence_ranges": list(obligation.get("evidence_ranges") or ()),
+        "structural_facts": structural_facts[:16],
+        "structural_fact_count": len(structural_facts),
+        "evidence_ranges": evidence_ranges[:24],
+        "evidence_range_count": len(evidence_ranges),
         "required_hunters": list(obligation.get("required_hunters") or ()),
         "confidence": obligation.get("confidence", ""),
         "rationale": obligation.get("rationale", ""),

@@ -1168,6 +1168,11 @@ def _canonicalize_capacity_candidates(
             logical_groups = tuple(
                 unit.root_cause_group for unit in associated
             )
+            associated_chain_ids = tuple(sorted({
+                chain_id
+                for unit in associated
+                for chain_id in unit.chain_ids
+            }))
             canonical.append(replace(
                 candidate,
                 capacity_chain_score=0,
@@ -1180,7 +1185,13 @@ def _canonicalize_capacity_candidates(
                 ),
                 logical_chain_group=(logical_groups[0] if logical_groups else ""),
                 logical_chain_groups=logical_groups,
-                chain_ids=candidate.risk_chain_ids,
+                # Obligation-bound work receives these capacity proofs in its
+                # context. Record that coverage without restoring duplicate
+                # capacity score or cost units.
+                chain_ids=tuple(sorted((
+                    *candidate.risk_chain_ids,
+                    *(associated_chain_ids if candidate.obligation_ids else ()),
+                ))),
                 capacity_chain_ids=(),
                 capacity_unit_ids=tuple(unit.unit_id for unit in associated),
                 missing_chain_elements=candidate.risk_missing_chain_elements,

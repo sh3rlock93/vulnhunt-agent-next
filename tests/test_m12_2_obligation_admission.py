@@ -7,6 +7,9 @@ import pytest
 
 from vulnhunt_agent.analysis import (
     CAnalysisGraph,
+    CapacityPriorityClass,
+    CapacityRiskChain,
+    GuardState,
     InvariantObligation,
     InvariantObligationKind,
     ObligationEvidenceRange,
@@ -280,6 +283,67 @@ def test_cursor_specialist_keeps_its_protected_quota_when_obligation_bound() -> 
 
     assert allocation.decisions[0].quota == "required_specialist"
     assert allocation.obligation_admissions[0].disposition == "admitted"
+
+
+def test_obligation_admission_keeps_associated_capacity_coverage_auditable() -> None:
+    obligation = _obligation(
+        11,
+        InvariantObligationKind.CAPACITY_RELATION,
+        ("c-bounds-integers",),
+    )
+    signal_id = "signal-capacity"
+    representative = _work(
+        1,
+        "root.c",
+        "c-bounds-integers",
+        signal_id=signal_id,
+    )
+    obligated = _work(
+        2,
+        "support.c",
+        "c-bounds-integers",
+        obligation_ids=(obligation.obligation_id,),
+        signal_id=signal_id,
+    )
+    chain = CapacityRiskChain(
+        chain_id="capacity_risk_" + "1" * 20,
+        root_cause_group="capacity_group_" + "2" * 20,
+        allocation_fact_id="capacity_" + "3" * 20,
+        root_node_id="root.c::decode@1",
+        root_path="root.c",
+        root_function="decode",
+        base="output",
+        element_count="capacity",
+        element_size="1",
+        node_ids=("root.c::decode@1",),
+        paths=("root.c", "support.c"),
+        fact_ids=("capacity_" + "3" * 20,),
+        allocation_signal_ids=(signal_id,),
+        guard_state=GuardState.ABSENT,
+        priority_class=CapacityPriorityClass.COMPLETE_UNCHECKED,
+        score=100,
+        confidence="high",
+        rationale="unchecked shared capacity relation",
+    )
+
+    allocation = allocate_work_items(
+        (representative, obligated),
+        BudgetPolicy(max_hunter_sessions=1, max_retries_per_work_item=0),
+        capacity_chains=(chain,),
+        invariant_obligations=(obligation,),
+        native_full_scan=True,
+    )
+
+    admitted = next(
+        record for record in allocation.ranking
+        if record.disposition == "admitted"
+    )
+    assert admitted.work_id == obligated.work_id
+    assert chain.chain_id in admitted.chain_ids
+    assert admitted.score < next(
+        record.score for record in allocation.ranking
+        if record.work_id == representative.work_id
+    )
 
 
 def test_ledger_closes_obligations_or_preserves_typed_source_backed_deferral() -> None:

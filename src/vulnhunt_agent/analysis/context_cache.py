@@ -15,7 +15,7 @@ from .context import (
     matching_risk_chains_for_targets,
 )
 
-CONTEXT_CACHE_POLICY = "c-context-v9"
+CONTEXT_CACHE_POLICY = "c-context-v10"
 CONTEXT_SHARD_POLICY = "c-focus-chain-shards-v1"
 MAX_CONTEXT_BYTES = 24_000
 MIN_EVIDENCE_EXCERPT_BYTES = 512
@@ -712,6 +712,10 @@ def _fit_packet(packet: dict) -> dict:
     truncation = packet["truncation"]
     truncation.setdefault("removed_source_excerpts", 0)
     truncation.setdefault("compacted_capacity_risk_chains", 0)
+    truncation.setdefault("compacted_risk_chains", 0)
+    truncation.setdefault("removed_cursor_transition_chains", 0)
+    truncation.setdefault("compacted_cursor_transition_chains", 0)
+    truncation.setdefault("compacted_knowledge_cards", 0)
     truncation.setdefault("removed_knowledge_cards", 0)
     truncation.setdefault("removed_selected_range_files", 0)
     truncation.setdefault("minimum_evidence_excerpt_bytes", MIN_EVIDENCE_EXCERPT_BYTES)
@@ -788,6 +792,42 @@ def _fit_packet(packet: dict) -> dict:
             chains[index] = compact
             mark_fit()
             truncation["compacted_capacity_risk_chains"] += 1
+            return True
+        return False
+
+    def compact_risk_chain() -> bool:
+        chains = packet.get("risk_chains") or []
+        for index in range(len(chains) - 1, -1, -1):
+            compact = _compact_risk_chain(chains[index])
+            if compact == chains[index]:
+                continue
+            chains[index] = compact
+            mark_fit()
+            truncation["compacted_risk_chains"] += 1
+            return True
+        return False
+
+    def compact_cursor_chain() -> bool:
+        chains = packet.get("cursor_transition_chains") or []
+        for index in range(len(chains) - 1, -1, -1):
+            compact = _compact_cursor_transition_chain(chains[index])
+            if compact == chains[index]:
+                continue
+            chains[index] = compact
+            mark_fit()
+            truncation["compacted_cursor_transition_chains"] += 1
+            return True
+        return False
+
+    def compact_knowledge_card() -> bool:
+        cards = (packet.get("vulnerability_knowledge") or {}).get("cards") or []
+        for index in range(len(cards) - 1, -1, -1):
+            compact = _compact_knowledge_card(cards[index])
+            if compact == cards[index]:
+                continue
+            cards[index] = compact
+            mark_fit()
+            truncation["compacted_knowledge_cards"] += 1
             return True
         return False
 
@@ -880,6 +920,18 @@ def _fit_packet(packet: dict) -> dict:
             truncation["removed_constraints"] += 1
             continue
         if compact_capacity_chain():
+            continue
+        if compact_risk_chain():
+            continue
+        cursor_chains = packet.get("cursor_transition_chains") or []
+        if len(cursor_chains) > 1:
+            cursor_chains.pop()
+            mark_fit()
+            truncation["removed_cursor_transition_chains"] += 1
+            continue
+        if compact_cursor_chain():
+            continue
+        if compact_knowledge_card():
             continue
         if compact_selected_ranges():
             continue
@@ -989,6 +1041,95 @@ def _compact_capacity_risk_chain(chain: dict) -> dict:
             chain.get("guard_count", len(chain.get("guard_fact_ids") or ()))
         ),
         "rationale": chain.get("rationale", ""),
+    }
+
+
+def _compact_risk_chain(chain: dict) -> dict:
+    """Preserve the numeric proof while bounding identifier and step fan-out."""
+    steps = []
+    for step in list(chain.get("transform_steps") or ())[:6]:
+        steps.append({
+            "path": str(step.get("path", ""))[:256],
+            "line": step.get("line"),
+            "operation": str(step.get("operation", ""))[:256],
+            "operations": [
+                str(item)[:128]
+                for item in list(step.get("operations") or ())[:8]
+            ],
+            "input_type": str(step.get("input_type", ""))[:128],
+            "output_type": str(step.get("output_type", ""))[:128],
+            "narrowing_or_wrap": bool(step.get("narrowing_or_wrap")),
+        })
+    return {
+        "chain_id": chain.get("chain_id", ""),
+        "policy_version": chain.get("policy_version", ""),
+        "path": chain.get("path", ""),
+        "function": chain.get("function", ""),
+        "score": int(chain.get("score", 0)),
+        "confidence": chain.get("confidence", ""),
+        "guard_state": chain.get("guard_state", "unknown"),
+        "source_variables": list(chain.get("source_variables") or ())[:16],
+        "source_lines": list(chain.get("source_lines") or ())[:32],
+        "transform_steps": steps,
+        "guard_lines": list(chain.get("guard_lines") or ())[:32],
+        "sink_lines": list(chain.get("sink_lines") or ())[:32],
+        "rationale": str(chain.get("rationale", ""))[:512],
+    }
+
+
+def _compact_cursor_transition_chain(chain: dict) -> dict:
+    """Keep the guard/advance/read equation and bounded source coordinates."""
+    evidence_lines = {
+        str(path): [int(line) for line in list(lines)[:24]]
+        for path, lines in list(sorted(
+            (chain.get("evidence_lines") or {}).items()
+        ))[:12]
+    }
+    return {
+        "chain_id": chain.get("chain_id", ""),
+        "policy_version": chain.get("policy_version", ""),
+        "caller_node_id": chain.get("caller_node_id", ""),
+        "reader_node_id": chain.get("reader_node_id", ""),
+        "paths": list(chain.get("paths") or ())[:12],
+        "guard_state": chain.get("guard_state", "unknown"),
+        "subject": chain.get("subject", ""),
+        "bound": chain.get("bound", ""),
+        "required_access_index": chain.get("required_access_index"),
+        "observed_guard_index": chain.get("observed_guard_index"),
+        "call_line": chain.get("call_line"),
+        "evidence_lines": evidence_lines,
+        "score": int(chain.get("score", 0)),
+        "confidence": chain.get("confidence", ""),
+        "advance_delta": chain.get("advance_delta"),
+        "dereference_index": chain.get("dereference_index"),
+        "evidence_requirements": list(
+            chain.get("evidence_requirements") or ()
+        )[:24],
+        "rationale": str(chain.get("rationale", ""))[:512],
+    }
+
+
+def _compact_knowledge_card(card: dict) -> dict:
+    """Retain the hypothesis, proof needs, and falsifiers under hard limits."""
+    return {
+        "pattern_id": card.get("pattern_id", ""),
+        "weakness_family": card.get("weakness_family", ""),
+        "matched_semantic_tags": list(
+            card.get("matched_semantic_tags") or ()
+        )[:16],
+        "invariant": str(card.get("invariant", ""))[:500],
+        "investigation_steps": [
+            str(item)[:500]
+            for item in list(card.get("investigation_steps") or ())[:6]
+        ],
+        "required_evidence": [
+            str(item)[:500]
+            for item in list(card.get("required_evidence") or ())[:5]
+        ],
+        "falsifiers": [
+            str(item)[:500]
+            for item in list(card.get("falsifiers") or ())[:5]
+        ],
     }
 
 
