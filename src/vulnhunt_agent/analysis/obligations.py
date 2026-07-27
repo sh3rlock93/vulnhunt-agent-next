@@ -16,6 +16,7 @@ from .models import (
     LengthBeforeReadChain,
     ObligationEvidenceRange,
     RiskChain,
+    SignedAllocationWriteChain,
     StatefulOutputFact,
 )
 
@@ -45,6 +46,10 @@ def build_invariant_obligations(graph: CAnalysisGraph) -> tuple[InvariantObligat
         *(_formatted_seed(fact) for fact in graph.formatted_output_facts),
         *(_stateful_output_seed(fact) for fact in graph.stateful_output_facts),
         *(_length_before_read_seed(chain) for chain in graph.length_before_read_chains),
+        *(
+            _signed_allocation_write_seed(chain)
+            for chain in graph.signed_allocation_write_chains
+        ),
     ]
     seeds = [
         *(_risk_seed(chain) for chain in graph.risk_chains),
@@ -363,6 +368,66 @@ def _length_before_read_seed(chain: LengthBeforeReadChain) -> _ObligationSeed:
         rationale=(
             "Prove the callee's maximum extension-byte read is covered by a "
             "caller length check that executes before the decoder."
+        ),
+    )
+
+
+def _signed_allocation_write_seed(
+    chain: SignedAllocationWriteChain,
+) -> _ObligationSeed:
+    structural = (
+        f"source_signed={int(chain.source_signed)}",
+        f"source_domain={chain.source_domain}",
+        f"write_unit={chain.write_unit}",
+        f"independent_write_bound={int(chain.independent_write_bound)}",
+        f"narrowing_or_wrap={int(chain.narrowing_or_wrap)}",
+        f"checked_arithmetic={int(chain.checked_arithmetic)}",
+        "boundary_cases=" + ",".join(chain.boundary_cases),
+        f"function_hops={len({chain.source_node_id, chain.allocation_node_id, chain.write_node_id})}",
+        f"guard={chain.guard_state.value}",
+    )
+    evidence = (
+        ObligationEvidenceRange(
+            path=chain.paths[0],
+            line=chain.source_line,
+            end_line=chain.source_line,
+            structural_role="source",
+        ),
+        *(ObligationEvidenceRange(
+            path=chain.paths[0],
+            line=line,
+            end_line=line,
+            structural_role="guard",
+        ) for line in chain.guard_lines),
+        ObligationEvidenceRange(
+            path=chain.paths[0],
+            line=chain.allocation_line,
+            end_line=chain.allocation_line,
+            structural_role="allocation",
+        ),
+        *(ObligationEvidenceRange(
+            path=chain.paths[0],
+            line=line,
+            end_line=line,
+            structural_role="access",
+        ) for line in chain.write_lines),
+    )
+    return _ObligationSeed(
+        kind=InvariantObligationKind.INTEGER_MEMORY_RELATION,
+        structural_facts=structural,
+        evidence_ranges=_dedupe_ranges(list(evidence)),
+        required_hunters=("c-bounds-integers",),
+        source_fact_ids=(chain.chain_id,),
+        target_node_ids=tuple(sorted({
+            chain.source_node_id,
+            chain.allocation_node_id,
+            chain.write_node_id,
+        })),
+        target_signal_ids=(),
+        confidence=chain.confidence,
+        rationale=(
+            "Prove that the final non-negative signed source domain used for "
+            "allocation covers the independent bound and unit of every write."
         ),
     )
 

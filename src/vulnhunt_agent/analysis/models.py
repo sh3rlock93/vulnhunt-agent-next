@@ -394,6 +394,31 @@ class LengthBeforeReadChain(AnalysisModel):
     rationale: str = Field(min_length=1)
 
 
+class SignedAllocationWriteChain(AnalysisModel):
+    chain_id: str = Field(pattern=r"^signed_memory_[0-9a-f]{20}$")
+    policy_version: str = "c-signed-allocation-write-v1"
+    source_node_id: str = Field(min_length=1)
+    allocation_node_id: str = Field(min_length=1)
+    write_node_id: str = Field(min_length=1)
+    paths: tuple[str, ...] = Field(min_length=1)
+    source_line: int = Field(ge=1)
+    guard_lines: tuple[int, ...] = Field(min_length=1)
+    allocation_line: int = Field(ge=1)
+    write_lines: tuple[int, ...] = Field(min_length=1)
+    source_signed: bool
+    source_domain: str = Field(pattern=r"^(?:unchecked|nonzero|nonnegative)$")
+    allocation_expression: str = Field(min_length=1)
+    write_unit: int = Field(ge=1)
+    independent_write_bound: bool
+    narrowing_or_wrap: bool
+    checked_arithmetic: bool
+    boundary_cases: tuple[str, ...] = Field(min_length=5)
+    guard_state: GuardState
+    score: int = Field(ge=0, le=100)
+    confidence: str = Field(pattern=r"^(?:low|medium|high)$")
+    rationale: str = Field(min_length=1)
+
+
 class FunctionCapacitySummary(AnalysisModel):
     summary_id: str = Field(pattern=r"^capacity_summary_[0-9a-f]{20}$")
     policy_version: str = "c-capacity-summary-v2"
@@ -514,6 +539,7 @@ class CAnalysisGraph(AnalysisModel):
     cursor_facts: tuple[CursorFact, ...] = ()
     cursor_transition_chains: tuple[CursorTransitionChain, ...] = ()
     length_before_read_chains: tuple[LengthBeforeReadChain, ...] = ()
+    signed_allocation_write_chains: tuple[SignedAllocationWriteChain, ...] = ()
     invariant_obligations: tuple[InvariantObligation, ...] = ()
     unresolved_calls: tuple[UnresolvedCall, ...] = ()
 
