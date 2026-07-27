@@ -817,54 +817,6 @@ def _allocate_native_diverse(
         ))
         return True
 
-    obligation_required_slots = 0
-    covered_obligations: set[tuple[str, str]] = set()
-    required_obligations = tuple(sorted({
-        (obligation_id, candidate.item.hunter)
-        for candidate in ordered
-        for obligation_id in candidate.obligation_ids
-    }))
-    for obligation_id, hunter in required_obligations:
-        pair = (obligation_id, hunter)
-        already_selected = next((
-            candidate
-            for candidate in selected
-            if candidate.item.hunter == hunter
-            and obligation_id in candidate.obligation_ids
-        ), None)
-        if already_selected is not None:
-            covered_obligations.add(pair)
-            continue
-        candidates_for_obligation = [
-            candidate
-            for candidate in ordered
-            if candidate.item.hunter == hunter
-            and obligation_id in candidate.obligation_ids
-        ]
-        admitted = next((
-            candidate
-            for candidate in candidates_for_obligation
-            if admit(
-                candidate,
-                quota=(
-                    "required_specialist"
-                    if _is_explicit_required_specialist(candidate)
-                    else "obligation_required"
-                ),
-                reason=(
-                    "required cursor-transition specialist also closes a "
-                    "source-backed invariant obligation"
-                    if _is_explicit_required_specialist(candidate)
-                    else
-                    "source-backed high-confidence invariant obligation reserved "
-                    "before unrelated lower-priority work"
-                ),
-            )
-        ), None)
-        if admitted is not None:
-            covered_obligations.add(pair)
-            obligation_required_slots += 1
-
     chain_slots = 0
     chain_target = min(
         max(0, capacity - specialist_target),
@@ -894,6 +846,57 @@ def _allocate_native_diverse(
             cap_exception=exception,
         ):
             chain_slots += 1
+
+    # Existing complete chains remain protected. Obligation sessions replace
+    # only unrelated lower-priority work, so a newly generated obligation
+    # cannot evict a previously detected critical target.
+    obligation_required_slots = 0
+    covered_obligations: set[tuple[str, str]] = {
+        (obligation_id, candidate.item.hunter)
+        for candidate in selected
+        for obligation_id in candidate.obligation_ids
+    }
+    required_obligations = tuple(dict.fromkeys(
+        (obligation_id, candidate.item.hunter)
+        for candidate in ordered
+        for obligation_id in candidate.obligation_ids
+    ))
+    for obligation_id, hunter in required_obligations:
+        pair = (obligation_id, hunter)
+        if pair in covered_obligations:
+            continue
+        candidates_for_obligation = [
+            candidate
+            for candidate in ordered
+            if candidate.item.hunter == hunter
+            and obligation_id in candidate.obligation_ids
+        ]
+        admitted = next((
+            candidate
+            for candidate in candidates_for_obligation
+            if admit(
+                candidate,
+                quota=(
+                    "required_specialist"
+                    if _is_explicit_required_specialist(candidate)
+                    else "obligation_required"
+                ),
+                reason=(
+                    "required cursor-transition specialist also closes a "
+                    "source-backed invariant obligation"
+                    if _is_explicit_required_specialist(candidate)
+                    else
+                    "source-backed high-confidence invariant obligation reserved "
+                    "before unrelated lower-priority work"
+                ),
+            )
+        ), None)
+        if admitted is not None:
+            covered_obligations.update(
+                (item_id, admitted.item.hunter)
+                for item_id in admitted.item.obligation_ids
+            )
+            obligation_required_slots += 1
 
     seed_slots = 0
     seed_target = min(

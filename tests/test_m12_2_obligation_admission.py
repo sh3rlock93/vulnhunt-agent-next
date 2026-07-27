@@ -319,9 +319,9 @@ def test_obligation_admission_keeps_associated_capacity_coverage_auditable() -> 
         paths=("root.c", "support.c"),
         fact_ids=("capacity_" + "3" * 20,),
         allocation_signal_ids=(signal_id,),
-        guard_state=GuardState.ABSENT,
-        priority_class=CapacityPriorityClass.COMPLETE_UNCHECKED,
-        score=100,
+        guard_state=GuardState.UNKNOWN,
+        priority_class=CapacityPriorityClass.ISOLATED,
+        score=10,
         confidence="high",
         rationale="unchecked shared capacity relation",
     )
@@ -344,6 +344,58 @@ def test_obligation_admission_keeps_associated_capacity_coverage_auditable() -> 
         record.score for record in allocation.ranking
         if record.work_id == representative.work_id
     )
+
+
+def test_obligation_reserve_does_not_evict_an_existing_critical_chain() -> None:
+    obligation = _obligation(
+        12,
+        InvariantObligationKind.FORMATTED_OUTPUT_EXPANSION,
+        ("c-injection-format",),
+    )
+    critical = _work(
+        1,
+        "critical.c",
+        "c-bounds-integers",
+        signal_id="critical-signal",
+    )
+    obligated = _work(
+        2,
+        "format.c",
+        "c-injection-format",
+        obligation_ids=(obligation.obligation_id,),
+    )
+    chain = CapacityRiskChain(
+        chain_id="capacity_risk_" + "4" * 20,
+        root_cause_group="capacity_group_" + "5" * 20,
+        allocation_fact_id="capacity_" + "6" * 20,
+        root_node_id="critical.c::decode@1",
+        root_path="critical.c",
+        root_function="decode",
+        base="output",
+        element_count="capacity",
+        element_size="1",
+        node_ids=("critical.c::decode@1",),
+        paths=("critical.c",),
+        fact_ids=("capacity_" + "6" * 20,),
+        allocation_signal_ids=("critical-signal",),
+        guard_state=GuardState.ABSENT,
+        priority_class=CapacityPriorityClass.COMPLETE_UNCHECKED,
+        score=100,
+        confidence="high",
+        rationale="protected critical chain",
+    )
+
+    allocation = allocate_work_items(
+        (critical, obligated),
+        BudgetPolicy(max_hunter_sessions=1, max_retries_per_work_item=0),
+        capacity_chains=(chain,),
+        invariant_obligations=(obligation,),
+        native_full_scan=True,
+    )
+
+    assert allocation.admitted_work_ids == (critical.work_id,)
+    assert allocation.decisions[0].quota == "chain_critical"
+    assert allocation.obligation_admissions[0].disposition == "budget_deferred"
 
 
 def test_ledger_closes_obligations_or_preserves_typed_source_backed_deferral() -> None:
