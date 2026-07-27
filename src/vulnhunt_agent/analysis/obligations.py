@@ -10,6 +10,7 @@ from .models import (
     CAnalysisGraph,
     CapacityRiskChain,
     CursorTransitionChain,
+    FormattedOutputFact,
     InvariantObligation,
     InvariantObligationKind,
     ObligationEvidenceRange,
@@ -39,6 +40,7 @@ def build_invariant_obligations(graph: CAnalysisGraph) -> tuple[InvariantObligat
     optional_seeds = [
         *(_capacity_seed(chain) for chain in graph.capacity_risk_chains),
         *(_cursor_seed(chain) for chain in graph.cursor_transition_chains),
+        *(_formatted_seed(fact) for fact in graph.formatted_output_facts),
     ]
     seeds = [
         *(_risk_seed(chain) for chain in graph.risk_chains),
@@ -223,6 +225,54 @@ def _cursor_seed(chain: CursorTransitionChain) -> _ObligationSeed | None:
         rationale=(
             "Prove that a dominating remaining-input guard covers the largest "
             "post-mutation dereference index across the parser boundary."
+        ),
+    )
+
+
+def _formatted_seed(fact: FormattedOutputFact) -> _ObligationSeed:
+    structural = (
+        f"destination_kind={fact.destination_kind.value}",
+        "capacity=" + (str(fact.capacity_bytes) if fact.capacity_bytes else "unknown"),
+        f"bounded_api={int(fact.bounded_api)}",
+        f"bound_matches_destination={int(fact.bound_matches_destination)}",
+        f"format_is_literal={int(fact.format_is_literal)}",
+        "conversions=" + ",".join(fact.conversion_classes),
+        f"dynamic_width_or_precision={int(fact.dynamic_width_or_precision)}",
+        f"locale_sensitive={int(fact.locale_sensitive)}",
+        f"expansion={fact.expansion_class.value}",
+        "maximum_output_chars=" + (
+            str(fact.maximum_output_chars)
+            if fact.maximum_output_chars is not None else "unknown"
+        ),
+        f"return_checked={int(fact.return_checked)}",
+        f"terminator_bytes={fact.terminator_bytes}",
+        f"guard={fact.guard_state.value}",
+    )
+    evidence = [ObligationEvidenceRange(
+        path=fact.path,
+        line=fact.line,
+        end_line=fact.line,
+        structural_role="access",
+    )]
+    if fact.declaration_line is not None:
+        evidence.append(ObligationEvidenceRange(
+            path=fact.path,
+            line=fact.declaration_line,
+            end_line=fact.declaration_line,
+            structural_role="relation",
+        ))
+    return _ObligationSeed(
+        kind=InvariantObligationKind.FORMATTED_OUTPUT_EXPANSION,
+        structural_facts=structural,
+        evidence_ranges=_dedupe_ranges(evidence),
+        required_hunters=("c-bounds-integers", "c-injection-format"),
+        source_fact_ids=(fact.fact_id,),
+        target_node_ids=(fact.node_id,),
+        target_signal_ids=(),
+        confidence=fact.confidence,
+        rationale=(
+            "Prove that the maximum formatted representation, including the "
+            "terminator, fits the actual destination capacity before use."
         ),
     )
 
