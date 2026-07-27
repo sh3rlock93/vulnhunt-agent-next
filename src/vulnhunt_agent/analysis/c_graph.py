@@ -42,6 +42,7 @@ from .models import (
     SignalRole,
     UnresolvedCall,
 )
+from .obligations import build_invariant_obligations
 from .risk_chains import build_function_risk_chains, is_allocator_name
 
 _C_LANGUAGE = Language(tree_sitter_c.language())
@@ -293,7 +294,7 @@ def build_c_analysis_graph(repo: Path, source_files: list[str]) -> CAnalysisGrap
         for signal in signals
         if signal.role is SignalRole.SINK and signal.risk >= 4
     ]
-    return CAnalysisGraph(
+    graph = CAnalysisGraph(
         nodes=tuple(nodes),
         edges=tuple(edges),
         signals=tuple(signals),
@@ -312,6 +313,10 @@ def build_c_analysis_graph(repo: Path, source_files: list[str]) -> CAnalysisGrap
             key=lambda item: (item.path, item.line, item.source, item.callee),
         )),
     )
+    return CAnalysisGraph.model_validate({
+        **graph.model_dump(mode="python"),
+        "invariant_obligations": build_invariant_obligations(graph),
+    })
 
 
 def _extract_c_file(parser: Parser, repo: Path, relative: str) -> list[_Extracted]:

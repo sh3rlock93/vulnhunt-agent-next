@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from enum import StrEnum
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class AnalysisModel(BaseModel):
@@ -30,6 +30,90 @@ class GuardState(StrEnum):
     PARTIAL = "partial"
     DOMINATES = "dominates"
     UNKNOWN = "unknown"
+
+
+class InvariantObligationKind(StrEnum):
+    INTEGER_MEMORY_RELATION = "integer_memory_relation"
+    CAPACITY_RELATION = "capacity_relation"
+    CURSOR_LENGTH_RELATION = "cursor_length_relation"
+
+
+class InvariantClosureState(StrEnum):
+    PROVED_SAFE = "proved_safe"
+    CANDIDATE = "candidate"
+    UNRESOLVED_WITH_EVIDENCE = "unresolved_with_evidence"
+
+
+class ObligationEvidenceRange(AnalysisModel):
+    path: str = Field(min_length=1)
+    line: int = Field(ge=1)
+    end_line: int = Field(ge=1)
+    structural_role: str = Field(
+        pattern=r"^(?:source|transform|guard|allocation|state|access|relation)$"
+    )
+
+    @model_validator(mode="after")
+    def validate_range(self) -> "ObligationEvidenceRange":
+        if self.end_line < self.line:
+            raise ValueError("obligation evidence end must not precede start")
+        return self
+
+
+class InvariantObligation(AnalysisModel):
+    obligation_id: str = Field(pattern=r"^obligation_[0-9a-f]{20}$")
+    policy_version: str = "invariant-obligation-v1"
+    kind: InvariantObligationKind
+    structural_facts: tuple[str, ...] = Field(min_length=1)
+    evidence_ranges: tuple[ObligationEvidenceRange, ...] = Field(min_length=1)
+    required_hunters: tuple[str, ...] = Field(min_length=1)
+    source_fact_ids: tuple[str, ...] = Field(min_length=1)
+    target_node_ids: tuple[str, ...] = ()
+    target_signal_ids: tuple[str, ...] = ()
+    confidence: str = Field(pattern=r"^(?:low|medium|high)$")
+    rationale: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def validate_sets(self) -> "InvariantObligation":
+        for label, values in (
+            ("required Hunters", self.required_hunters),
+            ("source fact IDs", self.source_fact_ids),
+            ("target node IDs", self.target_node_ids),
+            ("target signal IDs", self.target_signal_ids),
+        ):
+            if len(set(values)) != len(values):
+                raise ValueError(f"obligation {label} must be unique")
+        evidence_keys = {
+            (item.path, item.line, item.end_line, item.structural_role)
+            for item in self.evidence_ranges
+        }
+        if len(evidence_keys) != len(self.evidence_ranges):
+            raise ValueError("obligation evidence ranges must be unique")
+        return self
+
+
+class InvariantObligationDisposition(AnalysisModel):
+    obligation_id: str = Field(pattern=r"^obligation_[0-9a-f]{20}$")
+    policy_version: str = "invariant-obligation-closure-v1"
+    state: InvariantClosureState
+    evidence_ranges: tuple[ObligationEvidenceRange, ...] = Field(min_length=1)
+    rationale: str = Field(min_length=1)
+    candidate_ids: tuple[str, ...] = ()
+
+    @model_validator(mode="after")
+    def validate_candidate_link(self) -> "InvariantObligationDisposition":
+        if self.state is InvariantClosureState.CANDIDATE and not self.candidate_ids:
+            raise ValueError("candidate obligation closure requires a candidate ID")
+        if self.state is not InvariantClosureState.CANDIDATE and self.candidate_ids:
+            raise ValueError("non-candidate obligation closure cannot link candidates")
+        evidence_keys = {
+            (item.path, item.line, item.end_line, item.structural_role)
+            for item in self.evidence_ranges
+        }
+        if len(evidence_keys) != len(self.evidence_ranges):
+            raise ValueError("obligation closure evidence ranges must be unique")
+        if len(set(self.candidate_ids)) != len(self.candidate_ids):
+            raise ValueError("obligation closure candidate IDs must be unique")
+        return self
 
 
 class ConstraintKind(StrEnum):
@@ -308,6 +392,7 @@ class CAnalysisGraph(AnalysisModel):
     capacity_risk_chains: tuple[CapacityRiskChain, ...] = ()
     cursor_facts: tuple[CursorFact, ...] = ()
     cursor_transition_chains: tuple[CursorTransitionChain, ...] = ()
+    invariant_obligations: tuple[InvariantObligation, ...] = ()
     unresolved_calls: tuple[UnresolvedCall, ...] = ()
 
 
