@@ -21,10 +21,15 @@ from benchmarks.m12.calibration import (
     CalibrationDefinition,
 )
 from benchmarks.m12.calibration_cohort import open_evaluation, verify_cohort_plan
+from benchmarks.m12.calibration_controls import (
+    assess_differential_controls,
+    load_differential_controls,
+)
+from benchmarks.m12.calibration_quality import reduce_knowledge_quality
 from benchmarks.m12.metrics import canonical_json_bytes, reduce_metrics, render_markdown
 from benchmarks.run_libtiff_blind_benchmark import BenchmarkContractError, verify_frozen
 
-EVALUATION_POLICY = "calibration-evaluation-v1"
+EVALUATION_POLICY = "calibration-evaluation-v2"
 ADJUDICATOR = "calibration-oracle-v1"
 
 
@@ -34,6 +39,7 @@ def evaluate_calibration_cohort(
     catalog_path: Path = DEFAULT_CATALOG,
     repository_root: Path = PROJECT_ROOT,
     output: Path | None = None,
+    controls_path: Path | None = None,
 ) -> dict[str, Any]:
     """Open sealed oracles, build run-local adjudications, and reduce metrics."""
     plan_path = plan_path.resolve()
@@ -79,7 +85,39 @@ def evaluate_calibration_cohort(
     _write_immutable(metrics_json, canonical_json_bytes(metrics))
     _write_immutable(metrics_markdown, render_markdown(metrics).encode("utf-8"))
 
-    assessment = assess_calibration_gates(metrics)
+    knowledge_metrics = reduce_knowledge_quality(
+        cohort_root,
+        plan["run"],
+        ledger_path=(
+            repository_root.resolve() / "knowledge" / "finding-ledger-v1.json"
+        ),
+    )
+    knowledge_metrics_json = evaluation_root / "knowledge-metrics.json"
+    _write_immutable(
+        knowledge_metrics_json,
+        canonical_json_bytes(knowledge_metrics),
+    )
+    controls = None
+    controls_sha256 = None
+    if controls_path is not None:
+        resolved_controls = controls_path.resolve()
+        if not resolved_controls.is_relative_to(cohort_root):
+            raise BenchmarkContractError(
+                "differential controls must be stored inside the cohort root"
+            )
+        controls = load_differential_controls(
+            resolved_controls,
+            cohort_id=str(plan["cohort_id"]),
+            plan_path=plan_path,
+            catalog=catalog,
+        )
+        controls_sha256 = _sha256(resolved_controls)
+
+    assessment = assess_calibration_gates(
+        metrics,
+        knowledge_metrics=knowledge_metrics,
+        controls=controls,
+    )
     report = {
         "schema_version": 1,
         "policy_version": EVALUATION_POLICY,
@@ -87,6 +125,8 @@ def evaluate_calibration_cohort(
         "snapshot_sha256": plan["snapshot_sha256"],
         "catalog_sha256": catalog.sha256,
         "metrics_sha256": _sha256(metrics_json),
+        "knowledge_metrics_sha256": _sha256(knowledge_metrics_json),
+        "differential_controls_sha256": controls_sha256,
         "assessment": assessment,
     }
     report_json = evaluation_root / "release-report.json"
@@ -96,7 +136,12 @@ def evaluate_calibration_cohort(
     return report
 
 
-def assess_calibration_gates(metrics: Mapping[str, Any]) -> dict[str, Any]:
+def assess_calibration_gates(
+    metrics: Mapping[str, Any],
+    *,
+    knowledge_metrics: Mapping[str, Any] | None = None,
+    controls: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     """Apply only the measurable M12.2 gates to immutable metrics."""
     case_results = list(metrics["case_results"])
     admitted_cases = sorted(
@@ -123,6 +168,29 @@ def assess_calibration_gates(metrics: Mapping[str, Any]) -> dict[str, Any]:
     valid_rate = metrics["run_accounting"]["valid_run_rate"]
     hunter_rate = metrics["detection"]["hunter_detection_at_k"]["12"]
     reportable_rate = metrics["detection"]["reportable_detection_at_k"]["12"]
+    recovered_cases = sorted(
+        str(item["case_id"])
+        for item in case_results
+        if int(item["hunter_case_success_rate"]["numerator"]) >= 2
+    )
+    case_ids = sorted(str(item["case_id"]) for item in case_results)
+    control_assessment = assess_differential_controls(controls, case_ids=case_ids)
+    knowledge = knowledge_metrics or {}
+    recorded_model_tokens = sum(
+        sum(
+            int(item["usage"][key])
+            for key in (
+                "input_tokens",
+                "output_tokens",
+                "cache_read_tokens",
+                "cache_write_tokens",
+            )
+        )
+        for item in metrics["provenance"]["runs"]
+    )
+    retained_model_tokens = int(
+        metrics["cost"]["tokens_per_reportable"]["numerator"]
+    )
     gates = {
         "valid_run_rate": {
             "passed": valid_rate["rate"] == 1.0,
@@ -155,6 +223,57 @@ def assess_calibration_gates(metrics: Mapping[str, Any]) -> dict[str, Any]:
             "required": supported_families,
             "missing": sorted(set(supported_families) - set(detected_families)),
         },
+        "per_case_hunter_recovery": {
+            "passed": recovered_cases == case_ids,
+            "actual": recovered_cases,
+            "required": case_ids,
+            "case_rule": (
+                "target Hunter detection in at least two of three repetitions"
+            ),
+        },
+        "paired_differential_controls": control_assessment,
+        "current_source_evidence": {
+            "passed": (
+                knowledge.get("findings_without_current_source_evidence") == 0
+                and knowledge.get(
+                    "reportable_without_current_source_evidence"
+                ) == 0
+            ),
+            "actual": {
+                "all_findings": knowledge.get(
+                    "findings_without_current_source_evidence"
+                ),
+                "reportable": knowledge.get(
+                    "reportable_without_current_source_evidence"
+                ),
+            },
+            "required": 0,
+        },
+        "ledger_identity_isolation": {
+            "passed": knowledge.get("ledger_identity_leaks") == [],
+            "actual": knowledge.get("ledger_identity_leaks"),
+            "required": [],
+        },
+        "duplicate_and_cost_accounting": {
+            "passed": (
+                bool(
+                    (knowledge.get("duplicate_accounting") or {}).get(
+                        "logical_findings_count_once"
+                    )
+                )
+                and retained_model_tokens == recorded_model_tokens
+            ),
+            "actual": {
+                "logical_findings_count_once": (
+                    knowledge.get("duplicate_accounting") or {}
+                ).get("logical_findings_count_once"),
+                "retained_model_tokens": retained_model_tokens,
+                "recorded_model_tokens": recorded_model_tokens,
+            },
+            "required": (
+                "logical candidates deduplicated; all execution cost retained"
+            ),
+        },
         "median_input_tokens": {
             "passed": median_input is not None and median_input <= 1_500_000,
             "actual": median_input,
@@ -184,6 +303,8 @@ def render_release_report(metrics: Mapping[str, Any], report: Mapping[str, Any])
         f"- Cohort: `{report['cohort_id']}`",
         f"- Snapshot: `{report['snapshot_sha256']}`",
         f"- Metrics: `{report['metrics_sha256']}`",
+        f"- Knowledge metrics: `{report['knowledge_metrics_sha256']}`",
+        f"- Differential controls: `{report['differential_controls_sha256']}`",
         f"- Decision: `{assessment['decision']}`",
         "- Protected regression: external validation required",
         "",
@@ -589,6 +710,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--plan", type=Path, required=True)
     parser.add_argument("--catalog", type=Path, default=DEFAULT_CATALOG)
     parser.add_argument("--output", type=Path)
+    parser.add_argument(
+        "--controls",
+        type=Path,
+        help="immutable calibration-differential-controls-v1 artifact",
+    )
     return parser
 
 
@@ -599,6 +725,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.plan,
             catalog_path=args.catalog,
             output=args.output,
+            controls_path=args.controls,
         )
     except (BenchmarkContractError, OSError, ValueError) as exc:
         raise SystemExit(str(exc)) from exc

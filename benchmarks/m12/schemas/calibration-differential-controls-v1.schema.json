@@ -1,0 +1,91 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vulnhunt.local/schemas/calibration-differential-controls-v1.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "policy_version",
+    "cohort_id",
+    "plan_sha256",
+    "catalog_sha256",
+    "run"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "policy_version": {"const": "calibration-differential-controls-v1"},
+    "cohort_id": {"type": "string", "pattern": "^cohort_[0-9a-f]{16}$"},
+    "plan_sha256": {"$ref": "#/$defs/sha256"},
+    "catalog_sha256": {"$ref": "#/$defs/sha256"},
+    "run": {
+      "type": "array",
+      "minItems": 8,
+      "maxItems": 8,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "run_id",
+          "case_id",
+          "variant",
+          "source",
+          "image_digest",
+          "oracle_sha256",
+          "attempt",
+          "passed"
+        ],
+        "properties": {
+          "run_id": {"type": "string", "pattern": "^control_[0-9a-f]{16}$"},
+          "case_id": {"type": "string", "pattern": "^case_[0-9a-f]{16}$"},
+          "variant": {"enum": ["vulnerable", "fixed"]},
+          "source": {"$ref": "#/$defs/source"},
+          "image_digest": {"$ref": "#/$defs/sha256"},
+          "oracle_sha256": {"$ref": "#/$defs/sha256"},
+          "attempt": {
+            "type": "array",
+            "minItems": 2,
+            "items": {"$ref": "#/$defs/attempt"}
+          },
+          "passed": {"type": "boolean"}
+        }
+      }
+    }
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "commit", "tree"],
+      "properties": {
+        "repository": {"type": "string", "minLength": 1},
+        "commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "tree": {"type": "string", "pattern": "^[0-9a-f]{40}$"}
+      }
+    },
+    "attempt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "attempt",
+        "exit_code",
+        "timed_out",
+        "sanitizer_failure",
+        "expected_sanitizer_present",
+        "target_frame_present",
+        "fixed_stdout_present",
+        "evidence_sha256"
+      ],
+      "properties": {
+        "attempt": {"type": "integer", "minimum": 1},
+        "exit_code": {"type": "integer"},
+        "timed_out": {"type": "boolean"},
+        "sanitizer_failure": {"type": "boolean"},
+        "expected_sanitizer_present": {"type": "boolean"},
+        "target_frame_present": {"type": "boolean"},
+        "fixed_stdout_present": {"type": "boolean"},
+        "evidence_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    }
+  }
+}
