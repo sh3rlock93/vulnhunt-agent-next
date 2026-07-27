@@ -15,7 +15,7 @@ from .context import (
     matching_risk_chains_for_targets,
 )
 
-CONTEXT_CACHE_POLICY = "c-context-v8"
+CONTEXT_CACHE_POLICY = "c-context-v9"
 CONTEXT_SHARD_POLICY = "c-focus-chain-shards-v1"
 MAX_CONTEXT_BYTES = 24_000
 MIN_EVIDENCE_EXCERPT_BYTES = 512
@@ -168,6 +168,7 @@ class SharedContextCache:
         related_nodes = compact.get("related_nodes") or []
         constraint_facts = compact.get("constraint_facts") or []
         capacity_chains = compact.get("capacity_risk_chains") or []
+        obligations = compact.get("invariant_obligations") or []
         constraint_files = tuple(dict.fromkeys(
             str(item.get("path", ""))
             for item in constraint_facts
@@ -192,10 +193,17 @@ class SharedContextCache:
                 path,
             ),
         ))
+        obligation_files = tuple(sorted({
+            str(evidence.get("path", ""))
+            for obligation in obligations
+            for evidence in obligation.get("evidence_ranges", ())
+            if evidence.get("path")
+        }))
         context_source_files = tuple(dict.fromkeys((
             *work_item.files,
             *constraint_files,
             *relationship_files,
+            *obligation_files,
         )))
         context_hints = self._context_hints(work_item, related_nodes)
         related_headers = self._related_headers(
@@ -224,6 +232,7 @@ class SharedContextCache:
             target_node_ids=set(work_item.target_node_ids),
             changed_line_ranges=work_item.changed_line_ranges,
             focus_chain_ids=set(work_item.focus_chain_ids),
+            obligation_ids=set(work_item.obligation_ids),
             related_nodes=related_nodes,
             constraint_facts=constraint_facts,
         )
@@ -235,6 +244,7 @@ class SharedContextCache:
             **{path: "target" for path in work_item.files},
             **{path: "constraint" for path in constraint_files},
             **relationship_by_file,
+            **{path: "constraint" for path in obligation_files},
             **{path: "header" for path in related_headers},
             **{path: "build" for path in build_files},
         }
@@ -460,11 +470,18 @@ def context_cache_key(
     constraint_facts = compact.get("constraint_facts") or []
     capacity_chains = compact.get("capacity_risk_chains") or []
     cursor_chains = compact.get("cursor_transition_chains") or []
+    obligations = compact.get("invariant_obligations") or []
     context_files = set(work_item.files)
     context_files.update(
         str(item.get("path", ""))
         for item in (*related_nodes, *constraint_facts)
         if item.get("path")
+    )
+    context_files.update(
+        str(evidence.get("path", ""))
+        for obligation in obligations
+        for evidence in obligation.get("evidence_ranges", ())
+        if evidence.get("path")
     )
     context_files.update(
         str(path)
@@ -486,6 +503,7 @@ def context_cache_key(
         target_node_ids=set(work_item.target_node_ids),
         changed_line_ranges=work_item.changed_line_ranges,
         focus_chain_ids=set(work_item.focus_chain_ids),
+        obligation_ids=set(work_item.obligation_ids),
         related_nodes=related_nodes,
         constraint_facts=constraint_facts,
     )
@@ -499,6 +517,8 @@ def context_cache_key(
         "target_node_ids": sorted(work_item.target_node_ids),
         "target_signal_ids": sorted(work_item.target_signal_ids),
         "focus_chain_ids": list(work_item.focus_chain_ids),
+        "obligation_ids": list(work_item.obligation_ids),
+        "invariant_obligations": obligations,
         "risk_chains": compact.get("risk_chains", []),
         "capacity_risk_chains": capacity_chains,
         "cursor_transition_chains": cursor_chains,
@@ -535,6 +555,7 @@ def _relevant_ranges(
     target_node_ids: set[str],
     changed_line_ranges: dict[str, tuple[tuple[int, int], ...]],
     focus_chain_ids: set[str] | None = None,
+    obligation_ids: set[str] | None = None,
     related_nodes: list[dict] | tuple[dict, ...] = (),
     constraint_facts: list[dict] | tuple[dict, ...] = (),
 ) -> dict[str, list[tuple[int, int]]]:
@@ -595,6 +616,17 @@ def _relevant_ranges(
                 out.setdefault(path, []).extend(
                     (int(line), int(line)) for line in lines
                 )
+    selected_obligation_ids = obligation_ids or set()
+    for obligation in graph.get("invariant_obligations", []):
+        if obligation.get("obligation_id") not in selected_obligation_ids:
+            continue
+        for evidence in obligation.get("evidence_ranges", ()):
+            path = str(evidence.get("path", ""))
+            if path not in files:
+                continue
+            start = int(evidence.get("line", 1))
+            end = int(evidence.get("end_line", start))
+            out.setdefault(path, []).append((start, end))
     for signal in graph.get("signals", []):
         if (
             signal.get("node_id") in selected_nodes
@@ -965,6 +997,10 @@ def _focus_evidence_paths(packet: dict) -> set[str]:
             ):
                 if path:
                     paths.add(str(path))
+    for obligation in packet.get("invariant_obligations") or ():
+        for evidence in obligation.get("evidence_ranges", ()):
+            if evidence.get("path"):
+                paths.add(str(evidence["path"]))
     return paths
 
 

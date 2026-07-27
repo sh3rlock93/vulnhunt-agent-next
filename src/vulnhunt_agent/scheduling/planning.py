@@ -17,6 +17,7 @@ from .budget import (
 )
 from .router import build_routing_plan
 from .slices import build_slice_work_items
+from .obligations import bind_invariant_obligations
 
 NATIVE_PLAN_CONTRACT_POLICY = "native-plan-contract-v1"
 
@@ -59,9 +60,14 @@ def build_native_work_plan(
         enabled_hunters=enabled_hunters,
         analysis=analysis,
     )
+    graph = CAnalysisGraph.model_validate(analysis.get("graph") or {})
+    work_items = bind_invariant_obligations(
+        build_slice_work_items(routing, analysis),
+        graph,
+    )
     return NativeWorkPlan(
         routing=routing,
-        work_items=build_slice_work_items(routing, analysis),
+        work_items=work_items,
         selected_files=tuple(sorted(dict.fromkeys(selected_files))),
         enabled_hunters=tuple(sorted(dict.fromkeys(enabled_hunters))),
         source_snapshot=source_snapshot,
@@ -93,6 +99,7 @@ def allocate_native_work_plan(
         consumed_sessions=consumed_sessions,
         risk_chains=graph.risk_chains,
         capacity_chains=(graph.capacity_risk_chains if include_capacity_chains else ()),
+        invariant_obligations=graph.invariant_obligations,
         entrypoint_ids=graph.entrypoint_ids,
         native_full_scan=native_full_scan,
     )
@@ -162,6 +169,10 @@ def _plan_contract(
             "capacity_units": [
                 asdict(item) for item in allocation.capacity_units
             ],
+            "obligation_required_slots": allocation.obligation_required_slots,
+            "obligation_admissions": [
+                asdict(item) for item in allocation.obligation_admissions
+            ],
             "input_fairness": asdict(input_budget),
             "required_specialist_slots": allocation.required_specialist_slots,
             "retry_slots": allocation.retry_slots,
@@ -197,6 +208,10 @@ def _plan_contract(
         "deferred_sessions": len(allocation.deferred),
         "capacity_units": [
             asdict(item) for item in allocation.capacity_units
+        ],
+        "obligation_required_slots": allocation.obligation_required_slots,
+        "obligation_admissions": [
+            asdict(item) for item in allocation.obligation_admissions
         ],
         "input_fairness": asdict(input_budget),
     }
@@ -253,6 +268,11 @@ def _normalized_allocation(
             work_key(work_id) for work_id in payload.pop("work_ids")
         )
         capacity_units.append(payload)
+    obligation_admissions = []
+    for obligation_record in allocation.obligation_admissions:
+        payload = asdict(obligation_record)
+        payload["work_key"] = work_key(payload.pop("work_id"))
+        obligation_admissions.append(payload)
     return {
         "policy_version": allocation.policy_version,
         "admitted_work_keys": [
@@ -265,6 +285,8 @@ def _normalized_allocation(
         "decisions": decisions,
         "ranking": ranking,
         "capacity_units": capacity_units,
+        "obligation_required_slots": allocation.obligation_required_slots,
+        "obligation_admissions": obligation_admissions,
         "required_specialist_slots": allocation.required_specialist_slots,
         "input_fairness": {
             "policy_version": input_budget.policy_version,

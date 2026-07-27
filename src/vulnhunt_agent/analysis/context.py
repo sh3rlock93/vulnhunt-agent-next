@@ -89,6 +89,12 @@ def context_for_work_item(
         graph,
         matching_cursor_transition_chains(graph, work_item)[:4],
     )
+    obligation_ids = set(work_item.obligation_ids)
+    invariant_obligations = [
+        item
+        for item in graph.get("invariant_obligations", [])
+        if item.get("obligation_id") in obligation_ids
+    ]
     selected_ids = set(work_item.slice_ids)
     matching = [
         item for item in plan.get("slices", [])
@@ -125,6 +131,8 @@ def context_for_work_item(
         "routing_reasons": list(work_item.routing_reasons),
         "scan_scope_digest": work_item.scan_scope_digest,
         "focus_chain_ids": list(work_item.focus_chain_ids),
+        "obligation_ids": list(work_item.obligation_ids),
+        "invariant_obligations": invariant_obligations,
         "full_snapshot_context": True,
         "related_nodes": related_nodes,
         "constraint_policy_version": (
@@ -147,6 +155,7 @@ def context_for_work_item(
             _compact_cursor_transition(item) for item in cursor_chains
         ],
         "change_focus": {
+            "target_obligation_ids": list(work_item.obligation_ids),
             "target_node_ids": list(work_item.target_node_ids),
             "target_signal_ids": list(work_item.target_signal_ids),
             "changed_line_ranges": {

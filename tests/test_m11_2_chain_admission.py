@@ -117,7 +117,7 @@ def test_one_capacity_root_preserves_distinct_hunter_specialists() -> None:
     assert len(first.admitted_work_ids) == 2
     assert set(first.deferred.values()) == {"duplicate_capacity_chain"}
     assert all(
-        record.disposition == "duplicate_deferred"
+        record.disposition == "budget_deferred"
         for record in first.ranking
         if record.work_id not in first.admitted_work_ids
     )

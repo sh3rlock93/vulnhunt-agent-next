@@ -107,7 +107,7 @@ def test_bounded_work_hydrates_indirect_caller_and_buffer_constraint(
     ).get(work)
 
     assert work.files == ("target_impl.c",)
-    assert packet["context_policy"] == "c-context-v8"
+    assert packet["context_policy"] == "c-context-v9"
     assert packet["full_snapshot_context"] is True
     assert packet["scan_scope_digest"] == analysis["scan_scope"]["digest"]
     assert packet["source_excerpts"][0]["path"] == "target_impl.c"

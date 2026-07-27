@@ -284,6 +284,10 @@ async def run_hunt(store: RunStore, bus: EventBus) -> None:
         "admitted_sessions": len(allocation.admitted_work_ids),
         "chain_critical_slots": allocation.chain_critical_slots,
         "required_specialist_slots": allocation.required_specialist_slots,
+        "obligation_required_slots": allocation.obligation_required_slots,
+        "obligation_admissions": [
+            asdict(item) for item in allocation.obligation_admissions
+        ],
         "chain_revisit_slots": allocation.chain_revisit_slots,
         "component_diverse_slots": allocation.component_diverse_slots,
         "seed_diverse_slots": allocation.seed_diverse_slots,
@@ -347,6 +351,10 @@ async def run_hunt(store: RunStore, bus: EventBus) -> None:
         work_input_budget=work_input_budget,
     )
     if not admitted_ids:
+        hunt_plan["budget_allocation"][
+            "admission_ledger"
+        ] = admission_ledger.snapshot()
+        store.save_step("hunt_plan", hunt_plan)
         _save_summary(
             store,
             qstore,
@@ -993,9 +1001,38 @@ def _save_summary(
         "tasks": [asdict(t) for t in final.tasks],
     }
     plan = store.load_step("hunt_plan") or {}
+    obligation_dispositions = (
+        (plan.get("budget_allocation") or {})
+        .get("admission_ledger", {})
+        .get("obligation_dispositions", [])
+    )
+    terminal_obligation_states = {
+        "done", "failed", "budget_deferred", "cancelled"
+    }
+    summary["obligation_completion"] = {
+        "policy_version": "invariant-obligation-completion-v1",
+        "total": len(obligation_dispositions),
+        "terminal": sum(
+            item.get("state") in terminal_obligation_states
+            for item in obligation_dispositions
+        ),
+        "complete": all(
+            item.get("state") in terminal_obligation_states
+            and bool(item.get("source_evidence"))
+            for item in obligation_dispositions
+        ),
+        "dispositions": obligation_dispositions,
+    }
     planned_targets = {
         str(item.get("work_id", "")): tuple(
-            item.get("target_signal_ids") or item.get("target_node_ids") or ()
+            dict.fromkeys((
+                *(item.get("obligation_ids") or ()),
+                *(
+                    item.get("target_signal_ids")
+                    or item.get("target_node_ids")
+                    or ()
+                ),
+            ))
         )
         for item in plan.get("work_items", [])
         if item.get("work_id")
