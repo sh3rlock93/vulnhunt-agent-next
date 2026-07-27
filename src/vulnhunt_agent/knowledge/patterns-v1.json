@@ -1,0 +1,214 @@
+{
+  "schema_version": 1,
+  "policy_version": "generalized-vulnerability-knowledge-v1",
+  "patterns": [
+    {
+      "pattern_id": "vpattern_integer_allocation_write_divergence",
+      "title": "Integer transformation diverges between allocation and memory access",
+      "weakness_family": "integer-to-memory bounds",
+      "applicability": {
+        "languages": ["c"],
+        "hunter_roles": ["c-bounds-integers"],
+        "semantic_tags": ["integer_transform", "numeric_wrap", "numeric_narrowing", "numeric_arithmetic", "allocation", "write", "missing_numeric_guard"],
+        "minimum_structural_matches": 2
+      },
+      "invariant": "Every attacker-influenced value used to size storage must remain in the same validated numeric domain as the independent value that controls the later read, write, copy, or loop bound.",
+      "investigation_steps": [
+        "Trace the original signedness and width through each cast and arithmetic operation.",
+        "Write separate symbolic expressions for allocated bytes and maximum accessed bytes.",
+        "Check negative, zero, maximum, wraparound, and narrowing boundaries before the first memory access."
+      ],
+      "required_evidence": [
+        "A source-to-transform-to-allocation-to-access trace using actual C types.",
+        "The missing or insufficient numeric guard and a reachable boundary value."
+      ],
+      "falsifiers": [
+        "A dominating checked arithmetic operation rejects every overflowing or negative value.",
+        "Allocation and access are proven to use the same validated expression and unit."
+      ],
+      "base_priority": 5
+    },
+    {
+      "pattern_id": "vpattern_cross_call_capacity_contract",
+      "title": "Capacity contract is lost across calls, aliases, or consumed-length returns",
+      "weakness_family": "cross-function capacity propagation",
+      "applicability": {
+        "languages": ["c"],
+        "hunter_roles": ["c-bounds-integers"],
+        "semantic_tags": ["capacity_chain", "allocation", "write", "bulk_write", "pointer_advance", "return_consumption", "missing_capacity_guard", "state_transition"],
+        "minimum_structural_matches": 2
+      },
+      "invariant": "At every call boundary, remaining capacity must be expressed in the callee's unit and must cover all writes and pointer advances, including bytes reported as consumed or required.",
+      "investigation_steps": [
+        "Normalize element counts, byte counts, offsets, and return values to one unit.",
+        "Follow pointer aliases and remaining-capacity updates through callers and callees.",
+        "Compare success, retry, truncation, and failure paths for asymmetric state updates."
+      ],
+      "required_evidence": [
+        "A caller-to-callee capacity equation with every unit and state mutation identified.",
+        "A path where required output or pointer movement can exceed the proved remainder."
+      ],
+      "falsifiers": [
+        "A dominating guard covers total consumption in a common unit on every return path.",
+        "The callee cannot write or advance beyond the capacity explicitly passed by the caller."
+      ],
+      "base_priority": 5
+    },
+    {
+      "pattern_id": "vpattern_formatted_output_expansion",
+      "title": "Formatted representation can exceed a fixed destination",
+      "weakness_family": "formatted-output bounds",
+      "applicability": {
+        "languages": ["c"],
+        "hunter_roles": ["c-bounds-integers", "c-injection-format"],
+        "semantic_tags": ["formatted_output", "write", "capacity_guard", "output_expansion"],
+        "minimum_structural_matches": 1
+      },
+      "invariant": "The maximum formatted representation, including sign, prefix, precision, exponent, separators, and terminator, must fit the actual remaining destination capacity.",
+      "investigation_steps": [
+        "Identify fixed or caller-provided destination capacity and the format-controlled maximum expansion.",
+        "Trace precision, width, locale, numeric magnitude, and custom formatter callbacks.",
+        "Verify the bounded API result is checked before the destination is consumed."
+      ],
+      "required_evidence": [
+        "The destination capacity and a source-backed upper bound for formatted output.",
+        "A reachable input or configuration that violates the bound."
+      ],
+      "falsifiers": [
+        "A checked size-query or bounded formatter proves and enforces sufficient capacity.",
+        "The input domain has a source-backed maximum representation smaller than the buffer."
+      ],
+      "base_priority": 4
+    },
+    {
+      "pattern_id": "vpattern_parser_cursor_read_order",
+      "title": "Parser cursor mutation invalidates a prior length check",
+      "weakness_family": "bounded parser read",
+      "applicability": {
+        "languages": ["c"],
+        "hunter_roles": ["c-parser-state", "c-bounds-integers"],
+        "semantic_tags": ["cursor_transition", "cursor_guard_gap", "read", "pointer_advance", "state_transition"],
+        "minimum_structural_matches": 1
+      },
+      "invariant": "The dominating remaining-input check must cover the largest post-mutation dereference index after every cursor advance and across every parser call boundary.",
+      "investigation_steps": [
+        "Record the remaining-length relation before the guard, after each mutation, and at callee entry.",
+        "Compute the maximum dereference index for each tag, extension, or variable-length branch.",
+        "Exercise minimum remaining input and maximum accepted length boundaries."
+      ],
+      "required_evidence": [
+        "An exact guard-to-advance-to-read relation with numeric indices.",
+        "Caller and callee evidence when mutation and dereference occur in different functions."
+      ],
+      "falsifiers": [
+        "A post-mutation dominating guard covers the maximum dereference index.",
+        "The reader is unreachable unless the caller proves the required remaining length."
+      ],
+      "base_priority": 5
+    },
+    {
+      "pattern_id": "vpattern_signed_index_domain",
+      "title": "Signed parser value reaches an index before domain validation",
+      "weakness_family": "signed array indexing",
+      "applicability": {
+        "languages": ["c"],
+        "hunter_roles": ["c-parser-state", "c-bounds-integers"],
+        "semantic_tags": ["numeric_narrowing", "integer_transform", "array_index", "write", "read"],
+        "minimum_structural_matches": 2
+      },
+      "invariant": "A parsed or computed index must be proven non-negative and strictly below the destination extent after its final conversion and before any array access.",
+      "investigation_steps": [
+        "Trace lexer, parser, enum, sentinel, and arithmetic values into the final index type.",
+        "Check negative, sentinel, truncated, and maximum values on recovery and normal paths.",
+        "Verify both lower and upper bounds dominate every read and write."
+      ],
+      "required_evidence": [
+        "The value domain at parse time and after the final C conversion.",
+        "A reachable access missing either the lower or upper bound."
+      ],
+      "falsifiers": [
+        "Both bounds are checked after the final conversion and dominate the access.",
+        "The type and construction make negative or oversized values unrepresentable."
+      ],
+      "base_priority": 4
+    },
+    {
+      "pattern_id": "vpattern_encoding_expansion_retry",
+      "title": "Encoding expansion and retry paths disagree about output capacity",
+      "weakness_family": "encoding output bounds",
+      "applicability": {
+        "languages": ["c"],
+        "hunter_roles": ["c-bounds-integers", "c-error-contracts", "c-parser-state"],
+        "semantic_tags": ["capacity_chain", "output_expansion", "pointer_advance", "state_transition", "missing_capacity_guard", "write"],
+        "minimum_structural_matches": 2
+      },
+      "invariant": "Before consuming input or partially writing an encoded unit, remaining output capacity must cover the unit's maximum expansion and retry must preserve identical cursor and capacity state.",
+      "investigation_steps": [
+        "Enumerate minimum and maximum bytes emitted per input unit and normalization mode.",
+        "Compare preflight, partial-write, flush, retry, and error-state mutations.",
+        "Verify the retry begins from a consistent input cursor and output remainder."
+      ],
+      "required_evidence": [
+        "A per-unit expansion bound and output-state equation across retry.",
+        "A boundary where partial progress violates that equation."
+      ],
+      "falsifiers": [
+        "Capacity is checked for maximum expansion before any state mutation.",
+        "Retry restores or preserves every input and output state variable atomically."
+      ],
+      "base_priority": 4
+    },
+    {
+      "pattern_id": "vpattern_reallocation_failure_ownership",
+      "title": "Reallocation failure violates ownership of the original buffer",
+      "weakness_family": "allocator-failure lifetime",
+      "applicability": {
+        "languages": ["c"],
+        "hunter_roles": ["c-memory-lifetime", "c-error-contracts"],
+        "semantic_tags": ["allocation", "capacity_chain", "state_transition"],
+        "minimum_structural_matches": 1
+      },
+      "invariant": "A failed reallocation must leave exactly one well-defined owner of the original allocation, and every caller must observe the same pointer and ownership state.",
+      "investigation_steps": [
+        "Distinguish temporary-result and in-place reallocation idioms.",
+        "Trace aliases and cleanup labels on every allocation-failure return.",
+        "Inject allocator failure at each growth site and observe final ownership."
+      ],
+      "required_evidence": [
+        "The ownership state before and after the failed allocation.",
+        "A reachable double free, stale use, or unrecoverable leak on cleanup."
+      ],
+      "falsifiers": [
+        "The original pointer remains owned and is released exactly once by a documented caller.",
+        "Ownership is transferred atomically only after successful allocation."
+      ],
+      "base_priority": 5
+    },
+    {
+      "pattern_id": "vpattern_error_exit_cleanup",
+      "title": "Output or callback failure bypasses resource cleanup",
+      "weakness_family": "error-path resource lifetime",
+      "applicability": {
+        "languages": ["c"],
+        "hunter_roles": ["c-memory-lifetime", "c-error-contracts"],
+        "semantic_tags": ["allocation", "write", "state_transition"],
+        "minimum_structural_matches": 1
+      },
+      "invariant": "Every resource acquired before an external write, callback, or serialization step must have one cleanup path for every success and failure result.",
+      "investigation_steps": [
+        "List acquired resources and enumerate all returns after each fallible operation.",
+        "Compare direct returns, cleanup labels, callback ownership, and partial output paths.",
+        "Force the first and last failure after allocation to verify cleanup symmetry."
+      ],
+      "required_evidence": [
+        "A concrete acquire-to-failure path that skips or duplicates cleanup.",
+        "The repeated or attacker-triggerable impact of the resource imbalance."
+      ],
+      "falsifiers": [
+        "A single dominating cleanup path releases each resource exactly once.",
+        "The callee contract proves ownership transfer before the failing operation."
+      ],
+      "base_priority": 3
+    }
+  ]
+}

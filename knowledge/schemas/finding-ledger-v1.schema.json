@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://vulnhunt.local/schemas/finding-ledger-v1.schema.json",
+  "title": "Vulnerability finding provenance ledger v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "policy_version", "records"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "policy_version": {"const": "vulnerability-finding-ledger-v1"},
+    "records": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/record"}
+    }
+  },
+  "$defs": {
+    "record": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "finding_id", "project", "source_repository", "source_revision",
+        "locations", "weakness_terms", "root_cause", "pattern_ids",
+        "validation", "knowledge_status", "current_upstream_status", "notes"
+      ],
+      "properties": {
+        "finding_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]+$"},
+        "project": {"type": "string", "minLength": 1},
+        "source_repository": {"type": "string", "format": "uri"},
+        "source_revision": {"type": "string", "minLength": 7},
+        "locations": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "weakness_terms": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "root_cause": {"type": "string", "minLength": 1},
+        "pattern_ids": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"type": "string", "pattern": "^vpattern_[a-z0-9_]+$"}
+        },
+        "validation": {
+          "enum": [
+            "protected_regression", "known_gap_evidence",
+            "calibration_reportable", "candidate_only"
+          ]
+        },
+        "knowledge_status": {"enum": ["active", "candidate_only"]},
+        "current_upstream_status": {"enum": ["fixed", "unknown", "not_revalidated"]},
+        "observed_candidate_count": {"type": "integer", "minimum": 1},
+        "notes": {"type": "string", "minLength": 1}
+      }
+    }
+  }
+}

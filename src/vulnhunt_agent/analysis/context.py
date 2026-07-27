@@ -4,6 +4,7 @@ from __future__ import annotations
 import re
 
 from ..domain.schemas import HunterWorkItem
+from ..knowledge import build_knowledge_context
 
 MAX_RELATED_CONTEXT_NODES = 16
 MAX_CONTEXT_CONSTRAINTS = 24
@@ -113,7 +114,7 @@ def context_for_work_item(
             ],
             "sink": signals.get(item.get("sink_signal_id")),
         })
-    return {
+    context = {
         "policy_version": plan.get("policy_version", ""),
         "work_id": work_item.work_id,
         "target_file": work_item.seed_file,
@@ -155,6 +156,15 @@ def context_for_work_item(
         },
         "slices": compact,
     }
+    context["vulnerability_knowledge"] = build_knowledge_context(
+        # Keep the source packet identical across specialists. Their existing
+        # system prompts provide role specialization; shared knowledge is
+        # selected only from current structural facts for cache reuse.
+        hunter="",
+        language="c",
+        analysis_context=context,
+    )
+    return context
 
 
 def matching_risk_chains(graph: dict, work_item: HunterWorkItem) -> list[dict]:

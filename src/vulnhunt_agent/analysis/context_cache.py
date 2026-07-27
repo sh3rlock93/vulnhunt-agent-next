@@ -15,7 +15,7 @@ from .context import (
     matching_risk_chains_for_targets,
 )
 
-CONTEXT_CACHE_POLICY = "c-context-v7"
+CONTEXT_CACHE_POLICY = "c-context-v8"
 CONTEXT_SHARD_POLICY = "c-focus-chain-shards-v1"
 MAX_CONTEXT_BYTES = 24_000
 MIN_EVIDENCE_EXCERPT_BYTES = 512
@@ -502,6 +502,7 @@ def context_cache_key(
         "risk_chains": compact.get("risk_chains", []),
         "capacity_risk_chains": capacity_chains,
         "cursor_transition_chains": cursor_chains,
+        "vulnerability_knowledge": compact.get("vulnerability_knowledge", {}),
         "related_nodes": related_nodes,
         "constraint_policy_version": compact.get("constraint_policy_version", ""),
         "constraint_facts": constraint_facts,
@@ -669,6 +670,7 @@ def _fit_packet(packet: dict) -> dict:
     truncation = packet["truncation"]
     truncation.setdefault("removed_source_excerpts", 0)
     truncation.setdefault("compacted_capacity_risk_chains", 0)
+    truncation.setdefault("removed_knowledge_cards", 0)
     truncation.setdefault("removed_selected_range_files", 0)
     truncation.setdefault("minimum_evidence_excerpt_bytes", MIN_EVIDENCE_EXCERPT_BYTES)
     truncation.setdefault("evidence_excerpt_guaranteed", False)
@@ -800,6 +802,14 @@ def _fit_packet(packet: dict) -> dict:
             continue
         if pop_last("capacity_risk_chains", non_focus=True):
             truncation["removed_capacity_risk_chains"] += 1
+            continue
+        knowledge_cards = (
+            (packet.get("vulnerability_knowledge") or {}).get("cards") or []
+        )
+        if len(knowledge_cards) > 1:
+            knowledge_cards.pop()
+            mark_fit()
+            truncation["removed_knowledge_cards"] += 1
             continue
         related_nodes = packet.get("related_nodes") or []
         non_focus_related = next(
