@@ -36,6 +36,7 @@ class InvariantObligationKind(StrEnum):
     INTEGER_MEMORY_RELATION = "integer_memory_relation"
     CAPACITY_RELATION = "capacity_relation"
     CURSOR_LENGTH_RELATION = "cursor_length_relation"
+    FORMATTED_OUTPUT_EXPANSION = "formatted_output_expansion"
 
 
 class InvariantClosureState(StrEnum):
@@ -131,6 +132,19 @@ class CapacityFactKind(StrEnum):
     WRITE = "write"
     GUARD = "guard"
     GROWTH = "growth"
+
+
+class FormattedDestinationKind(StrEnum):
+    FIXED_ARRAY = "fixed_array"
+    CALLER_BUFFER = "caller_buffer"
+    UNKNOWN = "unknown"
+
+
+class FormattedExpansionClass(StrEnum):
+    FIXED_LITERAL = "fixed_literal"
+    TYPE_DEPENDENT = "type_dependent"
+    INPUT_DEPENDENT = "input_dependent"
+    DYNAMIC_FORMAT = "dynamic_format"
 
 
 class CursorFactKind(StrEnum):
@@ -276,6 +290,33 @@ class CapacityCallSite(AnalysisModel):
     direct: bool = True
 
 
+class FormattedOutputFact(AnalysisModel):
+    fact_id: str = Field(pattern=r"^format_fact_[0-9a-f]{20}$")
+    policy_version: str = "c-formatted-output-v1"
+    node_id: str = Field(min_length=1)
+    path: str = Field(min_length=1)
+    function: str = Field(min_length=1)
+    line: int = Field(ge=1)
+    declaration_line: int | None = Field(default=None, ge=1)
+    destination: str = Field(min_length=1)
+    destination_kind: FormattedDestinationKind
+    capacity_expression: str = ""
+    capacity_bytes: int | None = Field(default=None, ge=1)
+    bounded_api: bool
+    bound_matches_destination: bool = False
+    format_is_literal: bool
+    conversion_classes: tuple[str, ...] = ()
+    dynamic_width_or_precision: bool = False
+    locale_sensitive: bool = False
+    expansion_class: FormattedExpansionClass
+    maximum_output_chars: int | None = Field(default=None, ge=0)
+    terminator_bytes: int = Field(default=1, ge=1)
+    return_checked: bool = False
+    guard_state: GuardState
+    evidence: str = Field(min_length=1)
+    confidence: str = Field(pattern=r"^(?:low|medium|high)$")
+
+
 class FunctionCapacitySummary(AnalysisModel):
     summary_id: str = Field(pattern=r"^capacity_summary_[0-9a-f]{20}$")
     policy_version: str = "c-capacity-summary-v2"
@@ -389,6 +430,7 @@ class CAnalysisGraph(AnalysisModel):
     capacity_facts: tuple[CapacityFact, ...] = ()
     capacity_calls: tuple[CapacityCallSite, ...] = ()
     capacity_summaries: tuple[FunctionCapacitySummary, ...] = ()
+    formatted_output_facts: tuple[FormattedOutputFact, ...] = ()
     capacity_risk_chains: tuple[CapacityRiskChain, ...] = ()
     cursor_facts: tuple[CursorFact, ...] = ()
     cursor_transition_chains: tuple[CursorTransitionChain, ...] = ()

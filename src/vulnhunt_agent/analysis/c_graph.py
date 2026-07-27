@@ -24,6 +24,7 @@ from .cursor import (
     extract_cursor_facts,
     extract_cursor_macros,
 )
+from .formatted_output import extract_formatted_output_facts
 from .models import (
     CAnalysisGraph,
     CapacityCallSite,
@@ -36,6 +37,7 @@ from .models import (
     GraphNode,
     GuardState,
     FunctionCapacitySummary,
+    FormattedOutputFact,
     NodeKind,
     RiskChain,
     SecuritySignal,
@@ -143,6 +145,7 @@ class _Extracted:
     capacity_facts: tuple[CapacityFact, ...] = ()
     capacity_summary: FunctionCapacitySummary | None = None
     cursor_facts: tuple[CursorFact, ...] = ()
+    formatted_output_facts: tuple[FormattedOutputFact, ...] = ()
 
 
 def build_c_analysis_graph(repo: Path, source_files: list[str]) -> CAnalysisGraph:
@@ -185,6 +188,10 @@ def build_c_analysis_graph(repo: Path, source_files: list[str]) -> CAnalysisGrap
     )
     cursor_facts = sorted(
         (fact for item in extracted for fact in item.cursor_facts),
+        key=lambda item: item.fact_id,
+    )
+    formatted_output_facts = sorted(
+        (fact for item in extracted for fact in item.formatted_output_facts),
         key=lambda item: item.fact_id,
     )
     local_capacity_summaries = tuple(sorted(
@@ -305,6 +312,7 @@ def build_c_analysis_graph(repo: Path, source_files: list[str]) -> CAnalysisGrap
         capacity_facts=tuple(capacity_facts),
         capacity_calls=tuple(capacity_calls),
         capacity_summaries=capacity_summaries,
+        formatted_output_facts=tuple(formatted_output_facts),
         capacity_risk_chains=capacity_risk_chains,
         cursor_facts=tuple(cursor_facts),
         cursor_transition_chains=cursor_transition_chains,
@@ -488,6 +496,14 @@ def _extract_c_function(
         body_nodes=region.body_nodes,
         macros=cursor_macros or {},
     )
+    formatted_output_facts = extract_formatted_output_facts(
+        path=relative,
+        node_id=node_id,
+        function=name,
+        source=source,
+        function_node=region.container,
+        body_nodes=region.body_nodes,
+    )
     return _Extracted(
         node=node,
         calls=tuple(call_sites),
@@ -497,6 +513,7 @@ def _extract_c_function(
         capacity_facts=capacity_facts,
         capacity_summary=capacity_summary,
         cursor_facts=cursor_facts,
+        formatted_output_facts=formatted_output_facts,
     )
 
 

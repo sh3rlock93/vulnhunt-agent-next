@@ -32,6 +32,7 @@ from .cursor import (
     extract_cursor_macros,
 )
 from .incremental import INCREMENTAL_POLICY, build_incremental_scope
+from .formatted_output import FORMATTED_OUTPUT_POLICY, extract_formatted_output_facts
 from .scope import SCAN_SCOPE_POLICY, build_scan_scope
 from .models import (
     AnalysisSlice,
@@ -52,6 +53,9 @@ from .models import (
     GraphEdge,
     GraphNode,
     FunctionCapacitySummary,
+    FormattedDestinationKind,
+    FormattedExpansionClass,
+    FormattedOutputFact,
     GuardState,
     InvariantClosureState,
     InvariantObligation,
@@ -88,6 +92,9 @@ __all__ = [
     "GraphEdge",
     "GraphNode",
     "FunctionCapacitySummary",
+    "FormattedDestinationKind",
+    "FormattedExpansionClass",
+    "FormattedOutputFact",
     "GuardState",
     "InvariantClosureState",
     "InvariantObligation",
@@ -103,6 +110,8 @@ __all__ = [
     "RISK_CHAIN_POLICY",
     "INVARIANT_OBLIGATION_POLICY",
     "build_invariant_obligations",
+    "FORMATTED_OUTPUT_POLICY",
+    "extract_formatted_output_facts",
     "build_c_analysis_graph",
     "build_coverage_plan",
     "context_for_file",
