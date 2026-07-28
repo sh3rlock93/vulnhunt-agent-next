@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import signal
 import shutil
 import tempfile
 import uuid
@@ -29,6 +31,7 @@ from .tool_protocol import tool_schema_map, validated_tool_block
 
 _MAX_PROCESS_OUTPUT = 2 * 1024 * 1024
 _PREFLIGHT_TIMEOUT_SECONDS = 15
+_PROCESS_CLEANUP_TIMEOUT_SECONDS = 5
 _REQUIRED_EXEC_OPTIONS = (
     "--config",
     "--disable",
@@ -332,6 +335,7 @@ class CodexSubscriptionClient:
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                start_new_session=os.name == "posix",
             )
             try:
                 stdout, stderr = await asyncio.wait_for(
@@ -339,8 +343,7 @@ class CodexSubscriptionClient:
                     timeout=self.timeout_seconds,
                 )
             except TimeoutError as exc:
-                process.kill()
-                await process.communicate()
+                await _terminate_process_tree(process)
                 raise ModelClientError(
                     ModelFailureCategory.TIMEOUT,
                     f"Codex subscription request timed out after {self.timeout_seconds}s.",
@@ -386,6 +389,35 @@ class CodexSubscriptionClient:
                 stdout.decode(errors="replace"),
                 tool_schemas=tool_schemas,
             )
+
+
+async def _terminate_process_tree(process: asyncio.subprocess.Process) -> None:
+    """Terminate a timed-out CLI and its descendants without re-draining pipes.
+
+    The npm ``codex`` launcher starts the native Codex binary as a child. Killing
+    only the launcher leaves that child holding stdout/stderr open, so a second
+    ``communicate()`` can block forever. POSIX transports run in a dedicated
+    session and are killed as a process group; other platforms retain the
+    direct-process fallback.
+    """
+    if os.name == "posix":
+        try:
+            # The launcher may already have exited while a descendant still
+            # owns the pipes, so kill the session even with a return code.
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    elif process.returncode is None:
+        process.kill()
+    try:
+        await asyncio.wait_for(
+            process.wait(),
+            timeout=_PROCESS_CLEANUP_TIMEOUT_SECONDS,
+        )
+    except TimeoutError:
+        # The whole POSIX process group has already received SIGKILL. Do not
+        # re-enter communicate(), whose inherited pipes caused the original hang.
+        pass
 
 
 def _build_adapter_prompt(
