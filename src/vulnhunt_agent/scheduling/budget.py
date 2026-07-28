@@ -851,6 +851,7 @@ def _allocate_native_diverse(
     # the best pre-existing critical capacity chain.
     decisive_target = min(4, max(0, capacity - 1))
     decisive_slots = 0
+    decisive_required_specialist_slots = 0
     decisive_kinds: set[InvariantObligationKind] = set()
     covered_obligations: set[tuple[str, str]] = set()
     for obligation_id, hunter in required_obligations:
@@ -863,11 +864,24 @@ def _allocate_native_diverse(
             or _obligation_priority_score(obligation) < 100
         ):
             continue
+        candidates_for_obligation = [
+            candidate
+            for candidate in ordered
+            if candidate.item.hunter == hunter
+            and obligation_id in candidate.obligation_ids
+        ]
+        explicit = any(
+            _is_explicit_required_specialist(candidate)
+            for candidate in candidates_for_obligation
+        )
         admitted = admit_obligation(
             obligation_id,
             hunter,
-            quota="decisive_obligation",
+            quota="required_specialist" if explicit else "decisive_obligation",
             reason=(
+                "required cursor-transition specialist also closes a decisive "
+                "source-backed invariant"
+                if explicit else
                 "decisive source-derived invariant reserved before broad "
                 "critical-chain exploration"
             ),
@@ -880,11 +894,28 @@ def _allocate_native_diverse(
         )
         decisive_kinds.add(obligation.kind)
         decisive_slots += 1
+        decisive_required_specialist_slots += int(explicit)
 
     chain_slots = 0
-    chain_target = min(
+    base_chain_target = min(
         max(0, capacity - specialist_target),
         max(1, math.ceil(policy.max_hunter_sessions * NATIVE_CHAIN_SHARE)),
+    )
+    # Decisive obligations replace broad chain reservations instead of adding
+    # another prefix ahead of legacy high-risk work. This keeps established
+    # admission-rank envelopes stable while a tiny budget still retains one
+    # genuinely unselected critical chain.
+    critical_chain_floor = int(
+        len(selected) < capacity
+        and any(
+            candidate.item.work_id not in selected_ids
+            and _is_chain_critical(candidate)
+            for candidate in ordered
+        )
+    )
+    chain_target = max(
+        critical_chain_floor,
+        max(0, base_chain_target - decisive_slots),
     )
     seed_capped_critical: list[_AdmissionCandidate] = []
     for candidate in ordered:
@@ -972,7 +1003,7 @@ def _allocate_native_diverse(
         ):
             seed_slots += 1
 
-    required_specialist_slots = 0
+    required_specialist_slots = decisive_required_specialist_slots
     specialist_order = sorted(
         ordered,
         key=lambda candidate: (

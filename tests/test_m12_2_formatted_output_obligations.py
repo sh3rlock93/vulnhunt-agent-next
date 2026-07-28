@@ -43,6 +43,7 @@ int render(double input) {
     assert set(obligation.required_hunters) == {
         "c-bounds-integers",
         "c-memory-lifetime",
+        "c-injection-format",
     }
     assert {item.structural_role for item in obligation.evidence_ranges} == {
         "access",
@@ -135,6 +136,7 @@ int render(const char *format, const char *input) {
     assert obligations[literal.fact_id] == {
         "c-bounds-integers",
         "c-memory-lifetime",
+        "c-injection-format",
     }
     assert obligations[dynamic.fact_id] == {
         "c-bounds-integers",

@@ -94,6 +94,34 @@ def _work(
     )
 
 
+def _critical_capacity_chain(
+    index: int,
+    path: str,
+    signal_id: str,
+) -> CapacityRiskChain:
+    suffix = f"{index:020x}"
+    return CapacityRiskChain(
+        chain_id=f"capacity_risk_{suffix}",
+        root_cause_group=f"capacity_group_{suffix}",
+        allocation_fact_id=f"capacity_{suffix}",
+        root_node_id=f"{path}::decode@1",
+        root_path=path,
+        root_function="decode",
+        base="output",
+        element_count="capacity",
+        element_size="1",
+        node_ids=(f"{path}::decode@1",),
+        paths=(path,),
+        fact_ids=(f"capacity_{suffix}",),
+        allocation_signal_ids=(signal_id,),
+        guard_state=GuardState.ABSENT,
+        priority_class=CapacityPriorityClass.COMPLETE_UNCHECKED,
+        score=100,
+        confidence="high",
+        rationale="protected critical chain",
+    )
+
+
 def _four_calibration_obligations() -> tuple[InvariantObligation, ...]:
     return (
         _obligation(
@@ -263,7 +291,16 @@ def test_cursor_specialist_keeps_its_protected_quota_when_obligation_bound() -> 
         10,
         InvariantObligationKind.CURSOR_LENGTH_RELATION,
         ("c-parser-state",),
-    )
+    ).model_copy(update={
+        "structural_facts": (
+            "guard=absent",
+            "required_access_index=4",
+            "checked_before_read=0",
+            "checked_after_read=1",
+            "check_result_controls_read=0",
+            "cross_file=1",
+        ),
+    })
     item = _work(
         1,
         "src/case-10.c",
@@ -282,6 +319,7 @@ def test_cursor_specialist_keeps_its_protected_quota_when_obligation_bound() -> 
     )
 
     assert allocation.decisions[0].quota == "required_specialist"
+    assert allocation.required_specialist_slots == 1
     assert allocation.obligation_admissions[0].disposition == "admitted"
 
 
@@ -522,6 +560,70 @@ def test_decisive_reserve_is_balanced_across_obligation_kinds() -> None:
     assert {decision.work_id for decision in allocation.decisions} == {
         item.work_id for item in work
     }
+
+
+def test_decisive_reserve_replaces_broad_chain_slots_without_shifting_high_risk() -> None:
+    obligation = _obligation(
+        18,
+        InvariantObligationKind.INTEGER_MEMORY_RELATION,
+        ("c-bounds-integers",),
+        guard="partial",
+    ).model_copy(update={
+        "structural_facts": (
+            "guard=partial",
+            "source_signed=1",
+            "independent_write_bound=1",
+            "narrowing_or_wrap=1",
+            "checked_arithmetic=0",
+        ),
+    })
+    decisive = _work(
+        1,
+        "decisive.c",
+        "c-bounds-integers",
+        obligation_ids=(obligation.obligation_id,),
+    )
+    critical = tuple(
+        _work(
+            index,
+            f"critical-{index}.c",
+            "c-bounds-integers",
+            signal_id=f"critical-signal-{index}",
+        )
+        for index in range(2, 5)
+    )
+    high_risk = _work(
+        5,
+        "legacy-high-risk.c",
+        "c-memory-lifetime",
+    ).model_copy(update={"risk": 4})
+    chains = tuple(
+        _critical_capacity_chain(
+            index,
+            item.seed_file,
+            item.target_signal_ids[0],
+        )
+        for index, item in enumerate(critical, start=1)
+    )
+
+    allocation = allocate_work_items(
+        (decisive, *critical, high_risk),
+        BudgetPolicy(max_hunter_sessions=6, max_retries_per_work_item=0),
+        capacity_chains=chains,
+        invariant_obligations=(obligation,),
+        native_full_scan=True,
+    )
+
+    assert [decision.quota for decision in allocation.decisions[:4]] == [
+        "decisive_obligation",
+        "chain_critical",
+        "chain_critical",
+        "high_risk_non_chain",
+    ]
+    assert next(
+        decision.rank for decision in allocation.decisions
+        if decision.work_id == high_risk.work_id
+    ) == 4
 
 
 def test_deeper_unguarded_cursor_read_wins_same_kind_tie() -> None:
