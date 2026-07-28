@@ -42,7 +42,7 @@ int render(double input) {
     assert fact.guard_state is GuardState.ABSENT
     assert set(obligation.required_hunters) == {
         "c-bounds-integers",
-        "c-injection-format",
+        "c-memory-lifetime",
     }
     assert {item.structural_role for item in obligation.evidence_ranges} == {
         "access",
@@ -126,6 +126,20 @@ int render(const char *format, const char *input) {
         and item.guard_state is GuardState.ABSENT
         for item in graph.formatted_output_facts
     )
+    obligations = {
+        item.source_fact_ids[0]: set(item.required_hunters)
+        for item in graph.invariant_obligations
+        if item.kind is InvariantObligationKind.FORMATTED_OUTPUT_EXPANSION
+    }
+    literal, dynamic = graph.formatted_output_facts
+    assert obligations[literal.fact_id] == {
+        "c-bounds-integers",
+        "c-memory-lifetime",
+    }
+    assert obligations[dynamic.fact_id] == {
+        "c-bounds-integers",
+        "c-injection-format",
+    }
 
 
 def test_semantic_identity_survives_path_function_and_variable_renames(

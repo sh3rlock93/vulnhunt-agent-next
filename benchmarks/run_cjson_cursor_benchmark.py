@@ -50,7 +50,7 @@ REQUIRED_POLICIES = {
     "cursor_transition": "c-cursor-transition-v1",
     "cursor_proof": "c-cursor-proof-v1",
     "context": "c-context-v7",
-    "admission": "c-budget-v10",
+    "admission": "c-budget-v11",
     "input_fairness": "work-input-fairness-v3",
 }
 
