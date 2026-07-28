@@ -1566,7 +1566,7 @@ def _obligation_pair_order(
     *,
     obligation_by_id: dict[str, InvariantObligation],
     candidates: list[_AdmissionCandidate],
-) -> tuple[int, int, str, str]:
+) -> tuple[int, int, int, str, str]:
     obligation_id, hunter = pair
     obligation = obligation_by_id.get(obligation_id)
     candidate_rank = next(
@@ -1580,10 +1580,28 @@ def _obligation_pair_order(
     )
     return (
         -_obligation_priority_score(obligation),
+        _obligation_hunter_priority(obligation, hunter),
         candidate_rank,
         obligation_id,
         hunter,
     )
+
+
+def _obligation_hunter_priority(
+    obligation: InvariantObligation | None,
+    hunter: str,
+) -> int:
+    """Select the semantic specialist before generic Hunter tie-breaking."""
+    preferred = {
+        InvariantObligationKind.INTEGER_MEMORY_RELATION: "c-bounds-integers",
+        InvariantObligationKind.CAPACITY_RELATION: "c-bounds-integers",
+        InvariantObligationKind.CURSOR_LENGTH_RELATION: "c-bounds-integers",
+        InvariantObligationKind.FORMATTED_OUTPUT_EXPANSION: "c-memory-lifetime",
+        InvariantObligationKind.STATEFUL_OUTPUT_CAPACITY: "c-bounds-integers",
+    }
+    if obligation is None:
+        return _hunter_priority(hunter) + 1
+    return 0 if hunter == preferred[obligation.kind] else _hunter_priority(hunter) + 1
 
 
 def _obligation_priority_score(obligation: InvariantObligation | None) -> int:
