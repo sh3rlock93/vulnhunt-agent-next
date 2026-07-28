@@ -339,6 +339,9 @@ async def run_hunt(store: RunStore, bus: EventBus) -> None:
         work_id: [packet["cache_key"] for packet in packets]
         for work_id, packets in sorted(analysis_context_shards.items())
     }
+    hunt_plan["target_execution_contract"] = _target_execution_contract(
+        analysis_context_shards
+    )
     store.save_step("hunt_plan", hunt_plan)
 
     bus.emit("step_start", step="hunt",
@@ -599,6 +602,9 @@ async def run_hunt(store: RunStore, bus: EventBus) -> None:
             work_id: [packet["cache_key"] for packet in packets]
             for work_id, packets in sorted(analysis_context_shards.items())
         }
+        hunt_plan["target_execution_contract"] = _target_execution_contract(
+            analysis_context_shards
+        )
         store.save_step("hunt_plan", hunt_plan)
         with SqliteRepository(store.dir / "state.db", read_only=True) as repository:
             interrupted_usage = repository.list_budget_usage(
@@ -644,6 +650,9 @@ async def run_hunt(store: RunStore, bus: EventBus) -> None:
         work_id: [packet["cache_key"] for packet in packets]
         for work_id, packets in sorted(analysis_context_shards.items())
     }
+    hunt_plan["target_execution_contract"] = _target_execution_contract(
+        analysis_context_shards
+    )
     store.save_step("hunt_plan", hunt_plan)
     with SqliteRepository(store.dir / "state.db", read_only=True) as repository:
         persisted_usage = repository.list_budget_usage(
@@ -1041,6 +1050,18 @@ def _save_summary(
         qstore,
         final.tasks,
         planned_targets=planned_targets,
+        initially_presented_targets={
+            str(work_id): tuple(
+                str(target_id)
+                for target_id in (contract or {}).get(
+                    "initial_target_ids", ()
+                )
+            )
+            for work_id, contract in (
+                plan.get("target_execution_contract") or {}
+            ).items()
+            if isinstance(contract, dict)
+        },
     )
     summary["protocol_metrics"] = _protocol_metrics(qstore, final.tasks)
     snapshot = store.load_step("source_snapshot") or {}
@@ -1067,6 +1088,7 @@ def _target_completion(
     tasks: list[HuntTask],
     *,
     planned_targets: dict[str, tuple[str, ...]] | None = None,
+    initially_presented_targets: dict[str, tuple[str, ...]] | None = None,
 ) -> dict:
     counts = {
         "finding": 0,
@@ -1098,7 +1120,18 @@ def _target_completion(
         for target_id in expected:
             status = dispositions.get(target_id)
             if status is None:
-                status = "deferred" if task.status == "budget_deferred" else "missing"
+                initially_presented = (initially_presented_targets or {}).get(
+                    task.work_id
+                )
+                status = (
+                    "deferred"
+                    if task.status == "budget_deferred"
+                    or (
+                        initially_presented is not None
+                        and target_id not in initially_presented
+                    )
+                    else "missing"
+                )
             counts[status] += 1
             if status in {"deferred", "missing"}:
                 incomplete.append({
@@ -1113,6 +1146,40 @@ def _target_completion(
         "complete": not incomplete,
         "incomplete": incomplete,
     }
+
+
+def _target_execution_contract(
+    context_shards: dict[str, tuple[dict, ...]],
+) -> dict[str, dict[str, object]]:
+    """Record the targets guaranteed to be visible to each Hunter session."""
+    return {
+        work_id: {
+            "initial_context_key": str(packets[0].get("cache_key", "")),
+            "initial_target_ids": list(_context_target_ids(packets[0])),
+            "context_shard_count": len(packets),
+        }
+        for work_id, packets in sorted(context_shards.items())
+        if packets
+    }
+
+
+def _context_target_ids(context: dict) -> tuple[str, ...]:
+    focus = context.get("change_focus") or {}
+    obligation_ids = tuple(dict.fromkeys(
+        str(target_id)
+        for target_id in focus.get("target_obligation_ids") or ()
+    ))
+    signal_ids = tuple(dict.fromkeys(
+        str(target_id)
+        for target_id in focus.get("target_signal_ids") or ()
+    ))
+    if signal_ids:
+        return tuple(dict.fromkeys((*obligation_ids, *signal_ids)))
+    node_ids = tuple(dict.fromkeys(
+        str(target_id)
+        for target_id in focus.get("target_node_ids") or ()
+    ))
+    return tuple(dict.fromkeys((*obligation_ids, *node_ids)))
 
 
 def _checkpoint_budget_usage(

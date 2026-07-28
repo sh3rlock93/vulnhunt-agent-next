@@ -12,7 +12,7 @@ from pydantic import ValidationError
 
 from tests.factories import HASH_A, HASH_B
 from vulnhunt_agent.agents.tools import HunterTools
-from vulnhunt_agent.agents.queue import HuntQueueStore
+from vulnhunt_agent.agents.queue import HuntQueueStore, HuntSubTask, HuntTask
 from vulnhunt_agent.agents.durable_queue import DurableHuntQueueStore
 from vulnhunt_agent.analysis import (
     SharedContextCache,
@@ -49,7 +49,11 @@ from vulnhunt_agent.pipeline.file_selector import run_file_selector
 from vulnhunt_agent.pipeline.filter_files import run_filter
 from vulnhunt_agent.pipeline.source_snapshot import run_source_snapshot
 from vulnhunt_agent.pipeline import hunt as hunt_pipeline
-from vulnhunt_agent.pipeline.hunt import _run_tasks_in_ranked_waves
+from vulnhunt_agent.pipeline.hunt import (
+    _run_tasks_in_ranked_waves,
+    _target_completion,
+    _target_execution_contract,
+)
 from vulnhunt_agent.scheduling import (
     AdmissionDecision,
     BudgetAllocation,
@@ -579,6 +583,141 @@ def test_work_input_budget_is_derived_from_admitted_sessions() -> None:
         items[1].work_id: 100,
     }
     assert plan.critical_work_ids == (items[0].work_id,)
+
+
+def test_priority_work_cannot_monopolize_multi_session_input_budget() -> None:
+    items = tuple(
+        item.model_copy(update={"required": True})
+        for item in build_shadow_plan(
+            run_id="run-fair-priority-input",
+            source_snapshot=HASH_A,
+            selected_files=[f"unit-{index}.c" for index in range(11)],
+            hunters=["c-bounds-integers"],
+            analysis={},
+        )
+    )
+    allocation = BudgetAllocation(
+        admitted_work_ids=tuple(item.work_id for item in items),
+        deferred={},
+        critical_slots=1,
+        high_risk_slots=0,
+        retry_slots=0,
+        general_slots=10,
+        decisions=(
+            AdmissionDecision(
+                work_id=items[0].work_id,
+                rank=1,
+                quota="decisive_obligation",
+                component="unit-0",
+                seed_file=items[0].seed_file,
+                score=100,
+                score_components={},
+                reason="test decisive obligation",
+            ),
+        ),
+    )
+
+    plan = build_work_input_budget(
+        items,
+        allocation,
+        BudgetPolicy(max_input_tokens=2_000_000),
+    )
+
+    assert plan.work_input_limits[items[0].work_id] == 363_638
+    assert max(plan.work_input_limits.values()) == 363_638
+    assert all(limit <= 363_638 for limit in plan.work_input_limits.values())
+
+
+def test_unpresented_context_shard_target_is_terminally_deferred(
+    tmp_path: Path,
+) -> None:
+    qstore = HuntQueueStore(tmp_path / "hunters")
+    task = HuntTask(
+        file="format.c",
+        hash="format",
+        work_id="work-format",
+        status="done",
+        hunters=[HuntSubTask(name="c-memory-lifetime", status="done")],
+    )
+    hunt_dir = qstore.hunt_dir(task, "c-memory-lifetime")
+    (hunt_dir / "findings.json").write_text(json.dumps({
+        "target_dispositions": [{
+            "target_id": "obligation-first",
+            "status": "no_finding",
+        }],
+    }))
+    shards: dict[str, tuple[dict, ...]] = {
+        task.work_id: (
+            {
+                "cache_key": "first",
+                "change_focus": {
+                    "target_obligation_ids": ["obligation-first"],
+                },
+            },
+            {
+                "cache_key": "second",
+                "change_focus": {
+                    "target_obligation_ids": ["obligation-later"],
+                },
+            },
+        ),
+    }
+    contract = _target_execution_contract(shards)
+    initial_target_ids = contract[task.work_id]["initial_target_ids"]
+    assert isinstance(initial_target_ids, list)
+
+    completion = _target_completion(
+        qstore,
+        [task],
+        planned_targets={
+            task.work_id: ("obligation-first", "obligation-later"),
+        },
+        initially_presented_targets={
+            task.work_id: tuple(str(item) for item in initial_target_ids),
+        },
+    )
+
+    assert contract[task.work_id] == {
+        "initial_context_key": "first",
+        "initial_target_ids": ["obligation-first"],
+        "context_shard_count": 2,
+    }
+    assert completion["no_finding"] == 1
+    assert completion["deferred"] == 1
+    assert completion["missing"] == 0
+    assert completion["incomplete"] == [{
+        "work_id": task.work_id,
+        "target_id": "obligation-later",
+        "status": "deferred",
+    }]
+
+
+def test_presented_target_without_disposition_remains_missing(
+    tmp_path: Path,
+) -> None:
+    qstore = HuntQueueStore(tmp_path / "hunters")
+    task = HuntTask(
+        file="format.c",
+        hash="format",
+        work_id="work-format",
+        status="done",
+        hunters=[HuntSubTask(name="c-memory-lifetime", status="done")],
+    )
+    qstore.hunt_dir(task, "c-memory-lifetime").joinpath(
+        "findings.json"
+    ).write_text("{}")
+
+    completion = _target_completion(
+        qstore,
+        [task],
+        planned_targets={task.work_id: ("obligation-first",)},
+        initially_presented_targets={
+            task.work_id: ("obligation-first",),
+        },
+    )
+
+    assert completion["deferred"] == 0
+    assert completion["missing"] == 1
 
 
 def test_budget_controller_refuses_calls_after_deadline() -> None:
@@ -1707,6 +1846,14 @@ async def test_hunt_pipeline_executes_slice_queue_without_legacy_json(
     assert plan["context_cache"]["misses"] == 1
     assert plan["context_cache"]["hits"] == 1
     assert len(set(plan["context_cache_keys"].values())) == 1
+    assert set(plan["target_execution_contract"]) == set(
+        plan["context_cache_keys"]
+    )
+    assert all(
+        contract["initial_target_ids"]
+        and contract["context_shard_count"] >= 1
+        for contract in plan["target_execution_contract"].values()
+    )
     assert summary["done"] == 2
     assert summary["failed"] == 0
     assert summary["context_cache"] == plan["context_cache"]

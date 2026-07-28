@@ -542,6 +542,10 @@ def build_work_input_budget(
         1,
         policy.max_input_tokens // max(1, len(admitted)),
     )
+    unallocated_tokens = max(
+        0,
+        policy.max_input_tokens - base_share * len(admitted),
+    )
     priority_protected_work_ids = {
         decision.work_id
         for decision in allocation.decisions
@@ -555,7 +559,12 @@ def build_work_input_budget(
     work_input_limits = {
         work_id: min(
             policy.max_input_tokens,
-            base_share * (6 if work_id in priority_protected_work_ids else 2),
+            base_share * 2
+            + (
+                unallocated_tokens
+                if work_id in priority_protected_work_ids
+                else 0
+            ),
         )
         for work_id in admitted
     }
