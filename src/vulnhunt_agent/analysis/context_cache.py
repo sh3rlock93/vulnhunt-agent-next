@@ -8,6 +8,7 @@ from pathlib import Path
 
 from ..domain.schemas import HunterWorkItem
 from .context import (
+    _include_explicit_focus_chains,
     _select_focus_chains,
     context_for_work_item,
     matching_capacity_risk_chains_for_targets,
@@ -15,7 +16,7 @@ from .context import (
     matching_risk_chains_for_targets,
 )
 
-CONTEXT_CACHE_POLICY = "c-context-v10"
+CONTEXT_CACHE_POLICY = "c-context-v11"
 CONTEXT_SHARD_POLICY = "c-focus-chain-shards-v1"
 MAX_CONTEXT_BYTES = 24_000
 MIN_EVIDENCE_EXCERPT_BYTES = 512
@@ -586,11 +587,19 @@ def _relevant_ranges(
         for path, ranges in changed_line_ranges.items()
         if path in files
     }
-    risk_chains = _select_focus_chains(matching_risk_chains_for_targets(
-        graph,
-        target_signal_ids=target_signal_ids,
-        target_node_ids=target_node_ids,
-    ), focus_chain_ids or set(), support_limit=6)
+    risk_chains = _select_focus_chains(
+        _include_explicit_focus_chains(
+            matching_risk_chains_for_targets(
+                graph,
+                target_signal_ids=target_signal_ids,
+                target_node_ids=target_node_ids,
+            ),
+            graph.get("risk_chains", []),
+            focus_chain_ids or set(),
+        ),
+        focus_chain_ids or set(),
+        support_limit=6,
+    )
     for chain in risk_chains:
         path = str(chain.get("path", ""))
         if path not in files:
@@ -604,11 +613,19 @@ def _relevant_ranges(
         out.setdefault(path, []).extend(
             (int(line), int(line)) for line in ordered_lines
         )
-    capacity_chains = _select_focus_chains(matching_capacity_risk_chains_for_targets(
-        graph,
-        target_signal_ids=target_signal_ids,
-        target_node_ids=target_node_ids,
-    ), focus_chain_ids or set(), support_limit=3)
+    capacity_chains = _select_focus_chains(
+        _include_explicit_focus_chains(
+            matching_capacity_risk_chains_for_targets(
+                graph,
+                target_signal_ids=target_signal_ids,
+                target_node_ids=target_node_ids,
+            ),
+            graph.get("capacity_risk_chains", []),
+            focus_chain_ids or set(),
+        ),
+        focus_chain_ids or set(),
+        support_limit=3,
+    )
     for chain in capacity_chains:
         for path, lines in chain.get("evidence_lines", {}).items():
             if path in files:

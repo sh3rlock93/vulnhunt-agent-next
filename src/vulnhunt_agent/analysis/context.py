@@ -197,10 +197,14 @@ def _compact_invariant_obligation(obligation: dict) -> dict:
 
 def matching_risk_chains(graph: dict, work_item: HunterWorkItem) -> list[dict]:
     """Public deterministic matching used by context packets and cache keys."""
-    return matching_risk_chains_for_targets(
-        graph,
-        target_signal_ids=set(work_item.target_signal_ids),
-        target_node_ids=set(work_item.target_node_ids),
+    return _include_explicit_focus_chains(
+        matching_risk_chains_for_targets(
+            graph,
+            target_signal_ids=set(work_item.target_signal_ids),
+            target_node_ids=set(work_item.target_node_ids),
+        ),
+        graph.get("risk_chains", []),
+        work_item.focus_chain_ids,
     )
 
 
@@ -208,10 +212,14 @@ def matching_capacity_risk_chains(
     graph: dict,
     work_item: HunterWorkItem,
 ) -> list[dict]:
-    return matching_capacity_risk_chains_for_targets(
-        graph,
-        target_signal_ids=set(work_item.target_signal_ids),
-        target_node_ids=set(work_item.target_node_ids),
+    return _include_explicit_focus_chains(
+        matching_capacity_risk_chains_for_targets(
+            graph,
+            target_signal_ids=set(work_item.target_signal_ids),
+            target_node_ids=set(work_item.target_node_ids),
+        ),
+        graph.get("capacity_risk_chains", []),
+        work_item.focus_chain_ids,
     )
 
 
@@ -503,6 +511,37 @@ def _focus_first(chains: list[dict], focus_chain_ids: tuple[str, ...]) -> list[d
             order.get(str(chain.get("chain_id", "")), len(order)),
         ),
     )
+
+
+def _include_explicit_focus_chains(
+    matched: list[dict],
+    available: list[dict],
+    focus_chain_ids: tuple[str, ...] | set[str],
+) -> list[dict]:
+    """Honor planner-selected chains even when target IDs were coalesced."""
+    by_id = {
+        str(chain.get("chain_id", "")): chain
+        for chain in available
+        if chain.get("chain_id")
+    }
+    seen = {
+        str(chain.get("chain_id", ""))
+        for chain in matched
+        if chain.get("chain_id")
+    }
+    ordered_focus_ids = (
+        focus_chain_ids
+        if isinstance(focus_chain_ids, tuple)
+        else tuple(sorted(focus_chain_ids))
+    )
+    return [
+        *matched,
+        *(
+            by_id[chain_id]
+            for chain_id in ordered_focus_ids
+            if chain_id in by_id and chain_id not in seen
+        ),
+    ]
 
 
 def _select_focus_chains(
