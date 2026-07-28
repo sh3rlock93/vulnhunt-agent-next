@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import os
+import signal
+import sys
 import tomllib
 from pathlib import Path
 from types import SimpleNamespace
@@ -17,6 +20,7 @@ from vulnhunt_agent.core.codex_client import (
     _classify_failure,
     _failure_hint,
     _parse_codex_response,
+    _terminate_process_tree,
 )
 from vulnhunt_agent.core.model_errors import ModelClientError, ModelFailureCategory
 from vulnhunt_agent.core.openai_client import (
@@ -357,6 +361,86 @@ async def test_codex_subscription_replaces_builtin_model_instructions(
     assert "not a coding agent" in captured["instructions"]
     assert "model_instructions_file" not in captured["prompt"]
     assert response.text == "done"
+
+
+@pytest.mark.asyncio
+async def test_codex_timeout_kills_process_group_without_redraining_pipes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = _auto_provider(codex_timeout_seconds=0.01, codex_max_parallel=1)
+    monkeypatch.setattr(
+        "vulnhunt_agent.core.codex_client._settings.resolve",
+        lambda model_id: (None, provider),
+    )
+    captured: dict[str, Any] = {"communicate_calls": 0}
+
+    class _Process:
+        pid = 4242
+        # A launcher can exit while its native child still owns the pipes.
+        returncode: int | None = 0
+
+        async def communicate(self, _input: bytes):
+            captured["communicate_calls"] += 1
+            await asyncio.Future()
+
+        async def wait(self) -> int:
+            return 0
+
+        def kill(self) -> None:
+            captured["direct_kill"] = True
+
+    async def fake_subprocess(*_args, **kwargs):
+        captured["start_new_session"] = kwargs["start_new_session"]
+        return _Process()
+
+    def fake_killpg(pid: int, sig: int) -> None:
+        captured["killpg"] = (pid, sig)
+
+    monkeypatch.setattr(
+        "vulnhunt_agent.core.codex_client.asyncio.create_subprocess_exec",
+        fake_subprocess,
+    )
+    monkeypatch.setattr(
+        "vulnhunt_agent.core.codex_client.os.killpg",
+        fake_killpg,
+    )
+    client = CodexSubscriptionClient("gpt-5.6-sol", max_tokens=10)
+
+    with pytest.raises(ModelClientError) as raised:
+        await client.chat(
+            messages=[{"role": "user", "content": [{"text": "review"}]}],
+        )
+
+    assert raised.value.category is ModelFailureCategory.TIMEOUT
+    assert raised.value.retryable is True
+    assert captured["start_new_session"] is True
+    assert captured["killpg"] == (4242, signal.SIGKILL)
+    assert captured["communicate_calls"] == 1
+    assert "direct_kill" not in captured
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX process groups")
+@pytest.mark.asyncio
+async def test_codex_timeout_reaps_pipe_holding_descendant() -> None:
+    process = await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-c",
+        (
+            "import subprocess,sys,time;"
+            "subprocess.Popen([sys.executable,'-c','import time;time.sleep(60)']);"
+            "time.sleep(60)"
+        ),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        start_new_session=True,
+    )
+
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(process.communicate(), timeout=0.05)
+
+    await asyncio.wait_for(_terminate_process_tree(process), timeout=1)
+
+    assert process.returncode == -signal.SIGKILL
 
 
 def test_codex_failure_hint_does_not_echo_diagnostics() -> None:
