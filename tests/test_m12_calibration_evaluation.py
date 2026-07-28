@@ -9,6 +9,7 @@ from benchmarks.m12.calibration import DEFAULT_CATALOG, load_calibration_catalog
 from benchmarks.m12.calibration_cohort import create_cohort_plan, execute_cohort
 from benchmarks.m12.calibration_evaluation import (
     _finding_matches_oracle,
+    _finding_matches_structural_root,
     _target_matches_oracle,
     evaluate_calibration_cohort,
 )
@@ -131,6 +132,105 @@ def test_exact_entry_and_sink_ranges_are_required_for_target_matching() -> None:
     assert _finding_matches_oracle(wrong_sink, oracle) is False
     assert _target_matches_oracle("sig_target", analysis, oracle) is True
     assert _target_matches_oracle("sig_missing", analysis, oracle) is False
+
+
+def test_downstream_sink_requires_exact_source_backed_obligation_provenance(
+    tmp_path: Path,
+) -> None:
+    oracle = {
+        "location": {
+            "entry_file": "src/config.c",
+            "entry_line_min": 10,
+            "entry_line_max": 20,
+            "sink_file": "src/encode.c",
+            "sink_line_min": 40,
+            "sink_line_max": 50,
+        }
+    }
+    finding = {
+        "title": "Wrapped allocation reaches a downstream read",
+        "weakness": "integer_overflow",
+        "entrypoint": {"path": "src/config.c", "line": 12},
+        "sink": {"path": "src/scan.c", "line": 90},
+    }
+    analysis = {
+        "graph": {
+            "invariant_obligations": [{
+                "obligation_id": "obligation_target",
+                "confidence": "high",
+                "evidence_ranges": [
+                    {"path": "src/config.c", "line": 12, "end_line": 12},
+                    {"path": "src/encode.c", "line": 45, "end_line": 45},
+                ],
+            }]
+        }
+    }
+    raw = {
+        "title": finding["title"],
+        "type": finding["weakness"],
+        "entry_file": "src/config.c",
+        "entry_line": 12,
+        "sink_file": "src/scan.c",
+        "sink_line": 90,
+    }
+    artifact = tmp_path / "internal" / "hunters" / "work" / "hunts" / "hunter"
+    _write_json(artifact / "findings.json", {
+        "findings": [raw, {**raw, "title": "Unrelated finding"}],
+        "target_dispositions": [{
+            "target_id": "obligation_target",
+            "status": "finding",
+            "finding_indices": [0],
+        }],
+    })
+
+    assert _finding_matches_oracle(finding, oracle) is False
+    assert _finding_matches_structural_root(
+        finding,
+        frozen=tmp_path,
+        analysis=analysis,
+        oracle=oracle,
+    ) is True
+    assert _finding_matches_structural_root(
+        {**finding, "title": "Unrelated finding"},
+        frozen=tmp_path,
+        analysis=analysis,
+        oracle=oracle,
+    ) is False
+
+
+def test_structural_root_rejects_obligation_without_both_oracle_ranges(
+    tmp_path: Path,
+) -> None:
+    oracle = {
+        "location": {
+            "entry_file": "src/config.c",
+            "entry_line_min": 10,
+            "entry_line_max": 20,
+            "sink_file": "src/encode.c",
+            "sink_line_min": 40,
+            "sink_line_max": 50,
+        }
+    }
+    finding = {
+        "title": "Same title",
+        "weakness": "integer_overflow",
+        "entrypoint": {"path": "src/config.c", "line": 12},
+        "sink": {"path": "src/scan.c", "line": 90},
+    }
+    analysis = {"graph": {"invariant_obligations": [{
+        "obligation_id": "obligation_unrelated",
+        "confidence": "high",
+        "evidence_ranges": [
+            {"path": "src/config.c", "line": 12, "end_line": 12},
+        ],
+    }]}}
+
+    assert _finding_matches_structural_root(
+        finding,
+        frozen=tmp_path,
+        analysis=analysis,
+        oracle=oracle,
+    ) is False
 
 
 def test_closed_cohort_evaluation_is_deterministic_and_keeps_valid_misses(

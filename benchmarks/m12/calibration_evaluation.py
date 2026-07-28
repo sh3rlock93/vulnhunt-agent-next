@@ -381,6 +381,7 @@ def _evaluate_run(
         hunt_plan,
         definition.oracle,
         oracle_sha,
+        frozen=frozen,
     )
     run_root = evaluation_root / "runs" / run_id
     candidates_path = run_root / "candidates.json"
@@ -447,6 +448,8 @@ def _build_adjudications(
     hunt_plan: Mapping[str, Any],
     oracle: Mapping[str, Any],
     oracle_sha: str,
+    *,
+    frozen: Path | None = None,
 ) -> dict[str, Any]:
     admission = []
     for target_id in sorted({str(item["target_id"]) for item in receipt["admission"]}):
@@ -463,7 +466,15 @@ def _build_adjudications(
     adjudication = []
     for finding in sorted(findings, key=lambda item: str(item.get("candidate_id") or "")):
         candidate_id = str(finding.get("candidate_id") or "")
-        target_match = _finding_matches_oracle(finding, oracle)
+        target_match = _finding_matches_oracle(finding, oracle) or (
+            frozen is not None
+            and _finding_matches_structural_root(
+                finding,
+                frozen=frozen,
+                analysis=analysis,
+                oracle=oracle,
+            )
+        )
         adjudication.append({
             "canonical_candidate_id": candidate_id,
             "target_match": target_match,
@@ -493,6 +504,133 @@ def _finding_matches_oracle(finding: Mapping[str, Any], oracle: Mapping[str, Any
     if isinstance(dataflow, list):
         entry_locations.extend(item for item in dataflow if isinstance(item, Mapping))
     return any(_point_matches(item, location, "entry") for item in entry_locations)
+
+
+def _finding_matches_structural_root(
+    finding: Mapping[str, Any],
+    *,
+    frozen: Path,
+    analysis: Mapping[str, Any],
+    oracle: Mapping[str, Any],
+) -> bool:
+    """Accept a downstream crash sink only through a sealed root-cause chain.
+
+    A sanitizer can stop at a downstream read even when another trigger for the
+    same allocation defect stops at the oracle's write.  Location similarity is
+    not enough to join those results.  The final candidate must be the exact raw
+    Hunter finding attached to a high-confidence, source-derived obligation
+    whose evidence spans both oracle entry and sink ranges.
+    """
+    target_obligations = _oracle_root_obligation_ids(analysis, oracle)
+    if not target_obligations:
+        return False
+    identity = _final_finding_identity(finding)
+    if identity is None:
+        return False
+    for path in sorted(frozen.glob("*/hunters/*/hunts/*/findings.json")):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        raw_findings = payload.get("findings") if isinstance(payload, Mapping) else None
+        dispositions = (
+            payload.get("target_dispositions")
+            if isinstance(payload, Mapping) else None
+        )
+        if not isinstance(raw_findings, list) or not isinstance(dispositions, list):
+            continue
+        for disposition in dispositions:
+            if (
+                not isinstance(disposition, Mapping)
+                or disposition.get("status") != "finding"
+                or str(disposition.get("target_id") or "") not in target_obligations
+            ):
+                continue
+            indices = disposition.get("finding_indices")
+            if not isinstance(indices, list):
+                continue
+            for index in indices:
+                if (
+                    isinstance(index, int)
+                    and not isinstance(index, bool)
+                    and 0 <= index < len(raw_findings)
+                    and isinstance(raw_findings[index], Mapping)
+                    and _raw_finding_identity(raw_findings[index]) == identity
+                ):
+                    return True
+    return False
+
+
+def _oracle_root_obligation_ids(
+    analysis: Mapping[str, Any],
+    oracle: Mapping[str, Any],
+) -> set[str]:
+    graph = analysis.get("graph")
+    obligations = graph.get("invariant_obligations") if isinstance(graph, Mapping) else None
+    if not isinstance(obligations, list):
+        return set()
+    location = oracle["location"]
+    matched: set[str] = set()
+    for obligation in obligations:
+        if (
+            not isinstance(obligation, Mapping)
+            or obligation.get("confidence") != "high"
+        ):
+            continue
+        evidence = obligation.get("evidence_ranges")
+        if not isinstance(evidence, list):
+            continue
+        spans_entry = any(
+            isinstance(item, Mapping) and _point_matches(item, location, "entry")
+            for item in evidence
+        )
+        spans_sink = any(
+            isinstance(item, Mapping) and _point_matches(item, location, "sink")
+            for item in evidence
+        )
+        obligation_id = str(obligation.get("obligation_id") or "")
+        if obligation_id and spans_entry and spans_sink:
+            matched.add(obligation_id)
+    return matched
+
+
+def _final_finding_identity(finding: Mapping[str, Any]) -> tuple[object, ...] | None:
+    entry = finding.get("entrypoint")
+    sink = finding.get("sink")
+    if not isinstance(entry, Mapping) or not isinstance(sink, Mapping):
+        return None
+    return (
+        str(finding.get("title") or ""),
+        str(finding.get("weakness") or ""),
+        str(entry.get("path") or ""),
+        _integer_or_none(entry.get("line")),
+        str(sink.get("path") or ""),
+        _integer_or_none(sink.get("line")),
+    )
+
+
+def _raw_finding_identity(finding: Mapping[str, Any]) -> tuple[object, ...]:
+    return (
+        str(finding.get("title") or ""),
+        str(finding.get("type") or ""),
+        str(finding.get("entry_file") or ""),
+        _integer_or_none(finding.get("entry_line")),
+        str(finding.get("sink_file") or ""),
+        _integer_or_none(finding.get("sink_line")),
+    )
+
+
+def _integer_or_none(value: object) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if not isinstance(value, str):
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        return None
 
 
 def _target_matches_oracle(
