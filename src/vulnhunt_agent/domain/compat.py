@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+from pathlib import PurePosixPath
 
 from .schemas import CandidateFinding, CodeLocation, Precondition
 from .states import FindingState
@@ -23,7 +24,7 @@ def candidate_from_legacy(raw: dict, *, run_id: str, task_key: str) -> Candidate
     entrypoint = _location(raw, "entry")
     assert entrypoint is not None
     sink = _location(raw, "sink", required=False)
-    files = [str(path) for path in raw.get("files_touched", []) if path]
+    files = _source_files(raw)
     dataflow = tuple(
         CodeLocation(path=path, line=1)
         for path in files
@@ -53,6 +54,41 @@ def candidate_from_legacy(raw: dict, *, run_id: str, task_key: str) -> Candidate
         impact=impact,
         confidence=0.75 if state is FindingState.POC_READY else 0.45,
     )
+
+
+def _source_files(raw: dict) -> tuple[str, ...]:
+    """Keep only repository-relative source paths from legacy auxiliary data.
+
+    Hunters may include a generated PoC under ``/workspace`` in
+    ``files_touched``.  That path is execution provenance, not source
+    dataflow, and ``CodeLocation`` intentionally rejects it.  Ignore such
+    sandbox paths (and the declared relative PoC path) without weakening the
+    strict entrypoint and sink validation.
+    """
+    poc_path = str(raw.get("poc_file") or "").replace("\\", "/")
+    excluded = {
+        str(raw.get("entry_file") or "").replace("\\", "/"),
+        str(raw.get("sink_file") or "").replace("\\", "/"),
+        poc_path,
+    }
+    source_paths: list[str] = []
+    seen: set[str] = set()
+    for value in raw.get("files_touched", []):
+        normalized = str(value or "").replace("\\", "/")
+        path = PurePosixPath(normalized)
+        if (
+            not normalized
+            or "\0" in normalized
+            or path.is_absolute()
+            or ".." in path.parts
+            or (path.parts and path.parts[0].endswith(":"))
+            or normalized in excluded
+            or normalized in seen
+        ):
+            continue
+        seen.add(normalized)
+        source_paths.append(normalized)
+    return tuple(source_paths)
 
 
 def _location(raw: dict, prefix: str, *, required: bool = True) -> CodeLocation | None:
