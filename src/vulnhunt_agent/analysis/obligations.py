@@ -274,7 +274,15 @@ def _formatted_seed(fact: FormattedOutputFact) -> _ObligationSeed:
         kind=InvariantObligationKind.FORMATTED_OUTPUT_EXPANSION,
         structural_facts=structural,
         evidence_ranges=_dedupe_ranges(evidence),
-        required_hunters=("c-bounds-integers", "c-injection-format"),
+        required_hunters=(
+            (
+                "c-bounds-integers",
+                "c-memory-lifetime",
+                "c-injection-format",
+            )
+            if fact.format_is_literal
+            else ("c-bounds-integers", "c-injection-format")
+        ),
         source_fact_ids=(fact.fact_id,),
         target_node_ids=(fact.node_id,),
         target_signal_ids=(),

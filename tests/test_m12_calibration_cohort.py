@@ -92,7 +92,7 @@ def _fake_discover(calls: list[tuple[str, int]]):
                 "adapter": "codex_subscription",
                 "model_id": model_id or "gpt-test",
             },
-            "policies": {"admission": "c-budget-v10"},
+            "policies": {"admission": "c-budget-v11"},
             "usage": {
                 "sessions": 1,
                 "input_tokens": 100,

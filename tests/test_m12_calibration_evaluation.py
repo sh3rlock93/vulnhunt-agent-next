@@ -78,7 +78,7 @@ def _discover(oracles: dict[str, dict[str, Any]]):
                 "adapter": "codex_subscription",
                 "model_id": model_id or "gpt-test",
             },
-            "policies": {"admission": "c-budget-v10"},
+            "policies": {"admission": "c-budget-v11"},
             "usage": {
                 "sessions": 1,
                 "input_tokens": 100,

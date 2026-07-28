@@ -14,7 +14,7 @@ tree = "db50550945311f6056787b1fbfec8aedd5cb86ef"
 
 [discovery]
 scan_manifest = "benchmarks/m12/calibration/scans/case_e9366d85b7c31f73.toml"
-scan_manifest_sha256 = "sha256:2a4000e1c4195e9167cfc49f89b208bfb8a569dab235481c96d78e804350d5ce"
+scan_manifest_sha256 = "sha256:db4950cc7b19cdb50755f44386a4a191d6fa450148a53c0e2116c93ecdeb43a1"
 
 [budget]
 max_hunter_sessions = 12

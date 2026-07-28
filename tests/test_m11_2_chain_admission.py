@@ -103,7 +103,7 @@ def test_one_capacity_root_preserves_distinct_hunter_specialists() -> None:
 
     admitted = [item for item in items if item.work_id in first.admitted_work_ids]
     assert first == second
-    assert first.policy_version == "c-budget-v10"
+    assert first.policy_version == "c-budget-v11"
     assert {item.hunter for item in admitted} == {
         "c-bounds-integers",
         "c-memory-lifetime",
@@ -220,7 +220,7 @@ def test_explicit_cursor_specialist_uses_existing_specialist_reservation() -> No
         native_full_scan=True,
     )
 
-    assert allocation.policy_version == "c-budget-v10"
+    assert allocation.policy_version == "c-budget-v11"
     assert allocation.admitted_work_ids == (
         bounds.work_id,
         cursor_specialist.work_id,

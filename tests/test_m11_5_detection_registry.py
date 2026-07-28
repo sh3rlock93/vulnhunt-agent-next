@@ -78,7 +78,7 @@ def test_libcue_scan_manifest_is_oracle_free_and_budget_locked() -> None:
     assert "fixed_source" not in raw
     assert _contains_exact(scan["budget"], REQUIRED_BUDGET)
     assert _contains_exact(scan["limits"], REQUIRED_LIMITS)
-    assert scan["policies"]["admission"] == "c-budget-v10"
+    assert scan["policies"]["admission"] == "c-budget-v11"
     assert scan["policies"]["input_fairness"] == "work-input-fairness-v3"
 
 

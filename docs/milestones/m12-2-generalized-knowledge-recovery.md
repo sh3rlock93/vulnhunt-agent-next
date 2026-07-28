@@ -1,6 +1,6 @@
 # M12.2.x — Generalized knowledge and missed-target recovery
 
-Status: knowledge foundation implemented locally; recovery PRs not started.
+Status: PRs 1-7 merged; decisive Hunter admission recovery in PR 8.
 
 ## Objective
 
@@ -158,6 +158,32 @@ Acceptance:
 - no finding becomes reportable solely because a knowledge card was selected;
 - no source identity from the ledger appears in a discovery artifact;
 - duplicate logical findings count once while all execution cost is retained.
+
+### PR 8 — Decisive obligation admission recovery
+
+The first four-by-three cohort showed that exact generalized obligations could
+be present in the source graph but still lose their Hunter session to earlier
+broad work. Reserve at most one decisive obligation from each supported
+structural kind before broad chain exploration, while retaining at least one
+slot for an existing complete critical chain. Same-kind cursor obligations use
+the unguarded access depth and cross-file relation only as deterministic
+tie-break evidence.
+
+Literal formatted-output expansion is a memory-capacity problem and routes to
+the bounds and memory-lifetime Hunters. Dynamic non-literal format control
+continues to route to bounds and injection-format Hunters.
+
+Acceptance:
+
+- the WavPack signed allocation obligation moves from budget-deferred rank 133
+  to the third admitted session and produces the expected heap-overflow finding;
+- the libcoap cross-file length-before-read obligation is the first admitted
+  session under a two-session budget and produces the expected out-of-bounds
+  read finding;
+- mxml and uriparser obligations remain admitted, and a two-session budget
+  cannot evict the best pre-existing complete critical chain;
+- the admission contract is versioned as `c-budget-v11`, and all protected
+  deterministic detection gates remain green.
 
 ## Stop and rollback conditions
 

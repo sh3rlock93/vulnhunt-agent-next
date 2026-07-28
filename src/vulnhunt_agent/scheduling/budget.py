@@ -16,12 +16,13 @@ from ..analysis.models import (
     CapacityPriorityClass,
     CapacityRiskChain,
     InvariantObligation,
+    InvariantObligationKind,
     RiskChain,
 )
 from ..domain.schemas import BudgetPolicy, BudgetUsage, HunterWorkItem
 
 LEGACY_BUDGET_POLICY = "hunter-budget-allocation-v1"
-NATIVE_DIVERSE_POLICY = "c-budget-v10"
+NATIVE_DIVERSE_POLICY = "c-budget-v11"
 NATIVE_CHAIN_SHARE = 0.50
 NATIVE_SEED_DIVERSITY_SHARE = 0.25
 NATIVE_HIGH_RISK_SHARE = 1 / 6
@@ -545,6 +546,7 @@ def build_work_input_budget(
         decision.work_id
         for decision in allocation.decisions
         if decision.quota in {
+            "decisive_obligation",
             "obligation_required",
             "chain_critical",
             "required_specialist",
@@ -720,6 +722,18 @@ def _allocate_native_diverse(
         obligation.obligation_id: obligation
         for obligation in invariant_obligations
     }
+    required_obligations = tuple(sorted(
+        {
+            (obligation_id, candidate.item.hunter)
+            for candidate in ordered
+            for obligation_id in candidate.obligation_ids
+        },
+        key=lambda pair: _obligation_pair_order(
+            pair,
+            obligation_by_id=obligation_by_id,
+            candidates=ordered,
+        ),
+    ))
 
     eligible_critical_seeds = {
         candidate.seed_family for candidate in ordered if candidate.item.required
@@ -817,10 +831,91 @@ def _allocate_native_diverse(
         ))
         return True
 
+    def admit_obligation(
+        obligation_id: str,
+        hunter: str,
+        *,
+        quota: str,
+        reason: str,
+    ) -> _AdmissionCandidate | None:
+        return next((
+            candidate
+            for candidate in ordered
+            if candidate.item.hunter == hunter
+            and obligation_id in candidate.obligation_ids
+            and admit(candidate, quota=quota, reason=reason)
+        ), None)
+
+    # Run a bounded number of decisive source-derived invariants before broad
+    # chain exploration. Keep one slot available so a tiny budget cannot evict
+    # the best pre-existing critical capacity chain.
+    decisive_target = min(4, max(0, capacity - 1))
+    decisive_slots = 0
+    decisive_required_specialist_slots = 0
+    decisive_kinds: set[InvariantObligationKind] = set()
+    covered_obligations: set[tuple[str, str]] = set()
+    for obligation_id, hunter in required_obligations:
+        if decisive_slots >= decisive_target:
+            break
+        obligation = obligation_by_id.get(obligation_id)
+        if (
+            obligation is None
+            or obligation.kind in decisive_kinds
+            or _obligation_priority_score(obligation) < 100
+        ):
+            continue
+        candidates_for_obligation = [
+            candidate
+            for candidate in ordered
+            if candidate.item.hunter == hunter
+            and obligation_id in candidate.obligation_ids
+        ]
+        explicit = any(
+            _is_explicit_required_specialist(candidate)
+            for candidate in candidates_for_obligation
+        )
+        admitted = admit_obligation(
+            obligation_id,
+            hunter,
+            quota="required_specialist" if explicit else "decisive_obligation",
+            reason=(
+                "required cursor-transition specialist also closes a decisive "
+                "source-backed invariant"
+                if explicit else
+                "decisive source-derived invariant reserved before broad "
+                "critical-chain exploration"
+            ),
+        )
+        if admitted is None:
+            continue
+        covered_obligations.update(
+            (item_id, admitted.item.hunter)
+            for item_id in admitted.item.obligation_ids
+        )
+        decisive_kinds.add(obligation.kind)
+        decisive_slots += 1
+        decisive_required_specialist_slots += int(explicit)
+
     chain_slots = 0
-    chain_target = min(
+    base_chain_target = min(
         max(0, capacity - specialist_target),
         max(1, math.ceil(policy.max_hunter_sessions * NATIVE_CHAIN_SHARE)),
+    )
+    # Decisive obligations replace broad chain reservations instead of adding
+    # another prefix ahead of legacy high-risk work. This keeps established
+    # admission-rank envelopes stable while a tiny budget still retains one
+    # genuinely unselected critical chain.
+    critical_chain_floor = int(
+        len(selected) < capacity
+        and any(
+            candidate.item.work_id not in selected_ids
+            and _is_chain_critical(candidate)
+            for candidate in ordered
+        )
+    )
+    chain_target = max(
+        critical_chain_floor,
+        max(0, base_chain_target - decisive_slots),
     )
     seed_capped_critical: list[_AdmissionCandidate] = []
     for candidate in ordered:
@@ -850,17 +945,12 @@ def _allocate_native_diverse(
     # Existing complete chains remain protected. Obligation sessions replace
     # only unrelated lower-priority work, so a newly generated obligation
     # cannot evict a previously detected critical target.
-    obligation_required_slots = 0
-    covered_obligations: set[tuple[str, str]] = {
+    obligation_required_slots = decisive_slots
+    covered_obligations.update(
         (obligation_id, candidate.item.hunter)
         for candidate in selected
         for obligation_id in candidate.obligation_ids
-    }
-    required_obligations = tuple(dict.fromkeys(
-        (obligation_id, candidate.item.hunter)
-        for candidate in ordered
-        for obligation_id in candidate.obligation_ids
-    ))
+    )
     for obligation_id, hunter in required_obligations:
         pair = (obligation_id, hunter)
         if pair in covered_obligations:
@@ -871,26 +961,22 @@ def _allocate_native_diverse(
             if candidate.item.hunter == hunter
             and obligation_id in candidate.obligation_ids
         ]
-        admitted = next((
-            candidate
+        explicit = any(
+            _is_explicit_required_specialist(candidate)
             for candidate in candidates_for_obligation
-            if admit(
-                candidate,
-                quota=(
-                    "required_specialist"
-                    if _is_explicit_required_specialist(candidate)
-                    else "obligation_required"
-                ),
-                reason=(
-                    "required cursor-transition specialist also closes a "
-                    "source-backed invariant obligation"
-                    if _is_explicit_required_specialist(candidate)
-                    else
-                    "source-backed high-confidence invariant obligation reserved "
-                    "before unrelated lower-priority work"
-                ),
-            )
-        ), None)
+        )
+        admitted = admit_obligation(
+            obligation_id,
+            hunter,
+            quota="required_specialist" if explicit else "obligation_required",
+            reason=(
+                "required cursor-transition specialist also closes a "
+                "source-backed invariant obligation"
+                if explicit else
+                "source-backed high-confidence invariant obligation reserved "
+                "before unrelated lower-priority work"
+            ),
+        )
         if admitted is not None:
             covered_obligations.update(
                 (item_id, admitted.item.hunter)
@@ -917,7 +1003,7 @@ def _allocate_native_diverse(
         ):
             seed_slots += 1
 
-    required_specialist_slots = 0
+    required_specialist_slots = decisive_required_specialist_slots
     specialist_order = sorted(
         ordered,
         key=lambda candidate: (
@@ -1473,6 +1559,99 @@ def _candidate_order(
         candidate.seed_family,
         _work_tie_key(candidate.item),
     )
+
+
+def _obligation_pair_order(
+    pair: tuple[str, str],
+    *,
+    obligation_by_id: dict[str, InvariantObligation],
+    candidates: list[_AdmissionCandidate],
+) -> tuple[int, int, str, str]:
+    obligation_id, hunter = pair
+    obligation = obligation_by_id.get(obligation_id)
+    candidate_rank = next(
+        (
+            index
+            for index, candidate in enumerate(candidates)
+            if candidate.item.hunter == hunter
+            and obligation_id in candidate.obligation_ids
+        ),
+        len(candidates),
+    )
+    return (
+        -_obligation_priority_score(obligation),
+        candidate_rank,
+        obligation_id,
+        hunter,
+    )
+
+
+def _obligation_priority_score(obligation: InvariantObligation | None) -> int:
+    """Rank decisive invariants from generalized structural facts only."""
+    if obligation is None:
+        return 0
+    facts = {
+        key: value
+        for fact in obligation.structural_facts
+        for key, separator, value in (fact.partition("="),)
+        if separator
+    }
+    score = {
+        "absent": 35,
+        "partial": 25,
+        "unknown": 10,
+    }.get(facts.get("guard", ""), 0)
+    kind = obligation.kind
+    if kind is InvariantObligationKind.INTEGER_MEMORY_RELATION:
+        score += 40
+        score += 20 if facts.get("source_signed") == "1" else 0
+        score += 20 if facts.get("independent_write_bound") == "1" else 0
+        score += 15 if facts.get("narrowing_or_wrap") == "1" else 0
+        score += 20 if facts.get("checked_arithmetic") == "0" else 0
+    elif kind is InvariantObligationKind.CURSOR_LENGTH_RELATION:
+        score += 40
+        score += 30 if facts.get("checked_before_read") == "0" else 0
+        score += 20 if facts.get("checked_after_read") == "1" else 0
+        score += 15 if facts.get("check_result_controls_read") == "0" else 0
+        score += min(20, _nonnegative_int(facts.get("required_access_index")) * 5)
+        score += 10 if facts.get("cross_file") == "1" else 0
+    elif kind is InvariantObligationKind.FORMATTED_OUTPUT_EXPANSION:
+        score += 40
+        score += 25 if facts.get("bounded_api") == "0" else 0
+        score += 20 if facts.get("bound_matches_destination") == "0" else 0
+        score += 20 if _formatted_output_exceeds_capacity(facts) else 0
+        score += 10 if facts.get("return_checked") == "0" else 0
+    elif kind is InvariantObligationKind.STATEFUL_OUTPUT_CAPACITY:
+        score += 40
+        score += 35 if facts.get("transition_updates_guard_term") == "0" else 0
+        score += 20 if _unguarded_stateful_overhead(facts) else 0
+        score += 10 if facts.get("exact_fit_allowed") == "1" else 0
+    return score
+
+
+def _formatted_output_exceeds_capacity(facts: dict[str, str]) -> bool:
+    try:
+        return int(facts["maximum_output_chars"]) + int(
+            facts.get("terminator_bytes", "0")
+        ) > int(facts["capacity"])
+    except (KeyError, ValueError):
+        return False
+
+
+def _unguarded_stateful_overhead(facts: dict[str, str]) -> bool:
+    try:
+        return int(facts["subsequent_iteration_overhead"]) > int(
+            facts["guarded_subsequent_overhead"]
+        )
+    except (KeyError, ValueError):
+        return False
+
+
+def _nonnegative_int(value: str | None) -> int:
+    try:
+        return max(0, int(value or "0"))
+    except ValueError:
+        return 0
 
 
 def _capacity_evidence_score(chain: CapacityRiskChain) -> int:
