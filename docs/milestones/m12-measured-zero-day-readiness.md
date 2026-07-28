@@ -1,8 +1,9 @@
 # M12 — Measured zero-day readiness
 
-Status: M12.0 and M12.1 are complete. M12.2 completed its 12-run calibration
-pilot but failed the detection and median-cost gates, so M12.3 is blocked
-pending a focused M12.2.x recovery milestone.
+Status: M12.0 and M12.1 are complete. M12.2.x completed a fresh 12-run
+post-recovery calibration. Admission, family coverage, and cost gates passed,
+but aggregate detection, reportability, per-case recovery, and paired controls
+failed, so M12.3 remains blocked pending a narrower M12.2.x design.
 
 ## Goal
 
@@ -251,12 +252,13 @@ cases only.  Other missing families and the sealed holdout remain untouched.
 
 ## M12.2.x — Target-cluster invariant completion recovery
 
-Status: replanned after root-cause and reportable-candidate validation. The
-knowledge foundation is implemented locally; recovery PRs are not started. The
-M12.2 report measured 0/12 exact target detections despite target-covering
-admission in 8/12 runs. M12.3 remains blocked until this recovery passes. The
-detailed sequential design and per-target gates are in
-`docs/milestones/m12-2-generalized-knowledge-recovery.md`.
+Status: PRs 1-14 are merged and the post-recovery cohort is complete. Target
+Hunter admission improved to 12/12 and median input fell below 1,500,000, but
+the cohort measured 5/12 target Hunter detections, 1/12 reportable detections,
+2/4 per-case recovery, and 1/4 complete differential pairs. M12.3 remains
+blocked. The implementation history and current result are in
+`docs/milestones/m12-2-generalized-knowledge-recovery.md` and
+`docs/reports/m12-2-calibration-pilot.md`.
 
 ### Single objective
 
