@@ -146,6 +146,30 @@ def test_small_multi_chain_context_stays_in_one_packet(tmp_path: Path) -> None:
     assert cache.stats()["sharded_work_items"] == 0
 
 
+def test_explicit_focus_chain_survives_stale_target_signal_mapping(
+    tmp_path: Path,
+) -> None:
+    repo, analysis, work = _fixture(tmp_path, rationale_bytes=9_000)
+    focused = work.model_copy(update={
+        "target_signal_ids": ("sig-unrelated-after-coalescing",),
+        "focus_chain_ids": (work.focus_chain_ids[0],),
+    })
+    cache = SharedContextCache(
+        tmp_path / "cache-explicit-focus",
+        repo,
+        source_snapshot=HASH_A,
+        analysis=analysis,
+    )
+
+    shards = cache.get_shards(focused)
+
+    assert len(shards) == 1
+    assert [
+        chain["chain_id"] for chain in shards[0]["capacity_risk_chains"]
+    ] == [focused.focus_chain_ids[0]]
+    assert shards[0]["truncation"]["evidence_excerpt_guaranteed"] is True
+
+
 def test_capacity_context_preserves_ranked_formula_evidence(tmp_path: Path) -> None:
     repo, analysis, work = _fixture(tmp_path, rationale_bytes=32)
     first_chain = analysis["graph"]["capacity_risk_chains"][0]
