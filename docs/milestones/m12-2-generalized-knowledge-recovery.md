@@ -1,6 +1,9 @@
 # M12.2.x — Generalized knowledge and missed-target recovery
 
-Status: PRs 1-7 merged; decisive Hunter admission recovery in PR 8.
+Status: PRs 1-14 merged. The post-recovery four-by-three cohort is complete,
+but M12.3 remains blocked by detection, reportability, and paired-control
+gates. The immutable result is recorded in
+`docs/reports/m12-2-calibration-pilot.md`.
 
 ## Objective
 
@@ -184,6 +187,32 @@ Acceptance:
   cannot evict the best pre-existing complete critical chain;
 - the admission contract is versioned as `c-budget-v11`, and all protected
   deterministic detection gates remain green.
+
+### PRs 9-14 — Calibration integrity recovery
+
+The first post-PR-8 campaigns exposed execution and evidence-integrity defects
+that made a decisive cohort invalid. These PRs did not add a vulnerability
+family or increase a budget:
+
+1. adjudicate structural root equivalence without repository identities;
+2. prioritize the specialist required by the admitted semantic obligation;
+3. bound per-work Hunter input and give every admitted shard target a terminal
+   disposition;
+4. preserve explicit focus-chain context across packet truncation;
+5. prevent generated PoC paths from entering legacy source dataflow; and
+6. terminate the complete Codex process group after a transport timeout.
+
+All six PRs passed the full protected detection matrix before merge. PR 14 also
+recovered from a real subscription timeout in the accepted cohort without an
+orphan process or incomplete receipt.
+
+### PR 15 — Post-recovery calibration report
+
+The accepted cohort admitted all four target Hunters in 3/3 repetitions and
+met both token gates, but produced 5/12 target Hunter detections and 1/12
+reportable detections. Only the Mini-XML vulnerable/fixed differential pair
+passed completely. The release decision is `stop_and_design_m12_2_x`; this PR
+publishes that result and makes no product-policy change.
 
 ## Stop and rollback conditions
 

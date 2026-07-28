@@ -1,90 +1,113 @@
-# M12.2 calibration pilot release report
+# M12.2 calibration recovery release report
 
-Status: completed with failed release gates. M12.3 is blocked.
+Status: the post-recovery calibration is complete with failed release gates.
+M12.3 remains blocked.
 
 ## Immutable cohort
 
-- Cohort: `cohort_73223b4875a348b8`
-- Snapshot: `sha256:7ff07fc61631d7bedc78638a6a46873e25626b3454920c6f9b852a533e3400f8`
-- Catalog: `sha256:4a238160877b0d9bc66f14df3841ab8b72a21cec69db663bc76f09ae11947e96`
-- Metrics: `sha256:b93d6e5ae4af0f8f41a52ba102b0ea88e1efcef9d7e190185702deb9f7895460`
+- Cohort: `cohort_1ce8e6d4043746ab`
+- Snapshot: `sha256:c73a52b952e79b917e5f1d5cb6c959a6b9938c5219966ebd80468286b172d4fa`
+- Catalog: `sha256:4deabae6642c31c267473308bd85ef9ee6700a86a4eab0e9b9e447e41020a9aa`
+- Plan: `sha256:0473954ece73178d53ca4adba3fd88cad32ca20799fe683863994f55d588db00`
+- Metrics: `sha256:3d700f6326a0a6ddff11315b8650c0c39da7084b1aed471d80c20f02de2cd17d`
+- Knowledge metrics: `sha256:afbe371da54adde4d4e517fb029b3a3141ccb5cfc71819dde02fd3b2dc7cbddb`
+- Differential controls: `sha256:5476dd7a902f8d90a8319c82773743ae3548626761c2e15c853c96332b79ddfe`
 - Model: `gpt-5.6-sol` through the Codex subscription adapter
 - Repetitions: three independent runs for each of four calibration cases
 - Valid receipts: 12 of 12
 - Infrastructure failures in the accepted cohort: 0
 
-The accepted campaign used one serialized Codex transport call at a time. This
-removed the intermittent login failure seen in the discarded campaign without
-changing session, token, wall-clock, context, ranking, prompt, or detection
-policy. Every run was frozen before the calibration oracle was opened.
+Every discovery run used a unique run ID and state database. Each run was
+frozen before the calibration oracle was opened. A real Codex transport timeout
+occurred once and recovered without leaving an orphan process or invalidating
+the run. No abandoned predecessor cohort was reused.
 
 ## Gate result
 
 | Gate | Actual | Required | Result |
 |---|---:|---:|---|
 | `valid_run_rate` | 12/12 (100%) | 100% | PASS |
-| target Hunters admitted in at least 2/3 runs | 3/4 | at least 3/4 | PASS |
-| `hunter_detection_at_12` | 0/12 (0%) | at least 75% | FAIL |
-| `reportable_detection_at_12` | 0/12 (0%) | at least 50% | FAIL |
-| supported families with a target detection | 0/3 | 3/3 | FAIL |
-| median input tokens including cache | 1,825,891 | at most 1,500,000 | FAIL |
-| maximum input tokens including cache | 1,978,866 | at most 2,000,000 | PASS |
+| target Hunters admitted in at least 2/3 runs | 4/4 | at least 3/4 | PASS |
+| `hunter_detection_at_12` | 5/12 (41.67%) | at least 75% | FAIL |
+| `reportable_detection_at_12` | 1/12 (8.33%) | at least 50% | FAIL |
+| supported families with a target detection | 3/3 | 3/3 | PASS |
+| cases with target detection in at least 2/3 runs | 2/4 | 4/4 | FAIL |
+| paired vulnerable/fixed controls | 1/4 | 4/4 | FAIL |
+| median input tokens including cache | 1,472,356 | at most 1,500,000 | PASS |
+| maximum input tokens including cache | 1,479,682 | at most 2,000,000 | PASS |
+
+The campaign retained 17,748,988 model tokens across input, cache reads, and
+output. Because only one target became reportable, tokens per reportable target
+were also 17,748,988.
 
 ## Case result
 
-| Case | Historical target | Target admission | Target Hunter detection | Target reportable |
-|---|---|---:|---:|---:|
-| `case_793a704d3845b63e` | WavPack signed sample-rate under-allocation | 2/3 | 0/3 | 0/3 |
-| `case_82b3a769de36034c` | Mini-XML unbounded float formatting | 3/3 | 0/3 | 0/3 |
-| `case_e9366d85b7c31f73` | libcoap option extension OOB read | 0/3 | 0/3 | 0/3 |
-| `case_f521543734c7e34a` | uriparser ampersand capacity omission | 3/3 | 0/3 | 0/3 |
+| Case | Historical target | Target admission | Target Hunter detection | Target reportable | Differential pair |
+|---|---|---:|---:|---:|---:|
+| `case_793a704d3845b63e` | WavPack signed sample-rate under-allocation | 3/3 | 2/3 | 0/3 | FAIL |
+| `case_82b3a769de36034c` | Mini-XML unbounded float formatting | 3/3 | 2/3 | 1/3 | PASS |
+| `case_e9366d85b7c31f73` | libcoap option extension OOB read | 3/3 | 1/3 | 0/3 | FAIL |
+| `case_f521543734c7e34a` | uriparser ampersand capacity omission | 3/3 | 0/3 | 0/3 | FAIL |
 
-The Hunters produced 29 canonical candidates, including five candidates in
-the scanner's `reportable` state. None matched both the sealed oracle entry and
-sink ranges. Those five are therefore recorded as non-target, unadjudicated
-candidates and do not count as calibration detections or precision evidence.
-In particular, uriparser produced a separately reportable signed-size overflow
-in query composition, not the historical one-byte ampersand accounting bug.
+These values use the unchanged benchmark reducer. Findings that described the
+right weakness but did not satisfy the sealed location and Hunter contract are
+not counted as target detections.
 
 ## Diagnosis
 
-The result separates admission from reasoning:
+The recovery fixed admission and cost, but did not close the full
+finding-to-reportable path:
 
-- WavPack, Mini-XML, and uriparser received target-covering work in at least
-  two repetitions but the Hunters reasoned toward different bugs or no bug.
-- libcoap never admitted a work item covering both `src/pdu.c` and
-  `src/option.c`, so its failure begins in routing/admission.
-- Most runs consumed close to the two-million-token ceiling even when they
-  missed the target. The median exceeded the release budget by 325,891 tokens.
+- All four target Hunters were admitted in all three repetitions. Ranking and
+  session admission are no longer the primary blocker.
+- Seven candidates matched the sealed target oracle after freeze. All seven
+  were adjudicated `real`; six remained `review_inconclusive` and only one
+  became reportable. WavPack lacked a validated actual-target reproduction,
+  two Mini-XML repetitions retained reproduction or review uncertainty, and
+  libcoap required an input-consuming harness that the experiment plan could
+  not synthesize.
+- The uriparser Hunter described the omitted query separator in all three
+  repetitions. It attributed the terminal write to `src/UriEscape.c`, while the
+  sealed oracle identifies the missing capacity guard in `src/UriQuery.c` as
+  the sink. The reducer therefore correctly scored 0/3 under its exact current
+  contract. This is a root-cause/terminal-write provenance mismatch, not
+  evidence that the candidate was absent.
+- The paired controls were fully valid only for Mini-XML. WavPack's vulnerable
+  side reproduced but the fixed-side expected result did not; libcoap and
+  uriparser did not reproduce on their vulnerable prepared images. These
+  control failures remain separate from Hunter detections and block promotion.
 
-This is not an infrastructure failure and retrying the same run IDs would be
-invalid. The coherent product gap is oracle-blind invariant completion inside
-already selected target file clusters: capacity/state pairs and parser
-length-before-read relations are not being closed before budget is spent on
-unrelated high-risk sinks. A recovery milestone must address that gap on the
-calibration corpus only and must also reduce deferred, non-target sessions.
+The failures are downstream of ranking and are not one safe change: target
+location equivalence, actual-target experiment synthesis, reviewer consensus,
+and prepared differential controls have distinct contracts. They must not be
+collapsed into a reportability shortcut.
 
 ## Decision
 
 Decision: `stop_and_design_m12_2_x`.
 
-No calibration case is promoted to the protected set, because none achieved a
-target detection in two of three repetitions. M12.3, the negative corpus, and
-the sealed holdout remain unopened. Existing protected detections must pass the
-normal release matrix before this report is merged.
+No new calibration case is promoted to the protected set. M12.3 is not started
+because both detection thresholds and the paired-control gate failed. The next
+work must be a narrowly scoped M12.2.x design that preserves exact oracle
+isolation, current budgets, existing protected recall, and fail-closed
+reportability.
 
 ## Reproduction
 
-After a 12-run cohort is closed, the report is regenerated with:
+After the 12-run cohort is closed, verify and evaluate it with:
 
 ```console
+python -m benchmarks.m12.calibration_cohort verify \
+  --plan /path/to/cohort/cohort-plan.json
+python -m benchmarks.m12.calibration_cohort evaluation-ready \
+  --plan /path/to/cohort/cohort-plan.json
 python -m benchmarks.m12.calibration_evaluation \
   --plan /path/to/cohort/cohort-plan.json \
-  --output evaluation-v2
+  --controls /path/to/cohort/differential-controls.json \
+  --output /path/to/cohort/evaluation
 ```
 
-The evaluator verifies the cohort freeze first, copies exact-hash evaluator
-dependencies into the self-contained cohort evidence root, binds generated
-adjudications to the original oracle SHA-256, and emits `metrics.json`,
-`metrics.md`, `release-report.json`, and `release-report.md` without modifying
-the frozen discoveries.
+The evaluator verifies the cohort freeze first, binds generated adjudications
+to the sealed oracle SHA-256, and emits `metrics.json`, `metrics.md`,
+`release-report.json`, and `release-report.md` without modifying frozen
+discoveries.
