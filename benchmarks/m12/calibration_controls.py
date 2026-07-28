@@ -7,6 +7,7 @@ import asyncio
 import hashlib
 import json
 import re
+import shlex
 import tarfile
 from dataclasses import asdict
 from pathlib import Path, PurePosixPath
@@ -34,6 +35,9 @@ from vulnhunt_agent.sandbox import ContainerExecutor
 
 CONTROL_POLICY = "calibration-differential-controls-v1"
 CONTROL_SCHEMA = Path(__file__).with_name("schemas") / f"{CONTROL_POLICY}.schema.json"
+PREPARED_BUILD_COMPATIBILITY_DEFINITIONS = (
+    "-DCOAP_REQUEST_CODE_GET=COAP_REQUEST_GET",
+)
 
 VariantRunner = Callable[
     [Path, str, Mapping[str, Any], bytes | None, int],
@@ -253,7 +257,12 @@ async def _run_variant(
         }
         if spec["kind"] == "compiled-driver":
             await sandbox.write_file("control.c", str(spec["source"]))
-            compile_argv = _substitute(spec["compile_argv"], substitutions)
+            compile_argv = _prepared_compile_argv(
+                spec["compile_argv"],
+                substitutions,
+                await _prepared_include_directories(sandbox),
+                await _prepared_link_arguments(sandbox, artifact),
+            )
             compiled = await sandbox.exec_argv(compile_argv)
             if compiled.exit_code != 0:
                 raise BenchmarkContractError(
@@ -392,6 +401,91 @@ def _substitute(values: Iterable[str], substitutions: Mapping[str, str]) -> tupl
             raise BenchmarkContractError("differential control has an unknown placeholder")
         out.append(value)
     return tuple(out)
+
+
+def _prepared_compile_argv(
+    values: Iterable[str],
+    substitutions: Mapping[str, str],
+    include_directories: Iterable[str],
+    link_arguments: Iterable[str],
+) -> tuple[str, ...]:
+    """Expose generated public headers from the sealed prepared build."""
+    return (
+        *_substitute(values, substitutions),
+        *("-I" + path for path in sorted(set(include_directories))),
+        *PREPARED_BUILD_COMPATIBILITY_DEFINITIONS,
+        *link_arguments,
+    )
+
+
+async def _prepared_include_directories(
+    sandbox: ContainerExecutor,
+) -> tuple[str, ...]:
+    directories: set[str] = set()
+    for root in ("/code/include", "/opt/vulnhunt/build/include"):
+        result = await sandbox.exec_argv(("find", root, "-type", "d"))
+        if result.exit_code != 0:
+            continue
+        directories.update(
+            line.strip()
+            for line in result.stdout.splitlines()
+            if line.strip().startswith(root)
+        )
+    return tuple(sorted(directories))
+
+
+async def _prepared_link_arguments(
+    sandbox: ContainerExecutor, artifact: str
+) -> tuple[str, ...]:
+    found = await sandbox.exec_argv((
+        "find",
+        "/opt/vulnhunt/build",
+        "-type",
+        "f",
+        "-name",
+        "link.txt",
+    ))
+    if found.exit_code != 0:
+        return ()
+    commands: list[str] = []
+    for path in sorted(line.strip() for line in found.stdout.splitlines() if line.strip()):
+        loaded = await sandbox.exec_argv(("cat", path))
+        if loaded.exit_code == 0:
+            commands.extend(loaded.stdout.splitlines())
+    return _link_arguments_from_commands(commands, PurePosixPath(artifact).name)
+
+
+def _link_arguments_from_commands(
+    commands: Iterable[str], artifact_name: str
+) -> tuple[str, ...]:
+    candidates: list[tuple[str, ...]] = []
+    for command in commands:
+        try:
+            tokens = shlex.split(command)
+        except ValueError:
+            continue
+        positions = [
+            index
+            for index, token in enumerate(tokens)
+            if PurePosixPath(token).name == artifact_name
+        ]
+        for position in positions:
+            dependencies = tuple(
+                token
+                for token in tokens[position + 1 :]
+                if _is_link_dependency(token)
+            )
+            if dependencies:
+                candidates.append(dependencies)
+    return min(candidates, key=lambda item: (len(item), item)) if candidates else ()
+
+
+def _is_link_dependency(value: str) -> bool:
+    return (
+        value.startswith(("-l", "-L", "-Wl,"))
+        or value in {"-pthread", "-static"}
+        or PurePosixPath(value).suffix in {".a", ".so", ".dylib"}
+    )
 
 
 def _validate(payload: Any) -> None:

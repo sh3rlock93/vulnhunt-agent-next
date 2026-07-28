@@ -9,6 +9,8 @@ import pytest
 
 from benchmarks.m12.calibration import load_calibration_catalog
 from benchmarks.m12.calibration_controls import (
+    _link_arguments_from_commands,
+    _prepared_compile_argv,
     _validate,
     _variant_passed,
     assess_differential_controls,
@@ -216,6 +218,39 @@ def test_differential_control_contract_requires_four_complete_pairs() -> None:
     controls["run"][0]["variant"] = "fixed"
     with pytest.raises(BenchmarkContractError, match="duplicated"):
         _validate(controls)
+
+
+def test_control_compile_exposes_generated_prepared_headers() -> None:
+    argv = _prepared_compile_argv(
+        ("cc", "-I/code/include", "{source}", "{artifact}"),
+        {"source": "/workspace/control.c", "artifact": "/build/libcase.a"},
+        ("/opt/vulnhunt/build/include/case", "/opt/vulnhunt/build/include"),
+        ("/usr/lib/libdependency.so",),
+    )
+
+    assert argv == (
+        "cc",
+        "-I/code/include",
+        "/workspace/control.c",
+        "/build/libcase.a",
+        "-I/opt/vulnhunt/build/include",
+        "-I/opt/vulnhunt/build/include/case",
+        "-DCOAP_REQUEST_CODE_GET=COAP_REQUEST_GET",
+        "/usr/lib/libdependency.so",
+    )
+
+
+def test_control_compile_recovers_static_target_link_dependencies() -> None:
+    arguments = _link_arguments_from_commands(
+        (
+            "cc object.o -o unrelated libother.a -lm",
+            "cc object.o -o control libcase.a /usr/lib/libssl.so "
+            "/usr/lib/libcrypto.so",
+        ),
+        "libcase.a",
+    )
+
+    assert arguments == ("/usr/lib/libssl.so", "/usr/lib/libcrypto.so")
 
 
 def test_variant_pass_requires_two_reproductions_and_a_clean_fixed_control() -> None:
