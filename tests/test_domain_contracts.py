@@ -115,6 +115,40 @@ def test_legacy_confirmed_string_never_becomes_reproduced_or_reportable() -> Non
     assert "independent reproduction evidence is missing" in decision.reasons
 
 
+def test_legacy_poc_paths_are_not_imported_as_source_dataflow() -> None:
+    legacy = {
+        "title": "Stack overflow",
+        "type": "buffer_overflow",
+        "status": "confirmed",
+        "entry_file": "src/format.c",
+        "entry_line": 10,
+        "sink_file": "src/format.c",
+        "sink_line": 20,
+        "files_touched": [
+            "src/format.c",
+            "src/value.c",
+            "/workspace/poc_overflow.c",
+            "poc_overflow.c",
+            "../outside.c",
+            "src/value.c",
+        ],
+        "description": "Unbounded formatted output",
+        "attack": "Control the formatted value",
+        "poc_file": "poc_overflow.c",
+        "exec_output": "AddressSanitizer: stack-buffer-overflow",
+    }
+
+    converted = candidate_from_legacy(
+        legacy,
+        run_id="run-1",
+        task_key="src/format.c::buffer-overflow",
+    )
+
+    assert tuple(location.path for location in converted.dataflow) == (
+        "src/value.c",
+    )
+
+
 def test_strict_policy_promotes_only_snapshot_matched_reproduction() -> None:
     finding = candidate(
         state=FindingState.REVIEWER_VERIFIED,
