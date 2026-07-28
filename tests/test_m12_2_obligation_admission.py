@@ -562,6 +562,55 @@ def test_decisive_reserve_is_balanced_across_obligation_kinds() -> None:
     }
 
 
+def test_formatted_output_decisive_slot_prefers_memory_specialist() -> None:
+    obligation = _obligation(
+        19,
+        InvariantObligationKind.FORMATTED_OUTPUT_EXPANSION,
+        (
+            "c-bounds-integers",
+            "c-injection-format",
+            "c-memory-lifetime",
+        ),
+    ).model_copy(update={
+        "structural_facts": (
+            "guard=absent",
+            "capacity=255",
+            "bounded_api=0",
+            "bound_matches_destination=0",
+            "maximum_output_chars=317",
+            "terminator_bytes=1",
+            "return_checked=0",
+        ),
+    })
+    work = tuple(
+        _work(
+            index,
+            "src/format.c",
+            hunter,
+            obligation_ids=(obligation.obligation_id,),
+        )
+        for index, hunter in enumerate(obligation.required_hunters, start=1)
+    )
+
+    forward = allocate_work_items(
+        work,
+        BudgetPolicy(max_hunter_sessions=2, max_retries_per_work_item=0),
+        invariant_obligations=(obligation,),
+        native_full_scan=True,
+    )
+    reverse = allocate_work_items(
+        tuple(reversed(work)),
+        BudgetPolicy(max_hunter_sessions=2, max_retries_per_work_item=0),
+        invariant_obligations=(obligation,),
+        native_full_scan=True,
+    )
+
+    expected = next(item for item in work if item.hunter == "c-memory-lifetime")
+    assert forward.admitted_work_ids[0] == expected.work_id
+    assert reverse.admitted_work_ids == forward.admitted_work_ids
+    assert forward.decisions[0].quota == "decisive_obligation"
+
+
 def test_decisive_reserve_replaces_broad_chain_slots_without_shifting_high_risk() -> None:
     obligation = _obligation(
         18,
