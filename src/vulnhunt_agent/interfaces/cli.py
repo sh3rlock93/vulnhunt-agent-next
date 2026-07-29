@@ -13,6 +13,11 @@ from ..domain.states import FindingState
 from ..infrastructure.artifacts import ArtifactStore
 from ..infrastructure.sqlite_repository import SqliteRepository
 from ..reporting.service import StrictReportService
+from ..scheduling import (
+    CUSTOM_PROFILE,
+    HUNTER_BUDGET_PROFILE_NAMES,
+    resolve_hunter_budget_config,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -54,7 +59,18 @@ def build_parser() -> argparse.ArgumentParser:
         default="auto",
     )
     scan.add_argument("--custom-image", default="")
-    scan.add_argument("--max-hunter-sessions", type=int, default=100)
+    scan.add_argument(
+        "--hunter-budget-profile",
+        choices=HUNTER_BUDGET_PROFILE_NAMES,
+        default=CUSTOM_PROFILE,
+        help="named Hunter budget; deep-16 adds bounded post-12 coverage",
+    )
+    scan.add_argument(
+        "--max-hunter-sessions",
+        type=int,
+        default=None,
+        help="custom-profile session limit (default: 100)",
+    )
     scan.add_argument(
         "--scope-mode",
         choices=("full", "files", "component"),
@@ -214,6 +230,23 @@ def main(argv: Sequence[str] | None = None) -> int:
     return 2
 
 
+def _load_hunter_budget_config(args) -> dict:
+    if (
+        args.hunter_budget_profile != CUSTOM_PROFILE
+        and args.max_hunter_sessions is not None
+    ):
+        raise ValueError(
+            "--max-hunter-sessions can only be used with "
+            "--hunter-budget-profile custom"
+        )
+    raw: dict = {
+        "hunter_budget_profile": args.hunter_budget_profile,
+    }
+    if args.max_hunter_sessions is not None:
+        raw["budget_max_hunter_sessions"] = args.max_hunter_sessions
+    return resolve_hunter_budget_config(raw)
+
+
 async def _run_scan(args) -> int:
     from ..core import settings as app_settings
     from ..core.events import EventBus
@@ -232,6 +265,7 @@ async def _run_scan(args) -> int:
     store = RunStore(args.run_root.resolve() / run_id)
     model_id = args.model_id or app_settings.DEFAULT_MODEL.model_id
     scope_config = _load_scan_scope_config(args)
+    budget_config = _load_hunter_budget_config(args)
     store.save_config({
         "repo_source": args.repo,
         "repo_path": str(repo),
@@ -245,11 +279,7 @@ async def _run_scan(args) -> int:
         "custom_image": args.custom_image,
         "max_hunters_parallel": 3,
         "hunter_max_iterations": 100,
-        "budget_max_hunter_sessions": args.max_hunter_sessions,
-        "budget_max_input_tokens": 2_000_000,
-        "budget_max_output_tokens": 200_000,
-        "budget_max_wall_clock_minutes": 60,
-        "budget_max_retries_per_work_item": 1,
+        **budget_config,
         "provider_preflight_model_probe": args.provider_model_probe,
         **scope_config,
     })

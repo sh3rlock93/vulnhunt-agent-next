@@ -13,7 +13,7 @@ import json
 import uuid
 from dataclasses import asdict
 from pathlib import Path
-from typing import Awaitable, Callable
+from typing import Any, Awaitable, Callable, Mapping
 
 from ...analysis import CONTEXT_SHARD_POLICY, SharedContextCache
 from ...agents.hunter import (
@@ -33,7 +33,7 @@ from ...core.provider_preflight import (
 )
 from ...core.run_store import RunStore
 from ...core.v2_run import advance_run, assert_source_snapshot_current
-from ...domain.schemas import BudgetPolicy, BudgetUsage
+from ...domain.schemas import BudgetPolicy, BudgetUsage, HunterWorkItem
 from ...domain.states import RunState
 from ...infrastructure.sqlite_repository import (
     SqliteRepository,
@@ -44,11 +44,14 @@ from ...sandbox import base_image_for, language_of
 from ...scheduling import (
     BudgetController,
     BudgetedLLMClient,
+    DEEP_16_PROFILE,
     RecyclableAdmissionLedger,
     adaptive_iteration_limit,
     adaptive_output_token_limit,
     allocate_native_work_plan,
+    budget_profile_artifact,
     build_native_work_plan,
+    resolve_hunter_budget_config,
     total_usage,
 )
 from .. import finalize
@@ -59,7 +62,7 @@ from .hunters import flatten, run_hunters
 
 
 async def run_hunt(store: RunStore, bus: EventBus) -> None:
-    cfg = store.load_config() or {}
+    cfg = resolve_hunter_budget_config(store.load_config() or {})
     prepare = store.load_step("sandbox_prepare") or {}
     source_snapshot = assert_source_snapshot_current(store)
     advance_run(store, RunState.HUNTING, reason="Hunter execution started")
@@ -70,6 +73,7 @@ async def run_hunt(store: RunStore, bus: EventBus) -> None:
     max_parallel = int(cfg.get("max_hunters_parallel", 3))
     max_iter = int(cfg.get("hunter_max_iterations", 100))
     budget_policy = _budget_policy(cfg)
+    budget_profile = budget_profile_artifact(cfg)
 
     prepared_image = prepare.get("image")
     sandbox_enabled = prepare.get("status") == "ready" and bool(prepared_image)
@@ -151,6 +155,7 @@ async def run_hunt(store: RunStore, bus: EventBus) -> None:
         "cursor_proof_policy": CURSOR_PROOF_POLICY,
         "cursor_proof_retry_limit": CURSOR_PROOF_RETRY_LIMIT,
         "iteration_tiers": [6, 18, 40],
+        "budget_profile": budget_profile,
         "scan_mode": incremental.get("mode", "full"),
         "scan_scope": scan_scope,
         "scan_base_ref": incremental.get("base_ref", ""),
@@ -254,11 +259,12 @@ async def run_hunt(store: RunStore, bus: EventBus) -> None:
     pending_ids = {
         task.work_id for task in queue.tasks if task.status == "pending"
     }
+    consumed_sessions = sum(item.sessions for item in persisted_usage)
     admission_plan = allocate_native_work_plan(
         native_work_plan,
         budget_policy,
         eligible_work_ids=pending_ids,
-        consumed_sessions=sum(item.sessions for item in persisted_usage),
+        consumed_sessions=consumed_sessions,
         native_full_scan=(
             language_of(env) == "c"
             and incremental.get("mode", "full") == "full"
@@ -303,6 +309,13 @@ async def run_hunt(store: RunStore, bus: EventBus) -> None:
         "decisions": [asdict(item) for item in allocation.decisions],
         "ranking": [asdict(item) for item in allocation.ranking],
         "capacity_units": [asdict(item) for item in allocation.capacity_units],
+        "deep_extension": _deep_extension_metrics(
+            budget_profile,
+            session_indices={},
+            finding_count=0,
+            high_risk_findings=[],
+            early_stopped=False,
+        ),
     }
     work_input_budget = admission_plan.input_budget
     hunt_plan["budget_allocation"]["input_fairness"] = asdict(work_input_budget)
@@ -352,11 +365,11 @@ async def run_hunt(store: RunStore, bus: EventBus) -> None:
         budget_policy,
         persisted_usage,
         work_input_budget=work_input_budget,
+        soft_input_token_stop=int(cfg["budget_soft_input_token_stop"]),
     )
     if not admitted_ids:
-        hunt_plan["budget_allocation"][
-            "admission_ledger"
-        ] = admission_ledger.snapshot()
+        no_work_ledger = admission_ledger.snapshot()
+        hunt_plan["budget_allocation"]["admission_ledger"] = no_work_ledger
         store.save_step("hunt_plan", hunt_plan)
         _save_summary(
             store,
@@ -401,8 +414,21 @@ async def run_hunt(store: RunStore, bus: EventBus) -> None:
         )),
         budget_policy.max_retries_per_work_item + 1,
     )
+    session_indices = {
+        work_id: consumed_sessions + index
+        for index, work_id in enumerate(
+            allocation.admitted_work_ids,
+            start=1,
+        )
+    }
+    extension_finding_count = 0
+    extension_high_risk_findings: list[dict[str, object]] = []
+    standard_finding_keys: set[str] = set()
+    extension_finding_keys: set[str] = set()
+    extension_early_stopped = False
 
     async def execute_work(task: HuntTask) -> str | None:
+        nonlocal extension_finding_count
         if task.status in {"done", "failed", "budget_deferred"}:
             return None
         item = by_work_id.get(task.work_id)
@@ -490,6 +516,35 @@ async def run_hunt(store: RunStore, bus: EventBus) -> None:
             if failed:
                 raise RuntimeError(failed[0] or "Hunter work failed")
             all_findings, origins = flatten(findings_by_cat)
+            session_index = session_indices.get(task.work_id, 0)
+            standard_boundary = int(budget_profile["standard_session_boundary"])
+            if budget_profile["name"] == DEEP_16_PROFILE:
+                finding_pairs = [
+                    (_finding_identity(finding), finding)
+                    for finding in all_findings
+                ]
+                if session_index <= standard_boundary:
+                    standard_finding_keys.update(key for key, _ in finding_pairs)
+                else:
+                    incremental_findings = [
+                        finding
+                        for key, finding in finding_pairs
+                        if key not in standard_finding_keys
+                        and key not in extension_finding_keys
+                    ]
+                    extension_finding_keys.update(
+                        key
+                        for key, _ in finding_pairs
+                        if key not in standard_finding_keys
+                    )
+                    extension_finding_count += len(incremental_findings)
+                    extension_high_risk_findings.extend(
+                        _high_risk_extension_findings(
+                            incremental_findings,
+                            item=item,
+                            session_index=session_index,
+                        )
+                    )
             if not all_findings:
                 await _stop_heartbeat(heartbeat_stop, heartbeat)
                 if heartbeat_errors:
@@ -570,13 +625,45 @@ async def run_hunt(store: RunStore, bus: EventBus) -> None:
                 max_parallel=max_parallel,
                 budget_controller=budget_controller,
                 run_work=run_work,
+                session_indices=session_indices,
+                standard_session_boundary=int(
+                    budget_profile["standard_session_boundary"]
+                ),
             )
             if not promoted:
-                borrowed_retry = admission_ledger.borrow_unused_retry()
-                if borrowed_retry:
-                    promoted.append(borrowed_retry)
+                ledger_state = admission_ledger.snapshot()
+                if _should_stop_deep_extension(
+                    budget_profile,
+                    session_indices=session_indices,
+                    high_risk_findings=extension_high_risk_findings,
+                    has_deferred_work=bool(ledger_state["waiting_work_ids"]),
+                    retry_needed=bool(ledger_state["retry_needed"]),
+                ):
+                    extension_early_stopped = True
+                    bus.emit(
+                        "hunter_deep_extension_stopped",
+                        profile=budget_profile["name"],
+                        standard_session_boundary=budget_profile[
+                            "standard_session_boundary"
+                        ],
+                        executed_extension_sessions=sum(
+                            session_index
+                            > int(budget_profile["standard_session_boundary"])
+                            for session_index in session_indices.values()
+                        ),
+                        reason="no_new_high_risk_candidate",
+                    )
+                else:
+                    borrowed_retry = admission_ledger.borrow_unused_retry()
+                    if borrowed_retry:
+                        promoted.append(borrowed_retry)
             batch = []
             for work_id in promoted:
+                if work_id not in session_indices:
+                    session_indices[work_id] = max(
+                        session_indices.values(),
+                        default=consumed_sessions,
+                    ) + 1
                 task = task_by_id[work_id]
                 qstore.requeue_budget_deferred(task)
                 item = by_work_id[work_id]
@@ -590,9 +677,20 @@ async def run_hunt(store: RunStore, bus: EventBus) -> None:
     except asyncio.CancelledError:
         hunt_plan["budget_allocation"]["recycled_slots"] = len(recycled_work_ids)
         hunt_plan["budget_allocation"]["recycled_work_ids"] = recycled_work_ids
-        hunt_plan["budget_allocation"][
-            "admission_ledger"
-        ] = admission_ledger.snapshot()
+        interrupted_ledger = admission_ledger.snapshot()
+        hunt_plan["budget_allocation"]["admission_ledger"] = interrupted_ledger
+        hunt_plan["budget_allocation"]["deep_extension"] = (
+            _deep_extension_metrics(
+                budget_profile,
+                session_indices=session_indices,
+                finding_count=extension_finding_count,
+                high_risk_findings=extension_high_risk_findings,
+                early_stopped=extension_early_stopped,
+                started_work_ids=set(
+                    interrupted_ledger["provider_started_work_ids"]
+                ),
+            )
+        )
         hunt_plan["context_cache"] = context_cache.stats()
         hunt_plan["context_cache_keys"] = {
             work_id: context["cache_key"]
@@ -636,7 +734,16 @@ async def run_hunt(store: RunStore, bus: EventBus) -> None:
     )
     hunt_plan["budget_allocation"]["recycled_slots"] = len(recycled_work_ids)
     hunt_plan["budget_allocation"]["recycled_work_ids"] = recycled_work_ids
-    hunt_plan["budget_allocation"]["admission_ledger"] = admission_ledger.snapshot()
+    final_ledger = admission_ledger.snapshot()
+    hunt_plan["budget_allocation"]["admission_ledger"] = final_ledger
+    hunt_plan["budget_allocation"]["deep_extension"] = _deep_extension_metrics(
+        budget_profile,
+        session_indices=session_indices,
+        finding_count=extension_finding_count,
+        high_risk_findings=extension_high_risk_findings,
+        early_stopped=extension_early_stopped,
+        started_work_ids=set(final_ledger["provider_started_work_ids"]),
+    )
     hunt_plan["budget_deferred_work_ids"] = final_deferred_ids
     hunt_plan["budget_deferred_critical_work_ids"] = [
         work_id for work_id in final_deferred_ids if by_work_id[work_id].required
@@ -712,12 +819,130 @@ def _tasks_in_admission_order(
     ]
 
 
+def _high_risk_extension_findings(
+    findings: list[dict],
+    *,
+    item: HunterWorkItem,
+    session_index: int,
+) -> list[dict[str, object]]:
+    """Keep only explicit high/critical extension findings for stop decisions."""
+    high_risk: list[dict[str, object]] = []
+    for finding in findings:
+        severity = str(finding.get("severity") or "").strip().lower()
+        if severity not in {"high", "critical"} and not (
+            not severity and (item.required or item.risk >= 4)
+        ):
+            continue
+        high_risk.append({
+            "work_id": item.work_id,
+            "session_index": session_index,
+            "title": str(finding.get("title") or "untitled"),
+            "severity": severity or "high-risk-work-item",
+            "entry_file": str(finding.get("entry_file") or item.seed_file),
+            "entry_line": int(finding.get("entry_line") or 0),
+        })
+    return high_risk
+
+
+def _finding_identity(finding: Mapping[str, Any]) -> str:
+    """Stable duplicate key shared by standard and extension Hunter sessions."""
+    weakness = str(
+        finding.get("type") or finding.get("weakness") or ""
+    ).strip().casefold()
+    sink_file = str(finding.get("sink_file") or "").replace("\\", "/").casefold()
+    sink_line = int(finding.get("sink_line") or 0)
+    identity = {
+        "type": weakness,
+        "title": (
+            ""
+            if weakness and sink_file and sink_line > 0
+            else str(finding.get("title") or "").strip().casefold()
+        ),
+        "entry": [
+            str(finding.get("entry_file") or ""),
+            int(finding.get("entry_line") or 0),
+        ],
+        "sink": [
+            sink_file,
+            sink_line,
+        ],
+    }
+    return json.dumps(identity, sort_keys=True, separators=(",", ":"))
+
+
+def _should_stop_deep_extension(
+    profile: Mapping[str, Any],
+    *,
+    session_indices: dict[str, int],
+    high_risk_findings: list[dict[str, object]],
+    has_deferred_work: bool,
+    retry_needed: bool,
+) -> bool:
+    """Stop before borrowing sessions 15-16 when 13-14 add no high-risk lead."""
+    if (
+        not bool(profile.get("extension_early_stop"))
+        or high_risk_findings
+        or not has_deferred_work
+        or retry_needed
+    ):
+        return False
+    boundary = int(profile["standard_session_boundary"])
+    configured_max = int(profile["max_hunter_sessions"])
+    evaluated_through = min(boundary + 2, configured_max)
+    highest_scheduled = max(session_indices.values(), default=0)
+    return evaluated_through <= highest_scheduled < configured_max
+
+
+def _deep_extension_metrics(
+    profile: Mapping[str, Any],
+    *,
+    session_indices: dict[str, int],
+    finding_count: int,
+    high_risk_findings: list[dict[str, object]],
+    early_stopped: bool,
+    started_work_ids: set[str] | None = None,
+) -> dict[str, object]:
+    """Record post-12 incremental yield without changing M12 detection@12."""
+    enabled = str(profile["name"]) == DEEP_16_PROFILE
+    boundary = int(profile["standard_session_boundary"])
+    started = set(session_indices) if started_work_ids is None else started_work_ids
+    extension_sessions = (
+        sorted(
+            session_index
+            for work_id, session_index in session_indices.items()
+            if work_id in started and session_index > boundary
+        )
+        if enabled else []
+    )
+    return {
+        "policy_version": "deep-extension-yield-v1",
+        "profile": str(profile["name"]),
+        "enabled": enabled,
+        "standard_session_boundary": boundary,
+        "configured_max_sessions": int(profile["max_hunter_sessions"]),
+        "executed_session_indices": extension_sessions,
+        "executed_sessions": len(extension_sessions),
+        "incremental_findings": finding_count,
+        "incremental_high_risk_findings": len(high_risk_findings),
+        "high_risk_findings": list(high_risk_findings),
+        "early_stop_enabled": bool(profile["extension_early_stop"]),
+        "early_stopped": early_stopped,
+        "early_stop_reason": (
+            "no_new_high_risk_candidate" if early_stopped else ""
+        ),
+        "full_extension_consumed": bool(extension_sessions)
+        and max(extension_sessions) >= int(profile["max_hunter_sessions"]),
+    }
+
+
 async def _run_tasks_in_ranked_waves(
     tasks: list[HuntTask],
     *,
     max_parallel: int,
     budget_controller: BudgetController,
     run_work: Callable[[HuntTask], Awaitable[str | None]],
+    session_indices: Mapping[str, int] | None = None,
+    standard_session_boundary: int = 0,
 ) -> list[str]:
     """Execute persisted admission ranks in bounded priority waves.
 
@@ -727,8 +952,26 @@ async def _run_tasks_in_ranked_waves(
     """
     promoted: list[str] = []
     wave_size = max(1, max_parallel)
-    for offset in range(0, len(tasks), wave_size):
-        wave = tasks[offset:offset + wave_size]
+    waves: list[list[HuntTask]] = []
+    wave: list[HuntTask] = []
+    for task in tasks:
+        session_index = (session_indices or {}).get(task.work_id, 0)
+        if (
+            wave
+            and standard_session_boundary > 0
+            and (session_indices or {}).get(wave[-1].work_id, 0)
+            <= standard_session_boundary
+            < session_index
+        ):
+            waves.append(wave)
+            wave = []
+        wave.append(task)
+        if len(wave) >= wave_size:
+            waves.append(wave)
+            wave = []
+    if wave:
+        waves.append(wave)
+    for wave in waves:
         budget_controller.activate_priority_window(tuple(
             task.work_id for task in wave
         ))
@@ -1010,6 +1253,10 @@ def _save_summary(
         "tasks": [asdict(t) for t in final.tasks],
     }
     plan = store.load_step("hunt_plan") or {}
+    summary["budget_profile"] = plan.get("budget_profile") or {}
+    summary["deep_extension"] = (
+        (plan.get("budget_allocation") or {}).get("deep_extension") or {}
+    )
     obligation_dispositions = (
         (plan.get("budget_allocation") or {})
         .get("admission_ledger", {})

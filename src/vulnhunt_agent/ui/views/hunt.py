@@ -47,6 +47,14 @@ def render_hunt_view(store: RunStore) -> None:
             f"critical sinks {len(plan.get('covered_critical_sink_ids', []))}/"
             f"{len(plan.get('detected_critical_sink_ids', []))} covered"
         )
+        profile = plan.get("budget_profile") or {}
+        if profile:
+            st.caption(
+                "Hunter budget profile: "
+                f"{profile.get('name', 'custom')} · "
+                f"max {profile.get('max_hunter_sessions', 0)} sessions · "
+                f"model-token ceiling {profile.get('max_model_tokens', 0):,}"
+            )
         if plan.get("uncovered_critical_sink_ids"):
             st.error(
                 "Critical sinks were not routed: "
@@ -66,6 +74,20 @@ def render_hunt_view(store: RunStore) -> None:
                 f"{allocation.get('high_risk_slots', 0)} high-risk · "
                 f"{allocation.get('retry_slots', 0)} retry slots"
             )
+            extension = allocation.get("deep_extension") or {}
+            if extension.get("profile") == "deep-16":
+                st.caption(
+                    "Deep-16 incremental yield after session 12: "
+                    f"{extension.get('executed_sessions', 0)} sessions · "
+                    f"{extension.get('incremental_findings', 0)} new findings · "
+                    f"{extension.get('incremental_high_risk_findings', 0)} "
+                    "new high-risk findings"
+                )
+                if extension.get("early_stopped"):
+                    st.info(
+                        "Deep extension stopped before unused retry slots: "
+                        "sessions 13-14 produced no new high-risk candidate."
+                    )
         deferred_critical = plan.get("budget_deferred_critical_work_ids") or []
         if deferred_critical:
             st.warning(

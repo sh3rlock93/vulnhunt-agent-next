@@ -1792,6 +1792,7 @@ class BudgetController:
         usage: list[BudgetUsage] | None = None,
         *,
         work_input_budget: WorkInputBudgetPlan | None = None,
+        soft_input_token_stop: int = HUNTER_INPUT_SOFT_STOP,
         clock: Callable[[], float] = time.monotonic,
     ):
         self.policy = policy
@@ -1803,6 +1804,7 @@ class BudgetController:
             for item in prior
         )
         self._output_tokens = sum(item.output_tokens for item in prior)
+        self._soft_input_token_stop = max(1, int(soft_input_token_stop))
         self._work_input_budget = work_input_budget
         self._work_input_tokens: dict[str, int] = {}
         for item in prior:
@@ -1874,7 +1876,7 @@ class BudgetController:
                 self.policy.max_input_tokens - self._input_tokens - reserved_input
             )
             soft_limit = min(
-                HUNTER_INPUT_SOFT_STOP,
+                self._soft_input_token_stop,
                 self.policy.max_input_tokens,
             )
             remaining_soft_input = (
@@ -1956,7 +1958,7 @@ class BudgetController:
             return {
                 "input_tokens": self._input_tokens,
                 "soft_input_token_stop": min(
-                    HUNTER_INPUT_SOFT_STOP,
+                    self._soft_input_token_stop,
                     self.policy.max_input_tokens,
                 ),
                 "output_tokens": self._output_tokens,
