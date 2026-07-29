@@ -112,7 +112,20 @@ vulnhunt scan /path/to/repo \
 # Remove --plan-only to prepare the sandbox and run Hunters.
 vulnhunt scan /path/to/repo \
   --base-ref main --head-ref HEAD
+
+# One repository scan may use up to 16 individual Hunter work sessions.
+vulnhunt scan /path/to/repo \
+  --hunter-budget-profile deep-16
 ```
+
+`deep-16` applies to each single repository analysis; it is unrelated to the
+number of benchmark cases or repetitions. It preserves the standard 12-session
+boundary, admits up to 14 distinct Hunter work items with two retry slots, and
+records findings first seen in sessions 13-16 as incremental yield. If sessions
+13-14 produce no new high/critical lead and no retry is needed, the two unused
+retry slots are not spent. Its input/output ceilings bound model usage to about
+2.5 million tokens. Use `standard-12` for the comparable 12-session budget or
+`custom --max-hunter-sessions N` for the legacy operator-defined behavior.
 
 Incremental mode is used only for a clean working tree whose checked-out
 revision matches `head-ref`. Missing refs, build changes, deleted C sources, or

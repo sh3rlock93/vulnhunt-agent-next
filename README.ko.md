@@ -111,7 +111,21 @@ vulnhunt scan /path/to/repo \
 # --plan-only를 빼면 샌드박스를 준비하고 Hunter까지 실행
 vulnhunt scan /path/to/repo \
   --base-ref main --head-ref HEAD
+
+# 저장소 분석 1회에서 개별 Hunter 작업 세션을 최대 16개까지 사용
+vulnhunt scan /path/to/repo \
+  --hunter-budget-profile deep-16
 ```
+
+`deep-16`의 16개는 벤치마크 사례나 반복 실행 횟수가 아니라 저장소 분석
+한 번에 적용되는 개별 Hunter 작업 세션 수입니다. 표준 12세션 경계를
+보존하면서 서로 다른 Hunter 작업을 최대 14개 배정하고 재시도 슬롯 2개를
+예약합니다. 13~16번 세션에서 처음 나온 finding은 증분 결과로 별도
+기록합니다. 13~14번 세션에서 새로운 high/critical 후보가 없고 재시도도
+필요하지 않으면 남은 재시도 슬롯 2개는 사용하지 않습니다. 입력·출력 상한을
+합친 모델 사용량은 약 250만 토큰으로 제한됩니다. 비교 가능한 기존 예산은
+`standard-12`, 기존처럼 직접 지정하려면
+`custom --max-hunter-sessions N`을 사용합니다.
 
 증분 모드는 clean working tree이고 checkout된 revision이 `head-ref`와 정확히
 일치할 때만 사용합니다. ref 누락, build 변경, C 소스 삭제, header 영향 범위를

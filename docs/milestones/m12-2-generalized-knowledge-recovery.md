@@ -1,6 +1,6 @@
 # M12.2.x — Generalized knowledge and missed-target recovery
 
-Status: PRs 1-14 merged. The post-recovery four-by-three cohort is complete,
+Status: PRs 1-15 merged. The post-recovery four-by-three cohort is complete,
 but M12.3 remains blocked by detection, reportability, and paired-control
 gates. The immutable result is recorded in
 `docs/reports/m12-2-calibration-pilot.md`.
@@ -213,6 +213,31 @@ met both token gates, but produced 5/12 target Hunter detections and 1/12
 reportable detections. Only the Mini-XML vulnerable/fixed differential pair
 passed completely. The release decision is `stop_and_design_m12_2_x`; this PR
 publishes that result and makes no product-policy change.
+
+### PR 16 — Opt-in deep-16 operational profile
+
+Add an operator-selected profile for one repository analysis with up to 16
+individual Hunter work sessions. This does not change the four-by-three cohort,
+the immutable benchmark cases, or the primary `detection_at_12` gate.
+
+The profile admits at most 14 distinct work items and reserves two sessions for
+failed-work recovery. It raises the input soft stop only inside `deep-16`, keeps
+input plus output ceilings at approximately 2.5 million model tokens, and
+records non-duplicate findings first observed after session 12 as incremental
+yield. The execution wave ends at session 12 even when Hunter parallelism does
+not divide 12. If sessions 13-14 add no high/critical candidate and no retry is
+needed, unused retry slots 15-16 are not borrowed.
+
+Acceptance:
+
+- `standard-12` retains the existing 12-session and 1,500,000 soft-input
+  behavior;
+- legacy custom budgets remain valid and keep their existing defaults;
+- `deep-16` is explicit in CLI/UI and expands to one immutable budget contract;
+- two retry slots and 14 distinct initial work slots are enforced;
+- post-12 metrics count only provider-started sessions and non-duplicate
+  findings;
+- all pre-existing unit and protected detection gates remain green.
 
 ## Stop and rollback conditions
 

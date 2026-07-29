@@ -9,6 +9,11 @@ from ..core import settings as app_settings
 from ..core.run_store import RUNS_ROOT, RunStore, new_run_id
 from ..repo import fetch as repo_fetch
 from ..sandbox import ENVIRONMENTS
+from ..scheduling import (
+    CUSTOM_PROFILE,
+    HUNTER_BUDGET_PROFILE_NAMES,
+    resolve_hunter_budget_config,
+)
 
 
 def sidebar() -> RunStore | None:
@@ -54,11 +59,15 @@ def default_config() -> dict:
         "max_tokens": app_settings.MAX_TOKENS,
         "max_hunters_parallel": 3,
         "hunter_max_iterations": 100,
+        "hunter_budget_profile": CUSTOM_PROFILE,
         "budget_max_hunter_sessions": 100,
         "budget_max_input_tokens": 2_000_000,
         "budget_max_output_tokens": 200_000,
         "budget_max_wall_clock_minutes": 60,
         "budget_max_retries_per_work_item": 1,
+        "budget_soft_input_token_stop": 1_500_000,
+        "budget_standard_session_boundary": 12,
+        "budget_extension_early_stop": False,
     }
 
 
@@ -170,38 +179,63 @@ def _settings_form(store: RunStore) -> None:
         "Max iter / hunter", 5, 500, cfg["hunter_max_iterations"],
     )
     with st.sidebar.expander("Hunter budget", expanded=False):
+        budget_profile = st.selectbox(
+            "Profile",
+            HUNTER_BUDGET_PROFILE_NAMES,
+            index=HUNTER_BUDGET_PROFILE_NAMES.index(
+                str(cfg.get("hunter_budget_profile") or CUSTOM_PROFILE)
+            ),
+            help=(
+                "standard-12 preserves the benchmark budget; deep-16 adds "
+                "bounded sessions 13-16 and tracks their incremental yield."
+            ),
+        )
+        displayed_budget = resolve_hunter_budget_config({
+            **cfg,
+            "hunter_budget_profile": budget_profile,
+        })
+        profile_locked = budget_profile != CUSTOM_PROFILE
         budget_sessions = st.number_input(
             "Max sessions",
             1,
             100_000,
-            cfg["budget_max_hunter_sessions"],
+            int(displayed_budget["budget_max_hunter_sessions"]),
+            disabled=profile_locked,
         )
         budget_input = st.number_input(
             "Max input tokens",
             1,
             1_000_000_000,
-            cfg["budget_max_input_tokens"],
+            int(displayed_budget["budget_max_input_tokens"]),
+            disabled=profile_locked,
         )
         budget_output = st.number_input(
             "Max output tokens",
             1,
             1_000_000_000,
-            cfg["budget_max_output_tokens"],
+            int(displayed_budget["budget_max_output_tokens"]),
+            disabled=profile_locked,
         )
         budget_minutes = st.number_input(
             "Max wall-clock minutes",
             1,
             10_080,
-            cfg["budget_max_wall_clock_minutes"],
+            int(displayed_budget["budget_max_wall_clock_minutes"]),
+            disabled=profile_locked,
         )
         budget_retries = st.number_input(
             "Max retries / work",
             0,
             8,
-            cfg["budget_max_retries_per_work_item"],
+            int(displayed_budget["budget_max_retries_per_work_item"]),
+            disabled=profile_locked,
+        )
+        st.caption(
+            "Effective input soft-stop: "
+            f"{int(displayed_budget['budget_soft_input_token_stop']):,} tokens"
         )
 
-    new_cfg = {
+    new_cfg = resolve_hunter_budget_config({
         **cfg,
         "environment": environment,
         "model_id": model_id,
@@ -215,12 +249,13 @@ def _settings_form(store: RunStore) -> None:
         "scan_scope_exclude_paths": _scope_lines(scope_excludes),
         "max_hunters_parallel": int(max_par),
         "hunter_max_iterations": int(max_iter),
+        "hunter_budget_profile": budget_profile,
         "budget_max_hunter_sessions": int(budget_sessions),
         "budget_max_input_tokens": int(budget_input),
         "budget_max_output_tokens": int(budget_output),
         "budget_max_wall_clock_minutes": int(budget_minutes),
         "budget_max_retries_per_work_item": int(budget_retries),
-    }
+    })
 
     if st.sidebar.button("Save", type="primary", use_container_width=True):
         _save(store, new_cfg)
