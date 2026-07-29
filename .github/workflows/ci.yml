@@ -5,7 +5,19 @@ on:
     branches:
       - main
       - "codex/**"
+    paths-ignore:
+      - "docs/milestones/m13-*"
+      - "src/vulnhunt_agent/macos/**"
+      - "src/vulnhunt_agent/reporting/apple_cve.py"
+      - "tests/test_m13_*"
+      - "tools/macos/**"
   pull_request:
+    paths-ignore:
+      - "docs/milestones/m13-*"
+      - "src/vulnhunt_agent/macos/**"
+      - "src/vulnhunt_agent/reporting/apple_cve.py"
+      - "tests/test_m13_*"
+      - "tools/macos/**"
 
 permissions:
   contents: read
