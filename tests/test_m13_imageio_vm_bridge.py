@@ -45,6 +45,8 @@ class FakeUTMCLI:
         self.cloned: list[tuple[str, str]] = []
         self.started: list[str] = []
         self.stopped: list[str] = []
+        self.force_stopped: list[str] = []
+        self.graceful_stop_succeeds = True
         self.deleted: list[str] = []
         self.clone_paths: dict[str, Path] = {}
 
@@ -73,6 +75,11 @@ class FakeUTMCLI:
 
     def request_stop(self, vm_uuid: str) -> None:
         self.stopped.append(vm_uuid)
+        if self.graceful_stop_succeeds:
+            self.entries[vm_uuid] = "stopped"
+
+    def force_stop(self, vm_uuid: str) -> None:
+        self.force_stopped.append(vm_uuid)
         self.entries[vm_uuid] = "stopped"
 
     def delete(self, vm_uuid: str) -> None:
@@ -380,6 +387,35 @@ def test_disposable_lifecycle_rejects_changed_base_before_cloning(tmp_path: Path
         vm.start()
 
     assert cli.cloned == []
+
+
+def test_disposable_lifecycle_force_stops_a_stuck_test_clone(tmp_path: Path) -> None:
+    provisioning, cli = _provisioning(tmp_path)
+    cli.entries[VM_UUID] = "stopped"
+    cli.graceful_stop_succeeds = False
+    bridge_root = tmp_path / "private-bridge"
+
+    def write_started_heartbeat() -> None:
+        _write_heartbeat(bridge_root)
+
+    cli.on_start = write_started_heartbeat
+    vm = UTMDisposableImageIOVM(
+        environment=_environment(),
+        provisioning=provisioning,
+        bridge_root=bridge_root,
+        cli=cli,
+        startup_timeout_seconds=0.2,
+        graceful_stop_timeout_seconds=0.001,
+        force_stop_timeout_seconds=0.1,
+    )
+
+    vm.start()
+    vm.close()
+
+    assert cli.stopped == [CLONE_UUID]
+    assert cli.force_stopped == [CLONE_UUID]
+    assert cli.deleted == [CLONE_UUID]
+    assert cli.statuses() == {VM_UUID: "stopped"}
 
 
 def test_failed_disposable_start_stops_and_deletes_its_clone(tmp_path: Path) -> None:
