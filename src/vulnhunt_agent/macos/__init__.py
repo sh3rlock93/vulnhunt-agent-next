@@ -1,5 +1,13 @@
 """macOS-specific discovery control-plane support."""
 
+from .imageio_crashes import (
+    ImageIOCrashHunterPlan,
+    ImageIOCrashTriageClass,
+    build_imageio_crash_hunter_plan,
+    cluster_imageio_crashes,
+    load_imageio_crash_observations,
+    minimize_imageio_crash,
+)
 from .imageio_fuzzer import (
     ImageIOFuzzBudget,
     ImageIOFuzzCampaignSummary,
@@ -24,6 +32,8 @@ __all__ = [
     "FrozenImageIOCampaign",
     "ImageIOAPIRoute",
     "ImageIOCampaignManifest",
+    "ImageIOCrashHunterPlan",
+    "ImageIOCrashTriageClass",
     "ImageIOFuzzBudget",
     "ImageIOFuzzCampaignSummary",
     "ImageIOFormatFamily",
@@ -31,9 +41,13 @@ __all__ = [
     "PrivateImageIOFuzzStore",
     "assess_campaign_readiness",
     "build_minimal_dicom_seed",
+    "build_imageio_crash_hunter_plan",
     "capture_imageio_inventory",
+    "cluster_imageio_crashes",
     "freeze_campaign_manifest",
     "generate_dicom_fuzz_cases",
+    "load_imageio_crash_observations",
+    "minimize_imageio_crash",
     "run_imageio_fuzz_campaign",
     "write_frozen_campaign",
 ]
