@@ -27,10 +27,23 @@ from .imageio_inventory import (
     freeze_campaign_manifest,
     write_frozen_campaign,
 )
+from .imageio_hunter import (
+    ImageIOBinaryContext,
+    ImageIOExperimentPlan,
+    ImageIOExperimentPlanStatus,
+    ImageIOExperimentReview,
+    ImageIOHunterAssessment,
+    ImageIOHunterPacket,
+    build_imageio_hunter_packet,
+    execute_imageio_hunter_plan,
+    plan_imageio_experiments,
+    review_imageio_experiment,
+)
 
 __all__ = [
     "FrozenImageIOCampaign",
     "ImageIOAPIRoute",
+    "ImageIOBinaryContext",
     "ImageIOCampaignManifest",
     "ImageIOCrashHunterPlan",
     "ImageIOCrashTriageClass",
@@ -38,9 +51,15 @@ __all__ = [
     "ImageIOFuzzCampaignSummary",
     "ImageIOFormatFamily",
     "ImageIOInventory",
+    "ImageIOExperimentPlan",
+    "ImageIOExperimentPlanStatus",
+    "ImageIOExperimentReview",
+    "ImageIOHunterAssessment",
+    "ImageIOHunterPacket",
     "PrivateImageIOFuzzStore",
     "assess_campaign_readiness",
     "build_minimal_dicom_seed",
+    "build_imageio_hunter_packet",
     "build_imageio_crash_hunter_plan",
     "capture_imageio_inventory",
     "cluster_imageio_crashes",
@@ -49,5 +68,8 @@ __all__ = [
     "load_imageio_crash_observations",
     "minimize_imageio_crash",
     "run_imageio_fuzz_campaign",
+    "execute_imageio_hunter_plan",
+    "plan_imageio_experiments",
+    "review_imageio_experiment",
     "write_frozen_campaign",
 ]
