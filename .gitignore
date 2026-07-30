@@ -165,16 +165,8 @@ docs/milestones/*
 !docs/milestones/m8-cost-aware-scheduler.md
 !docs/milestones/m10-blind-native-discovery.md
 !docs/milestones/m11-real-world-scan-reliability.md
-!docs/milestones/m13-apple-imageio-cve-discovery.md
 notes/
-tools/*
-!tools/macos/
-tools/macos/*
-!tools/macos/imageio_harness.swift
-!tools/macos/imageio_job_runner.c
-!tools/macos/imageio_vm_worker.swift
-!tools/macos/build_imageio_vm_payload.sh
-!tools/macos/install_imageio_vm_worker.sh
+tools/
 docker/local/
 prompts/hunters/*/
 prompts/rankers/*/
