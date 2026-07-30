@@ -6,6 +6,7 @@ on:
       - main
       - "codex/**"
     paths-ignore:
+      - ".github/workflows/m13-apple-cve-ci.yml"
       - "docs/milestones/m13-*"
       - "src/vulnhunt_agent/macos/**"
       - "src/vulnhunt_agent/reporting/apple_cve.py"
@@ -13,6 +14,7 @@ on:
       - "tools/macos/**"
   pull_request:
     paths-ignore:
+      - ".github/workflows/m13-apple-cve-ci.yml"
       - "docs/milestones/m13-*"
       - "src/vulnhunt_agent/macos/**"
       - "src/vulnhunt_agent/reporting/apple_cve.py"
