@@ -143,6 +143,8 @@ class UTMCLI(Protocol):
 
     def request_stop(self, vm_uuid: str) -> None: ...
 
+    def force_stop(self, vm_uuid: str) -> None: ...
+
     def delete(self, vm_uuid: str) -> None: ...
 
 
@@ -180,6 +182,9 @@ class SubprocessUTMCLI:
 
     def request_stop(self, vm_uuid: str) -> None:
         self._run("stop", "--request", vm_uuid)
+
+    def force_stop(self, vm_uuid: str) -> None:
+        self._run("stop", "--force", vm_uuid)
 
     def delete(self, vm_uuid: str) -> None:
         self._run("delete", "--hide", vm_uuid)
@@ -541,13 +546,19 @@ class UTMDisposableImageIOVM:
         bridge_root: Path,
         cli: UTMCLI,
         startup_timeout_seconds: float = 120.0,
+        graceful_stop_timeout_seconds: float = 15.0,
+        force_stop_timeout_seconds: float = 30.0,
     ) -> None:
+        if graceful_stop_timeout_seconds <= 0 or force_stop_timeout_seconds <= 0:
+            raise ValueError("VM stop timeouts must be positive")
         self._environment = environment
         self._provisioning = provisioning
         self._paths = ImageIOVMBridgePaths.from_root(bridge_root)
         self._paths.prepare()
         self._cli = cli
         self._startup_timeout_seconds = startup_timeout_seconds
+        self._graceful_stop_timeout_seconds = graceful_stop_timeout_seconds
+        self._force_stop_timeout_seconds = force_stop_timeout_seconds
         self._runner: UTMSharedDirectoryRunner | None = None
         self._clone_vm_uuid: str | None = None
         self._clone_config_path: Path | None = None
@@ -691,11 +702,18 @@ class UTMDisposableImageIOVM:
             return
         if statuses.get(clone_uuid) == "started":
             self._cli.request_stop(clone_uuid)
-            deadline = time.monotonic() + 90
+            deadline = time.monotonic() + self._graceful_stop_timeout_seconds
             while time.monotonic() < deadline:
                 if self._cli.statuses().get(clone_uuid) == "stopped":
                     break
                 time.sleep(0.25)
+            if self._cli.statuses().get(clone_uuid) == "started":
+                self._cli.force_stop(clone_uuid)
+                deadline = time.monotonic() + self._force_stop_timeout_seconds
+                while time.monotonic() < deadline:
+                    if self._cli.statuses().get(clone_uuid) == "stopped":
+                        break
+                    time.sleep(0.25)
         if self._cli.statuses().get(clone_uuid) != "stopped":
             raise RuntimeError("refusing to delete a disposable UTM clone that is not stopped")
         self._cli.delete(clone_uuid)
