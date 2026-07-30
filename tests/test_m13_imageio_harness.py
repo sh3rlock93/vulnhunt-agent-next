@@ -52,6 +52,9 @@ def _attestation(
         image_sha256=environment.image_sha256,
         snapshot_id=environment.clean_snapshot_id,
         clone_id=environment.disposable_clone_id,
+        runtime_instance_id="runtime-vm-0001",
+        runtime_configuration_sha256="sha256:" + "b" * 64,
+        security_configuration_sha256="sha256:" + "c" * 64,
         boot_id=boot_id,
         observed_at=NOW,
         virtualization_framework="com.apple.Virtualization",
@@ -72,19 +75,23 @@ class FakeVMRunner:
         exit_code: int | None = 0,
         terminating_signal: int | None = None,
         timed_out: bool = False,
+        memory_limit_exceeded: bool = False,
         launch_error: str | None = None,
         stdout: bytes = b'{"source_created":false}\n',
         stderr: bytes = b"",
         crash_log: bytes | None = None,
+        crash_log_truncated: bool = False,
     ) -> None:
         self.attestations = attestations
         self.exit_code = exit_code
         self.terminating_signal = terminating_signal
         self.timed_out = timed_out
+        self.memory_limit_exceeded = memory_limit_exceeded
         self.launch_error = launch_error
         self.stdout = stdout
         self.stderr = stderr
         self.crash_log = crash_log
+        self.crash_log_truncated = crash_log_truncated
         self.attest_calls = 0
         self.commands: list[ImageIOVMCommand] = []
 
@@ -114,6 +121,8 @@ class FakeVMRunner:
             stdout=self.stdout,
             stderr=self.stderr,
             crash_log=self.crash_log,
+            memory_limit_exceeded=self.memory_limit_exceeded,
+            crash_log_truncated=self.crash_log_truncated,
         )
 
 
@@ -155,6 +164,10 @@ def test_each_harness_route_runs_only_after_two_vm_attestations(
     )
     assert "--max-input-bytes" in command.argv
     assert "--max-decoded-bytes" in command.argv
+    assert "--wall-time-seconds" in command.argv
+    assert "--cpu-time-seconds" in command.argv
+    assert "--max-process-memory-bytes" in command.argv
+    assert "--max-open-files" in command.argv
     assert run.evidence.argv == command.argv
     assert run.evidence.input_sha256 == (
         "sha256:" + hashlib.sha256(trigger.read_bytes()).hexdigest()
@@ -209,6 +222,33 @@ def test_execution_fails_if_vm_reboots_between_attestations(tmp_path: Path) -> N
     )
 
     with pytest.raises(RuntimeError, match="rebooted or was replaced"):
+        run_imageio_harness(
+            runner=runner,
+            environment=environment,
+            route=ImageIOAPIRoute.FULL_DECODE,
+            input_path=trigger,
+        )
+
+
+def test_execution_fails_if_vm_configuration_changes_between_attestations(
+    tmp_path: Path,
+) -> None:
+    trigger = tmp_path / "opaque.bin"
+    trigger.write_bytes(b"opaque")
+    environment = _environment()
+    before = _attestation(environment)
+    runner = FakeVMRunner(
+        attestations=[
+            before,
+            before.model_copy(
+                update={
+                    "runtime_configuration_sha256": "sha256:" + "d" * 64,
+                }
+            ),
+        ]
+    )
+
+    with pytest.raises(RuntimeError, match="runtime configuration changed"):
         run_imageio_harness(
             runner=runner,
             environment=environment,
@@ -282,6 +322,53 @@ def test_signaled_run_without_crash_log_is_retained_but_incomplete(
     assert run.evidence.evidence_complete is False
     assert run.evidence.evidence_gaps == (
         "signaled process has no captured crash log",
+    )
+
+
+def test_memory_limit_termination_is_distinct_from_a_crash(tmp_path: Path) -> None:
+    trigger = tmp_path / "opaque.bin"
+    trigger.write_bytes(b"opaque")
+    runner = FakeVMRunner(
+        exit_code=None,
+        terminating_signal=9,
+        memory_limit_exceeded=True,
+    )
+
+    run = run_imageio_harness(
+        runner=runner,
+        environment=_environment(),
+        route=ImageIOAPIRoute.FULL_DECODE,
+        input_path=trigger,
+    )
+
+    assert run.evidence.exit_reason is ImageIOVMExitReason.RESOURCE_LIMIT
+    assert run.evidence.memory_limit_exceeded is True
+    assert run.evidence.evidence_complete is True
+
+
+def test_truncated_crash_log_is_preserved_as_an_explicit_evidence_gap(
+    tmp_path: Path,
+) -> None:
+    trigger = tmp_path / "opaque.bin"
+    trigger.write_bytes(b"opaque")
+    runner = FakeVMRunner(
+        exit_code=None,
+        terminating_signal=11,
+        crash_log_truncated=True,
+    )
+
+    run = run_imageio_harness(
+        runner=runner,
+        environment=_environment(),
+        route=ImageIOAPIRoute.FULL_DECODE,
+        input_path=trigger,
+    )
+
+    assert run.evidence.crash_log_truncated is True
+    assert run.evidence.evidence_complete is False
+    assert run.evidence.evidence_gaps == (
+        "signaled process has no captured crash log",
+        "crash log exceeded the capture limit",
     )
 
 

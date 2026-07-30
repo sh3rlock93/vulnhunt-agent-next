@@ -22,6 +22,10 @@ struct Arguments {
     let chunkSize: Int
     let maxInputBytes: Int
     let maxDecodedBytes: Int
+    let wallTimeSeconds: Int
+    let cpuTimeSeconds: Int
+    let maxProcessMemoryBytes: Int
+    let maxOpenFiles: Int
 }
 
 func fail(_ message: String, code: Int32 = 64) -> Never {
@@ -56,6 +60,10 @@ func parseArguments() -> Arguments {
         "--chunk-size",
         "--max-input-bytes",
         "--max-decoded-bytes",
+        "--wall-time-seconds",
+        "--cpu-time-seconds",
+        "--max-process-memory-bytes",
+        "--max-open-files",
     ])
     guard Set(values.keys) == expected else {
         fail("required arguments: \(expected.sorted().joined(separator: ", "))")
@@ -80,8 +88,47 @@ func parseArguments() -> Arguments {
         maxDecodedBytes: parsePositiveInt(
             values["--max-decoded-bytes"]!,
             label: "maximum decoded bytes"
+        ),
+        wallTimeSeconds: parsePositiveInt(
+            values["--wall-time-seconds"]!,
+            label: "wall time seconds"
+        ),
+        cpuTimeSeconds: parsePositiveInt(
+            values["--cpu-time-seconds"]!,
+            label: "CPU time seconds"
+        ),
+        maxProcessMemoryBytes: parsePositiveInt(
+            values["--max-process-memory-bytes"]!,
+            label: "maximum process memory bytes"
+        ),
+        maxOpenFiles: parsePositiveInt(
+            values["--max-open-files"]!,
+            label: "maximum open files"
         )
     )
+}
+
+func applyResourceLimit(_ resource: Int32, value: UInt64, label: String) {
+    var limit = rlimit(rlim_cur: rlim_t(value), rlim_max: rlim_t(value))
+    guard setrlimit(resource, &limit) == 0 else {
+        fail("failed to apply \(label) resource limit", code: 71)
+    }
+}
+
+func applyResourceLimits(_ arguments: Arguments) {
+    guard arguments.cpuTimeSeconds <= arguments.wallTimeSeconds else {
+        fail("CPU time may not exceed wall time")
+    }
+    applyResourceLimit(RLIMIT_CPU, value: UInt64(arguments.cpuTimeSeconds), label: "CPU")
+    // macOS rejects RLIMIT_AS with EINVAL. The mandatory job wrapper enforces
+    // maxProcessMemoryBytes by polling the child physical footprint with
+    // proc_pid_rusage and killing the child before the VM-wide cap is reached.
+    applyResourceLimit(
+        RLIMIT_NOFILE,
+        value: UInt64(arguments.maxOpenFiles),
+        label: "open files"
+    )
+    alarm(UInt32(arguments.wallTimeSeconds))
 }
 
 func emit(_ payload: [String: Any]) {
@@ -271,6 +318,7 @@ func runIncremental(_ arguments: Arguments, data: Data) -> [String: Any] {
 }
 
 let arguments = parseArguments()
+applyResourceLimits(arguments)
 let inputURL = URL(fileURLWithPath: arguments.inputPath, isDirectory: false)
 let attributes: [FileAttributeKey: Any]
 do {

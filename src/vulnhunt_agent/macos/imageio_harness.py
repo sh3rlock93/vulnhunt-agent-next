@@ -32,6 +32,7 @@ class ImageIOVMExitReason(StrEnum):
     NONZERO_EXIT = "nonzero_exit"
     SIGNALED = "signaled"
     TIMEOUT = "timeout"
+    RESOURCE_LIMIT = "resource_limit"
     LAUNCH_ERROR = "launch_error"
 
 
@@ -98,6 +99,9 @@ class ImageIOVMIsolationAttestation(DomainModel):
     image_sha256: str = Field(pattern=SHA256_PATTERN)
     snapshot_id: str
     clone_id: str
+    runtime_instance_id: str = Field(min_length=1, max_length=200)
+    runtime_configuration_sha256: str = Field(pattern=SHA256_PATTERN)
+    security_configuration_sha256: str = Field(pattern=SHA256_PATTERN)
     boot_id: str = Field(min_length=1, max_length=200)
     observed_at: datetime
     virtualization_framework: Literal["com.apple.Virtualization"]
@@ -143,6 +147,8 @@ class ImageIOVMCommandResult:
     stdout: bytes
     stderr: bytes
     crash_log: bytes | None
+    memory_limit_exceeded: bool = False
+    crash_log_truncated: bool = False
 
 
 class ImageIOVMRunner(Protocol):
@@ -168,6 +174,8 @@ class ImageIOHarnessEvidence(DomainModel):
     exit_reason: ImageIOVMExitReason
     exit_code: int | None
     terminating_signal: int | None
+    memory_limit_exceeded: bool = False
+    crash_log_truncated: bool = False
     duration_ms: int = Field(ge=0)
     stdout_sha256: str = Field(pattern=SHA256_PATTERN)
     stderr_sha256: str = Field(pattern=SHA256_PATTERN)
@@ -185,6 +193,11 @@ class ImageIOHarnessEvidence(DomainModel):
         if self.exit_reason is ImageIOVMExitReason.SIGNALED and self.crash_log_sha256 is None:
             if "signaled process has no captured crash log" not in self.evidence_gaps:
                 raise ValueError("a signaled process without a crash log must record the gap")
+        if self.crash_log_truncated:
+            if self.crash_log_sha256 is not None:
+                raise ValueError("a truncated crash log may not have an artifact digest")
+            if "crash log exceeded the capture limit" not in self.evidence_gaps:
+                raise ValueError("a truncated crash log must record the evidence gap")
         return self
 
 
@@ -231,6 +244,14 @@ def run_imageio_harness(
         str(active_limits.max_input_bytes),
         "--max-decoded-bytes",
         str(active_limits.max_decoded_bytes),
+        "--wall-time-seconds",
+        str(active_limits.wall_time_seconds),
+        "--cpu-time-seconds",
+        str(active_limits.cpu_time_seconds),
+        "--max-process-memory-bytes",
+        str(active_limits.max_process_memory_bytes),
+        "--max-open-files",
+        str(active_limits.max_open_files),
     )
     command = ImageIOVMCommand(
         environment=environment,
@@ -257,6 +278,8 @@ def run_imageio_harness(
         gaps.append("signaled process has no captured crash log")
     if exit_reason is ImageIOVMExitReason.LAUNCH_ERROR:
         gaps.append("harness process did not launch")
+    if result.crash_log_truncated:
+        gaps.append("crash log exceeded the capture limit")
 
     evidence = ImageIOHarnessEvidence(
         environment_id=environment.environment_id,
@@ -269,6 +292,8 @@ def run_imageio_harness(
         exit_reason=exit_reason,
         exit_code=result.exit_code,
         terminating_signal=result.terminating_signal,
+        memory_limit_exceeded=result.memory_limit_exceeded,
+        crash_log_truncated=result.crash_log_truncated,
         duration_ms=result.duration_ms,
         stdout_sha256=_sha256_bytes(result.stdout),
         stderr_sha256=_sha256_bytes(result.stderr),
@@ -347,6 +372,12 @@ def _validate_execution_identity(
 ) -> None:
     if before.boot_id != after.boot_id:
         raise RuntimeError("VM rebooted or was replaced during harness execution")
+    if before.runtime_instance_id != after.runtime_instance_id:
+        raise RuntimeError("VM runtime instance changed during harness execution")
+    if before.runtime_configuration_sha256 != after.runtime_configuration_sha256:
+        raise RuntimeError("VM runtime configuration changed during harness execution")
+    if before.security_configuration_sha256 != after.security_configuration_sha256:
+        raise RuntimeError("VM security configuration changed during harness execution")
     if result.environment_id != command.environment.environment_id:
         raise RuntimeError("execution result came from a different VM environment")
     if result.boot_id != before.boot_id:
@@ -377,6 +408,14 @@ def _validate_output_limits(
 
 
 def _exit_reason(result: ImageIOVMCommandResult) -> ImageIOVMExitReason:
+    if result.memory_limit_exceeded:
+        if result.timed_out or result.launch_error is not None:
+            raise RuntimeError(
+                "a memory-limited process cannot also time out or have a launch error"
+            )
+        if result.terminating_signal is None or result.exit_code is not None:
+            raise RuntimeError("memory-limit termination must preserve its signal outcome")
+        return ImageIOVMExitReason.RESOURCE_LIMIT
     if result.timed_out:
         if result.launch_error is not None:
             raise RuntimeError("a timed-out process cannot also have a launch error")
