@@ -1,0 +1,14 @@
+{
+  "schema_version": "ghidra-imageio-export-v1", "decompiler_version": "m15-fixture-1",
+  "snapshot_sha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "image": {"name": "ImageIO-case-010", "uuid": "C1000010-1234-5678-9ABC-DEF012345678", "architecture": "arm64", "base_address": "0x100000000"},
+  "imports": [], "strings": [],
+  "functions": [{"entry": "0x100001000", "size": 64, "name": "decode_tiff", "parameters": ["data", "index"], "pseudocode": "value = data[index];", "blocks": [
+    {"name": "entry", "start": "0x100001000", "size": 64, "successors": [], "instructions": [
+      {"address": "0x100001000", "op": "param", "result": "data", "inputs": [], "tags": ["input_data"], "text": "data = parameter"},
+      {"address": "0x100001004", "op": "param", "result": "index", "inputs": [], "tags": ["input_length"], "text": "index = parameter"},
+      {"address": "0x100001008", "op": "int_add", "result": "address", "inputs": ["data", "index"], "tags": ["pointer_arithmetic"], "width": 64, "signed": false, "text": "PTRADD data, index"},
+      {"address": "0x10000100c", "op": "load", "result": "value", "inputs": ["const_1b1", "address"], "text": "LOAD address"}
+    ]}
+  ]}]
+}

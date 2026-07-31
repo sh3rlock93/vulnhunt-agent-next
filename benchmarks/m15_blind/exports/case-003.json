@@ -1,0 +1,14 @@
+{
+  "schema_version": "ghidra-imageio-export-v1", "decompiler_version": "m15-fixture-1",
+  "snapshot_sha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "image": {"name": "ImageIO-case-003", "uuid": "C1000003-1234-5678-9ABC-DEF012345678", "architecture": "arm64", "base_address": "0x100000000"},
+  "imports": [], "strings": [],
+  "functions": [{"entry": "0x100001000", "size": 64, "name": "decode_tiff", "parameters": ["offset", "length"], "pseudocode": "value = data[offset + length];", "blocks": [
+    {"name": "entry", "start": "0x100001000", "size": 64, "successors": [], "instructions": [
+      {"address": "0x100001000", "op": "param", "result": "offset", "inputs": [], "tags": ["input_offset"], "text": "offset = parameter"},
+      {"address": "0x100001004", "op": "param", "result": "length", "inputs": [], "tags": ["input_length"], "text": "length = parameter"},
+      {"address": "0x100001008", "op": "int_add", "result": "end", "inputs": ["offset", "length"], "tags": ["pointer_arithmetic"], "width": 64, "signed": false, "text": "PTRADD offset, length"},
+      {"address": "0x10000100c", "op": "load", "result": "value", "inputs": ["const_1b1", "end"], "text": "LOAD end"}
+    ]}
+  ]}]
+}

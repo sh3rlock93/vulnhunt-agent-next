@@ -1,0 +1,17 @@
+[
+  {
+    "schema_version": "m14-blind-oracle-v1",
+    "case_id": "known-overflow",
+    "expected_findings": [
+      {
+        "function_name": "decode_tiff",
+        "vulnerability_class": "integer_overflow"
+      }
+    ]
+  },
+  {
+    "schema_version": "m14-blind-oracle-v1",
+    "case_id": "known-safe",
+    "expected_findings": []
+  }
+]
