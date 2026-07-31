@@ -10,8 +10,10 @@ from pathlib import Path
 from vulnhunt_agent.macos.imageio_fuzzer import (
     ImageIOFuzzBudget,
     PrivateImageIOFuzzStore,
+    PrivateImageIOPayloadHistory,
     run_imageio_fuzz_campaign,
 )
+from vulnhunt_agent.macos.imageio_fuzz_benchmark import assess_imageio_fuzz_benchmark
 from vulnhunt_agent.macos.imageio_harness import ImageIOHarnessLimits, ImageIOVMEnvironment
 from vulnhunt_agent.macos.imageio_vm_bridge import (
     ImageIOUTMProvisioning,
@@ -28,11 +30,15 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--bridge", required=True, type=Path)
     parser.add_argument("--seed", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--history", type=Path)
     parser.add_argument("--campaign-id", required=True)
     parser.add_argument("--campaign-seed", required=True)
     parser.add_argument("--product-version", required=True)
     parser.add_argument("--build-version", required=True)
     parser.add_argument("--max-cases", type=int, default=64)
+    parser.add_argument("--max-feedback-cases", type=int, default=32)
+    parser.add_argument("--max-generations", type=int, default=2)
+    parser.add_argument("--max-children-per-novel-input", type=int, default=4)
     parser.add_argument("--max-executions", type=int, default=256)
     parser.add_argument("--wall-time-seconds", type=int, default=20)
     return parser.parse_args()
@@ -58,6 +64,18 @@ def main() -> int:
         ),
     )
     store = PrivateImageIOFuzzStore(arguments.output)
+    history = (
+        PrivateImageIOPayloadHistory(arguments.history)
+        if arguments.history is not None
+        else None
+    )
+    budget = ImageIOFuzzBudget(
+        max_cases=arguments.max_cases,
+        max_feedback_cases=arguments.max_feedback_cases,
+        max_generations=arguments.max_generations,
+        max_children_per_novel_input=arguments.max_children_per_novel_input,
+        max_executions=arguments.max_executions,
+    )
     vm = UTMDisposableImageIOVM(
         environment=environment,
         provisioning=provisioning,
@@ -73,15 +91,20 @@ def main() -> int:
             store=store,
             campaign_id=arguments.campaign_id,
             campaign_seed=arguments.campaign_seed,
-            budget=ImageIOFuzzBudget(
-                max_cases=arguments.max_cases,
-                max_executions=arguments.max_executions,
-            ),
+            budget=budget,
             limits=ImageIOHarnessLimits(
                 wall_time_seconds=arguments.wall_time_seconds,
                 cpu_time_seconds=min(15, arguments.wall_time_seconds),
             ),
+            history=history,
         )
+    benchmark = assess_imageio_fuzz_benchmark(
+        store_root=store.root,
+        summary=summary,
+        budget=budget,
+        disposable_clone_cleanup_verified=True,
+    )
+    store.write_benchmark_assessment(benchmark)
     print(json.dumps(summary.model_dump(mode="json"), indent=2, sort_keys=True))
     return 0
 

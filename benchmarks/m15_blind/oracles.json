@@ -1,0 +1,14 @@
+[
+  {"schema_version": "m14-blind-oracle-v1", "case_id": "case-001", "expected_findings": [{"function_name": "decode_tiff", "vulnerability_class": "integer_overflow"}]},
+  {"schema_version": "m14-blind-oracle-v1", "case_id": "case-002", "expected_findings": [{"function_name": "decode_tiff", "vulnerability_class": "integer_overflow"}]},
+  {"schema_version": "m14-blind-oracle-v1", "case_id": "case-003", "expected_findings": [{"function_name": "decode_tiff", "vulnerability_class": "offset_length_oob"}]},
+  {"schema_version": "m14-blind-oracle-v1", "case_id": "case-004", "expected_findings": [{"function_name": "decode_tiff", "vulnerability_class": "allocation_copy_mismatch"}]},
+  {"schema_version": "m14-blind-oracle-v1", "case_id": "case-005", "expected_findings": [{"function_name": "decode_tiff", "vulnerability_class": "allocation_copy_mismatch"}]},
+  {"schema_version": "m14-blind-oracle-v1", "case_id": "case-006", "expected_findings": [{"function_name": "decode_tiff", "vulnerability_class": "use_after_free"}]},
+  {"schema_version": "m14-blind-oracle-v1", "case_id": "case-007", "expected_findings": []},
+  {"schema_version": "m14-blind-oracle-v1", "case_id": "case-008", "expected_findings": []},
+  {"schema_version": "m14-blind-oracle-v1", "case_id": "case-009", "expected_findings": []},
+  {"schema_version": "m14-blind-oracle-v1", "case_id": "case-010", "expected_findings": []},
+  {"schema_version": "m14-blind-oracle-v1", "case_id": "case-011", "expected_findings": []},
+  {"schema_version": "m14-blind-oracle-v1", "case_id": "case-012", "expected_findings": []}
+]

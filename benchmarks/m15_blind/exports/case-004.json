@@ -1,0 +1,14 @@
+{
+  "schema_version": "ghidra-imageio-export-v1", "decompiler_version": "m15-fixture-1",
+  "snapshot_sha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "image": {"name": "ImageIO-case-004", "uuid": "C1000004-1234-5678-9ABC-DEF012345678", "architecture": "arm64", "base_address": "0x100000000"},
+  "imports": ["malloc", "memcpy"], "strings": [],
+  "functions": [{"entry": "0x100001000", "size": 64, "name": "decode_tiff", "parameters": ["alloc_size", "copy_length"], "pseudocode": "memcpy(malloc(alloc_size), src, copy_length);", "blocks": [
+    {"name": "entry", "start": "0x100001000", "size": 64, "successors": [], "instructions": [
+      {"address": "0x100001000", "op": "param", "result": "alloc_size", "inputs": [], "tags": ["input_length"], "text": "alloc_size = parameter"},
+      {"address": "0x100001004", "op": "param", "result": "copy_length", "inputs": [], "tags": ["input_length"], "text": "copy_length = parameter"},
+      {"address": "0x100001008", "op": "alloc", "result": "buffer", "inputs": ["alloc_size"], "target": "malloc", "text": "buffer = malloc(alloc_size)"},
+      {"address": "0x10000100c", "op": "copy", "inputs": ["buffer", "source", "copy_length"], "target": "memcpy", "text": "memcpy(buffer, source, copy_length)"}
+    ]}
+  ]}]
+}

@@ -1,0 +1,20 @@
+{
+  "schema_version": "ghidra-imageio-export-v1", "decompiler_version": "m15-fixture-1",
+  "snapshot_sha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "image": {"name": "ImageIO-case-008", "uuid": "C1000008-1234-5678-9ABC-DEF012345678", "architecture": "arm64", "base_address": "0x100000000"},
+  "imports": ["malloc"], "strings": [],
+  "functions": [{"entry": "0x100001000", "size": 192, "name": "decode_tiff", "parameters": ["length"], "pseudocode": "if (length <= UINT64_MAX / 4) malloc(length * 4);", "blocks": [
+    {"name": "entry", "start": "0x100001000", "size": 32, "successors": ["checked", "rejected"], "instructions": [
+      {"address": "0x100001000", "op": "param", "result": "length", "inputs": [], "tags": ["input_length"], "text": "length = parameter"},
+      {"address": "0x100001004", "op": "cmp", "result": "condition", "inputs": ["length", "const_3fffffffffffffff"], "constants": [4611686018427387903], "tags": ["comparison:unsigned_less_equal"], "text": "INT_LESSEQUAL length, threshold"},
+      {"address": "0x100001008", "op": "branch", "inputs": ["v_ram_100001040_1", "condition"], "tags": ["branch_target:100001040", "conditional_branch"], "text": "CBRANCH checked, condition"}
+    ]},
+    {"name": "checked", "start": "0x100001040", "size": 32, "successors": [], "instructions": [
+      {"address": "0x100001040", "op": "int_mult", "result": "bytes", "inputs": ["length"], "constants": [4], "width": 64, "signed": false, "text": "bytes = length * 4"},
+      {"address": "0x100001044", "op": "alloc", "result": "buffer", "inputs": ["bytes"], "target": "malloc", "text": "buffer = malloc(bytes)"}
+    ]},
+    {"name": "rejected", "start": "0x100001080", "size": 32, "successors": [], "instructions": [
+      {"address": "0x100001080", "op": "ret", "inputs": [], "text": "return"}
+    ]}
+  ]}]
+}

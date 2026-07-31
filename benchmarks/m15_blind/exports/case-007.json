@@ -1,0 +1,12 @@
+{
+  "schema_version": "ghidra-imageio-export-v1", "decompiler_version": "m15-fixture-1",
+  "snapshot_sha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "image": {"name": "ImageIO-case-007", "uuid": "C1000007-1234-5678-9ABC-DEF012345678", "architecture": "arm64", "base_address": "0x100000000"},
+  "imports": ["malloc"], "strings": [],
+  "functions": [{"entry": "0x100001000", "size": 64, "name": "decode_tiff", "parameters": ["length"], "pseudocode": "malloc(length);", "blocks": [
+    {"name": "entry", "start": "0x100001000", "size": 64, "successors": [], "instructions": [
+      {"address": "0x100001000", "op": "param", "result": "length", "inputs": [], "tags": ["input_length"], "text": "length = parameter"},
+      {"address": "0x100001004", "op": "alloc", "result": "buffer", "inputs": ["length"], "target": "malloc", "text": "buffer = malloc(length)"}
+    ]}
+  ]}]
+}

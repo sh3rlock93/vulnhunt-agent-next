@@ -1,0 +1,13 @@
+{
+  "schema_version": "ghidra-imageio-export-v1", "decompiler_version": "m15-fixture-1",
+  "snapshot_sha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "image": {"name": "ImageIO-case-006", "uuid": "C1000006-1234-5678-9ABC-DEF012345678", "architecture": "arm64", "base_address": "0x100000000"},
+  "imports": ["free"], "strings": [],
+  "functions": [{"entry": "0x100001000", "size": 64, "name": "decode_tiff", "parameters": ["pointer"], "pseudocode": "free(pointer); return *pointer;", "blocks": [
+    {"name": "entry", "start": "0x100001000", "size": 64, "successors": [], "instructions": [
+      {"address": "0x100001000", "op": "param", "result": "pointer", "inputs": [], "tags": ["input_data"], "text": "pointer = parameter"},
+      {"address": "0x100001004", "op": "free", "inputs": ["pointer"], "target": "free", "text": "free(pointer)"},
+      {"address": "0x100001008", "op": "load", "result": "value", "inputs": ["const_1b1", "pointer"], "text": "LOAD pointer"}
+    ]}
+  ]}]
+}
