@@ -656,7 +656,9 @@ public class ExportImageIOIR extends GhidraScript {
 			case "INT_SUB", "PTRSUB" -> "int_sub";
 			case "INT_MULT" -> "int_mult";
 			case "INT_LEFT" -> "int_left";
+			case "INT_RIGHT", "INT_SRIGHT" -> "int_right";
 			case "INT_AND" -> "and";
+			case "INT_OR" -> "int_or";
 			case "INT_BSWAP" -> "byte_swap";
 			case "BOOL_AND" -> "boolean_and";
 			case "BOOL_OR" -> "boolean_or";
