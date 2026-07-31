@@ -28,6 +28,7 @@ IMAGE_SHA = "sha256:" + "a" * 64
 WORKER_SHA = "sha256:" + "b" * 64
 HARNESS_SHA = "sha256:" + "c" * 64
 JOB_RUNNER_SHA = "sha256:" + "d" * 64
+CANARY_INTERPOSER_SHA = "sha256:" + "e" * 64
 JOB_ID = "1" * 32
 
 
@@ -148,6 +149,7 @@ def _provisioning(
         worker_sha256=WORKER_SHA,
         harness_sha256=HARNESS_SHA,
         job_runner_sha256=JOB_RUNNER_SHA,
+        canary_interposer_sha256=CANARY_INTERPOSER_SHA,
     )
     return provisioning, FakeUTMCLI(status="started", base_config_path=config_path)
 
@@ -175,6 +177,7 @@ def _heartbeat_payload(
         "worker_sha256": worker_sha256,
         "harness_sha256": HARNESS_SHA,
         "job_runner_sha256": JOB_RUNNER_SHA,
+        "canary_interposer_sha256": CANARY_INTERPOSER_SHA,
     }
 
 

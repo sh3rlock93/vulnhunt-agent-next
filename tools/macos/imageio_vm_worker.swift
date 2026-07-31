@@ -78,6 +78,32 @@ struct Limits: Codable, Equatable {
     }
 }
 
+struct CanaryInterposer: Codable, Equatable {
+    let schemaVersion: String
+    let sourceRevision: String
+    let binarySHA256: String
+    let guestPath: String
+    let canaryValue: Int
+    let minimumAllocationBytes: Int
+    let maximumAllocationBytes: Int
+    let humanReviewApproved: Bool
+    let hostInjectionAllowed: Bool
+    let thirdPartyInjectionAllowed: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case schemaVersion = "schema_version"
+        case sourceRevision = "source_revision"
+        case binarySHA256 = "binary_sha256"
+        case guestPath = "guest_path"
+        case canaryValue = "canary_value"
+        case minimumAllocationBytes = "minimum_allocation_bytes"
+        case maximumAllocationBytes = "maximum_allocation_bytes"
+        case humanReviewApproved = "human_review_approved"
+        case hostInjectionAllowed = "host_injection_allowed"
+        case thirdPartyInjectionAllowed = "third_party_injection_allowed"
+    }
+}
+
 struct JobRequest: Decodable {
     let schemaVersion: String
     let jobID: String
@@ -89,6 +115,7 @@ struct JobRequest: Decodable {
     let guestInputPath: String
     let argv: [String]
     let limits: Limits
+    let canaryInterposer: CanaryInterposer?
 
     enum CodingKeys: String, CodingKey {
         case schemaVersion = "schema_version"
@@ -101,6 +128,7 @@ struct JobRequest: Decodable {
         case guestInputPath = "guest_input_path"
         case argv
         case limits
+        case canaryInterposer = "canary_interposer"
     }
 }
 
@@ -220,6 +248,7 @@ func allowedRoute(_ value: String) -> Bool {
         "thumbnail_decode",
         "full_decode",
         "incremental_decode",
+        "raw_pixel_copy",
     ].contains(value)
 }
 
@@ -243,7 +272,8 @@ func validate(
     session: Session,
     bootID: String,
     jobDirectory: URL,
-    harnessURL: URL
+    harnessURL: URL,
+    binDirectory: URL
 ) throws -> String {
     guard request.schemaVersion == jobSchema,
           validJobID(request.jobID),
@@ -278,6 +308,25 @@ func validate(
     guard digest == request.inputSHA256 else {
         throw WorkerError.invalidRequest("staged input digest mismatch")
     }
+    if let canary = request.canaryInterposer {
+        let interposerURL = binDirectory.appendingPathComponent(
+            "imageio-canary-interposer.dylib"
+        )
+        guard request.route == "raw_pixel_copy",
+              canary.schemaVersion == "imageio-canary-interposer-v1",
+              canary.sourceRevision == "m16-canary-interposer-v1",
+              canary.guestPath == interposerURL.path,
+              canary.humanReviewApproved,
+              !canary.hostInjectionAllowed,
+              !canary.thirdPartyInjectionAllowed,
+              (0...255).contains(canary.canaryValue),
+              canary.minimumAllocationBytes > 0,
+              canary.minimumAllocationBytes <= canary.maximumAllocationBytes,
+              canary.maximumAllocationBytes <= request.limits.maxDecodedBytes,
+              try sha256(interposerURL) == canary.binarySHA256 else {
+            throw WorkerError.invalidRequest("canary interposer identity is invalid")
+        }
+    }
     return digest
 }
 
@@ -287,7 +336,7 @@ func makeFailureResult(
     digest: String,
     message: String
 ) -> [String: Any] {
-    [
+    var result: [String: Any] = [
         "schema_version": resultSchema,
         "job_id": request.jobID,
         "environment_id": request.environmentID,
@@ -306,6 +355,14 @@ func makeFailureResult(
         "crash_log_present": false,
         "crash_log_truncated": false,
     ]
+    if let canary = request.canaryInterposer {
+        result["canary_interposer_sha256"] = canary.binarySHA256
+        result["canary_value"] = canary.canaryValue
+    } else {
+        result["canary_interposer_sha256"] = NSNull()
+        result["canary_value"] = NSNull()
+    }
+    return result
 }
 
 func processJob(
@@ -345,7 +402,8 @@ func processJob(
             session: session,
             bootID: bootID,
             jobDirectory: jobDirectory,
-            harnessURL: harnessURL
+            harnessURL: harnessURL,
+            binDirectory: binDirectory
         )
 
         let localDirectory = URL(fileURLWithPath: "/private/tmp/vulnhunt-imageio", isDirectory: true)
@@ -363,15 +421,25 @@ func processJob(
         try fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: localInput.path)
 
         let argv = expectedArgv(session: session, request: decoded)
-        let runnerData = try runCommand(jobRunnerURL.path, [
+        var runnerArguments = [
             "--expected-input-sha256", decoded.inputSHA256,
             "--wall-time-seconds", String(decoded.limits.wallTimeSeconds),
             "--cpu-time-seconds", String(decoded.limits.cpuTimeSeconds),
             "--max-process-memory-bytes", String(decoded.limits.maxProcessMemoryBytes),
             "--max-output-bytes", String(decoded.limits.maxOutputBytes),
             "--max-open-files", String(decoded.limits.maxOpenFiles),
-            "--",
-        ] + argv)
+        ]
+        if let canary = decoded.canaryInterposer {
+            runnerArguments += [
+                "--canary-interposer", canary.guestPath,
+                "--canary-interposer-sha256", canary.binarySHA256,
+                "--canary-value", String(canary.canaryValue),
+                "--canary-minimum-allocation-bytes", String(canary.minimumAllocationBytes),
+                "--canary-maximum-allocation-bytes", String(canary.maximumAllocationBytes),
+            ]
+        }
+        runnerArguments += ["--"] + argv
+        let runnerData = try runCommand(jobRunnerURL.path, runnerArguments)
         guard var runner = try JSONSerialization.jsonObject(with: runnerData) as? [String: Any] else {
             throw WorkerError.commandFailed("job runner returned invalid JSON")
         }
@@ -456,6 +524,9 @@ func writeHeartbeat(
         "harness_sha256": try sha256(binDirectory.appendingPathComponent("imageio-harness")),
         "job_runner_sha256": try sha256(
             binDirectory.appendingPathComponent("imageio-job-runner")
+        ),
+        "canary_interposer_sha256": try sha256(
+            binDirectory.appendingPathComponent("imageio-canary-interposer.dylib")
         ),
     ]
     try atomicWriteJSON(

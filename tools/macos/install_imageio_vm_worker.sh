@@ -29,7 +29,8 @@ temporary_agent=$agent_directory/.io.vulnhunt.imageio-worker.plist.new
 service_target=gui/$(id -u)
 
 mkdir -p -m 700 "$binary_directory" "$log_directory" "$agent_directory"
-for binary in imageio-harness imageio-job-runner imageio-vm-worker; do
+for binary in imageio-harness imageio-job-runner imageio-vm-worker \
+    imageio-canary-interposer.dylib; do
     install -m 0755 "$payload_directory/$binary" "$binary_directory/$binary"
 done
 

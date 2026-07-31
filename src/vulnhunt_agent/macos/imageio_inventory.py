@@ -52,6 +52,7 @@ class ImageIOAPIRoute(StrEnum):
     THUMBNAIL_DECODE = "thumbnail_decode"
     FULL_DECODE = "full_decode"
     INCREMENTAL_DECODE = "incremental_decode"
+    RAW_PIXEL_COPY = "raw_pixel_copy"
 
 
 class ImageIOFormatFamily(StrEnum):

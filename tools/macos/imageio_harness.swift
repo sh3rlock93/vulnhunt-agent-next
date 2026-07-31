@@ -4,6 +4,7 @@
 // limits.  This program performs no network operations and never accepts a URL.
 
 import CoreGraphics
+import CryptoKit
 import Darwin
 import Foundation
 import ImageIO
@@ -14,6 +15,7 @@ enum HarnessRoute: String {
     case thumbnailDecode = "thumbnail_decode"
     case fullDecode = "full_decode"
     case incrementalDecode = "incremental_decode"
+    case rawPixelCopy = "raw_pixel_copy"
 }
 
 struct Arguments {
@@ -165,6 +167,75 @@ func checkedDecodedSize(width: Int, height: Int, maximum: Int) -> Int? {
     return totalBytes
 }
 
+func sha256(_ data: Data) -> String {
+    "sha256:" + SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+}
+
+func canaryObservation(_ data: Data) -> [String: Any] {
+    // Darwin exposes RTLD_DEFAULT as ((void *) -2), but Swift cannot import that macro.
+    let defaultSymbolHandle = UnsafeMutableRawPointer(bitPattern: -2)
+    guard let byteText = ProcessInfo.processInfo.environment["VULNHUNT_CANARY_BYTE"],
+          let byteValue = UInt8(byteText),
+          let countSymbol = dlsym(defaultSymbolHandle, "vulnhunt_canary_allocation_count"),
+          let valueSymbol = dlsym(defaultSymbolHandle, "vulnhunt_canary_value"),
+          let revisionSymbol = dlsym(defaultSymbolHandle, "vulnhunt_canary_revision") else {
+        return [:]
+    }
+    typealias CountFunction = @convention(c) () -> UInt64
+    typealias ValueFunction = @convention(c) () -> UInt8
+    typealias RevisionFunction = @convention(c) () -> UnsafePointer<CChar>?
+    let allocationCount = unsafeBitCast(countSymbol, to: CountFunction.self)()
+    let observedValue = unsafeBitCast(valueSymbol, to: ValueFunction.self)()
+    let revisionPointer = unsafeBitCast(revisionSymbol, to: RevisionFunction.self)()
+    guard observedValue == byteValue, let revisionPointer else {
+        return [:]
+    }
+    var positions = Data()
+    var positionCount = 0
+    for (index, value) in data.enumerated() where value == byteValue {
+        var encoded = UInt64(index).littleEndian
+        withUnsafeBytes(of: &encoded) { positions.append(contentsOf: $0) }
+        positionCount += 1
+    }
+    return [
+        "canary_allocator_observed": allocationCount > 0,
+        "canary_allocation_count": allocationCount,
+        "canary_value": Int(byteValue),
+        "canary_position_count": positionCount,
+        "canary_position_sha256": sha256(positions),
+        "canary_interposer_revision": String(cString: revisionPointer),
+    ]
+}
+
+func rawPixelCopy(_ image: CGImage, maximumBytes: Int) -> [String: Any] {
+    let width = image.width
+    let height = image.height
+    var result: [String: Any] = ["width": width, "height": height]
+    let (expectedBytes, overflow) = image.bytesPerRow.multipliedReportingOverflow(by: height)
+    guard image.bytesPerRow > 0, height > 0, !overflow, expectedBytes <= maximumBytes,
+          let provider = image.dataProvider,
+          let providerData = provider.data else {
+        result["raw_pixels_copied"] = false
+        result["decode_skip_reason"] = "raw provider data exceeds limit or is unavailable"
+        return result
+    }
+    let count = CFDataGetLength(providerData)
+    guard count >= 0, count <= expectedBytes, count <= maximumBytes,
+          let bytes = CFDataGetBytePtr(providerData) else {
+        result["raw_pixels_copied"] = false
+        result["decode_skip_reason"] = "raw provider byte count is invalid"
+        return result
+    }
+    let copied = Data(bytes: bytes, count: count)
+    result["raw_pixels_copied"] = true
+    result["decoded_bytes"] = count
+    result["output_sha256"] = sha256(copied)
+    for (key, value) in canaryObservation(copied) {
+        result[key] = value
+    }
+    return result
+}
+
 func forceDecode(_ image: CGImage, maximumBytes: Int) -> [String: Any] {
     let width = image.width
     let height = image.height
@@ -269,6 +340,16 @@ func runNonIncremental(_ arguments: Arguments, data: Data) -> [String: Any] {
                 return ["image_created": false]
             }
             var result = forceDecode(image, maximumBytes: arguments.maxDecodedBytes)
+            result["image_created"] = true
+            return result
+        }
+    case .rawPixelCopy:
+        return withSource(data: data, route: arguments.route) { source in
+            guard CGImageSourceGetCount(source) > 0,
+                  let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
+                return ["image_created": false, "raw_pixels_copied": false]
+            }
+            var result = rawPixelCopy(image, maximumBytes: arguments.maxDecodedBytes)
             result["image_created"] = true
             return result
         }
