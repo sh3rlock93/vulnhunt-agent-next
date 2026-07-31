@@ -42,6 +42,8 @@ jobs:
           cache: pip
       - name: Install project and development tools
         run: python -m pip install -e ".[dev]"
+      - name: Prepare test settings
+        run: cp settings.example.toml settings.toml
       - name: Lint binary pipeline
         run: >-
           python -m ruff check
