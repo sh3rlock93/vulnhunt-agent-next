@@ -99,6 +99,78 @@ class BinaryAnalysisReport(DomainModel):
         return self
 
 
+class BinaryScalarUseKind(StrEnum):
+    COMPARISON = "comparison"
+    INDEX = "index"
+    RANGE_OFFSET = "range_offset"
+    REQUESTED_LENGTH = "requested_length"
+    CAPACITY = "capacity"
+    COUNT = "count"
+    TRANSFORM = "transform"
+
+
+class BinaryScalarUseEvidence(DomainModel):
+    address: int = Field(ge=0)
+    operation: IROperation
+    operand_index: int = Field(ge=0, le=31)
+    kind: BinaryScalarUseKind
+    callee: str | None = Field(default=None, min_length=1, max_length=500)
+
+
+class BinaryInputScalarFlow(DomainModel):
+    flow_id: str = Field(pattern=r"^scalarflow_[0-9a-f]{20}$")
+    function_id: str = Field(pattern=r"^fn_[0-9a-f]{20}$")
+    function_name: str = Field(min_length=1, max_length=500)
+    variable: str = Field(min_length=1, max_length=160)
+    definition_address: int = Field(ge=0)
+    source_identities: tuple[str, ...] = Field(min_length=1, max_length=64)
+    uses: tuple[BinaryScalarUseEvidence, ...] = Field(default=(), max_length=256)
+
+    @model_validator(mode="after")
+    def validate_flow(self) -> "BinaryInputScalarFlow":
+        if tuple(sorted(set(self.source_identities))) != self.source_identities:
+            raise ValueError("input scalar sources must be sorted and unique")
+        order = tuple((item.address, item.operand_index, item.kind.value) for item in self.uses)
+        if tuple(sorted(set(order))) != order:
+            raise ValueError("input scalar uses must be canonically ordered and unique")
+        expected = _scalar_flow_id(
+            self.function_id,
+            self.variable,
+            self.definition_address,
+            self.source_identities,
+            self.uses,
+        )
+        if self.flow_id != expected:
+            raise ValueError("input scalar flow id does not match its evidence")
+        return self
+
+
+class BinaryProvenanceReport(DomainModel):
+    schema_version: Literal["binary-input-provenance-v1"] = "binary-input-provenance-v1"
+    ir_sha256: str = Field(pattern=SHA256_PATTERN)
+    discovery_sha256: str = Field(pattern=SHA256_PATTERN)
+    analyzed_function_count: int = Field(ge=0)
+    flows: tuple[BinaryInputScalarFlow, ...] = Field(max_length=100000)
+    report_sha256: str = Field(pattern=SHA256_PATTERN)
+
+    @model_validator(mode="after")
+    def validate_report(self) -> "BinaryProvenanceReport":
+        order = tuple(
+            (item.function_id, item.definition_address, item.variable) for item in self.flows
+        )
+        if tuple(sorted(set(order))) != order:
+            raise ValueError("input scalar flows must be canonically ordered and unique")
+        expected = _provenance_report_digest(
+            self.ir_sha256,
+            self.discovery_sha256,
+            self.analyzed_function_count,
+            self.flows,
+        )
+        if self.report_sha256 != expected:
+            raise ValueError("input provenance report digest does not match its flows")
+        return self
+
+
 @dataclass(frozen=True)
 class _ArithmeticOrigin:
     instruction: IRInstruction
@@ -134,6 +206,17 @@ class _ControlFlowFacts:
     predecessors: dict[str, frozenset[str]]
     dominators: dict[str, frozenset[str]]
     guards: tuple[_ConditionalGuard, ...]
+
+
+_EXPLICIT_INPUT_CLASSES = frozenset(
+    {
+        "input_data",
+        "input_length",
+        "input_offset",
+        "input_scalar",
+        "input_state",
+    }
+)
 
 
 def analyze_binary_candidates(
@@ -173,6 +256,44 @@ def analyze_binary_candidates(
         discovery_sha256=discovery.discovery_sha256,
         analyzed_function_count=analyzed,
         findings=ordered,
+        report_sha256=digest,
+    )
+
+
+def analyze_input_scalar_provenance(
+    ir: NormalizedBinaryIR,
+    discovery: ImageIOParserDiscovery,
+) -> BinaryProvenanceReport:
+    """Trace input-backed scalar loads without treating unrelated memory as input."""
+
+    if discovery.ir_sha256 != ir.ir_sha256:
+        raise ValueError("parser discovery is not bound to the supplied IR")
+    functions = {item.function_id: item for item in ir.functions}
+    flows: list[BinaryInputScalarFlow] = []
+    analyzed = 0
+    for candidate in discovery.candidates:
+        function = functions.get(candidate.function_id)
+        if function is None:
+            raise ValueError("parser discovery cites a function absent from the IR")
+        analyzed += 1
+        flows.extend(_function_scalar_flows(function))
+    ordered = tuple(
+        sorted(
+            flows,
+            key=lambda item: (item.function_id, item.definition_address, item.variable),
+        )
+    )
+    digest = _provenance_report_digest(
+        ir.ir_sha256,
+        discovery.discovery_sha256,
+        analyzed,
+        ordered,
+    )
+    return BinaryProvenanceReport(
+        ir_sha256=ir.ir_sha256,
+        discovery_sha256=discovery.discovery_sha256,
+        analyzed_function_count=analyzed,
+        flows=ordered,
         report_sha256=digest,
     )
 
@@ -280,6 +401,115 @@ def _analyze_function(
     return sorted(_deduplicate(findings), key=_finding_sort_key)
 
 
+def _function_scalar_flows(function: IRFunction) -> list[BinaryInputScalarFlow]:
+    control_flow = _control_flow_facts(function)
+    block_inputs = _block_input_states(function, control_flow)
+    definitions: dict[str, tuple[int, tuple[str, ...]]] = {}
+    uses: dict[str, dict[tuple[int, int, str], BinaryScalarUseEvidence]] = {}
+
+    for block in function.blocks:
+        if block.block_id not in control_flow.reachable:
+            continue
+        input_state = block_inputs.get(block.block_id, _DataflowState({}, {}))
+        taint = dict(input_state.taint)
+        origins = dict(input_state.origins)
+        freed: dict[str, IRInstruction] = {}
+        for instruction in block.instructions:
+            for operand_index, operand in enumerate(instruction.operands):
+                if "input_scalar" not in taint.get(operand, frozenset()):
+                    continue
+                kind = _scalar_use_kind(instruction, operand_index)
+                if kind is None:
+                    continue
+                evidence = BinaryScalarUseEvidence(
+                    address=instruction.address,
+                    operation=instruction.operation,
+                    operand_index=operand_index,
+                    kind=kind,
+                    callee=instruction.callee,
+                )
+                key = (evidence.address, evidence.operand_index, evidence.kind.value)
+                uses.setdefault(operand, {})[key] = evidence
+
+            _update_dataflow(instruction, instruction.index, taint, origins, freed)
+            if instruction.result and "input_scalar" in taint.get(
+                instruction.result, frozenset()
+            ):
+                source_identities = tuple(
+                    sorted(
+                        tag
+                        for tag in taint[instruction.result]
+                        if tag.startswith("input_source:")
+                    )
+                )
+                if source_identities:
+                    definitions[instruction.result] = (
+                        instruction.address,
+                        source_identities,
+                    )
+
+    flows: list[BinaryInputScalarFlow] = []
+    for variable, (definition_address, source_identities) in definitions.items():
+        ordered_uses = tuple(
+            sorted(
+                uses.get(variable, {}).values(),
+                key=lambda item: (item.address, item.operand_index, item.kind.value),
+            )
+        )
+        flows.append(
+            BinaryInputScalarFlow(
+                flow_id=_scalar_flow_id(
+                    function.function_id,
+                    variable,
+                    definition_address,
+                    source_identities,
+                    ordered_uses,
+                ),
+                function_id=function.function_id,
+                function_name=function.name,
+                variable=variable,
+                definition_address=definition_address,
+                source_identities=source_identities,
+                uses=ordered_uses,
+            )
+        )
+    return sorted(flows, key=lambda item: (item.definition_address, item.variable))
+
+
+def _scalar_use_kind(
+    instruction: IRInstruction,
+    operand_index: int,
+) -> BinaryScalarUseKind | None:
+    role_kinds = {
+        "capacity": BinaryScalarUseKind.CAPACITY,
+        "count": BinaryScalarUseKind.COUNT,
+        "index": BinaryScalarUseKind.INDEX,
+        "offset": BinaryScalarUseKind.RANGE_OFFSET,
+        "requested_length": BinaryScalarUseKind.REQUESTED_LENGTH,
+    }
+    for tag in instruction.tags:
+        match = re.fullmatch(r"scalar_role:([a-z_]+):(\d+)", tag)
+        if match and int(match.group(2)) == operand_index:
+            return role_kinds.get(match.group(1))
+    if instruction.operation is IROperation.COMPARE:
+        return BinaryScalarUseKind.COMPARISON
+    if "pointer_arithmetic" in instruction.tags:
+        return BinaryScalarUseKind.INDEX
+    if instruction.operation in {
+        IROperation.ASSIGN,
+        IROperation.BITWISE_AND,
+        IROperation.BOOLEAN_AND,
+        IROperation.BOOLEAN_NOT,
+        IROperation.BOOLEAN_OR,
+        IROperation.BOOLEAN_XOR,
+        IROperation.BYTE_SWAP,
+        IROperation.CAST,
+        IROperation.PHI,
+    }:
+        return BinaryScalarUseKind.TRANSFORM
+    return None
+
+
 def _update_dataflow(
     instruction: IRInstruction,
     position: int,
@@ -288,26 +518,34 @@ def _update_dataflow(
     freed: dict[str, IRInstruction],
 ) -> None:
     if instruction.operation is IROperation.PARAMETER and instruction.result:
-        source_tags = _input_source_tags(instruction)
+        source_tags = _input_source_taint(instruction)
         if source_tags:
             taint[instruction.result] = source_tags
         else:
             taint.pop(instruction.result, None)
         origins.pop(instruction.result, None)
         freed.pop(instruction.result, None)
-    elif instruction.operation is IROperation.CALL and instruction.result:
-        source_tags = _input_source_tags(instruction)
-        if source_tags:
-            taint[instruction.result] = source_tags
-        else:
-            taint.pop(instruction.result, None)
-        origins.pop(instruction.result, None)
-        freed.pop(instruction.result, None)
+    elif instruction.operation is IROperation.CALL:
+        _mark_read_session_buffer(instruction, taint)
+        if instruction.result:
+            source_tags = _input_source_taint(instruction)
+            if source_tags:
+                taint[instruction.result] = source_tags
+            else:
+                taint.pop(instruction.result, None)
+            origins.pop(instruction.result, None)
+            freed.pop(instruction.result, None)
     elif (
         instruction.operation
         in {
             IROperation.ASSIGN,
+            IROperation.BYTE_SWAP,
+            IROperation.BOOLEAN_AND,
+            IROperation.BOOLEAN_OR,
+            IROperation.BOOLEAN_XOR,
+            IROperation.BOOLEAN_NOT,
             IROperation.CAST,
+            IROperation.COMPARE,
             IROperation.PHI,
         }
         and instruction.result
@@ -338,6 +576,16 @@ def _update_dataflow(
         freed.pop(instruction.result, None)
     elif instruction.operation is IROperation.BITWISE_AND and instruction.result:
         taint[instruction.result] = _operand_taint(instruction, taint)
+        origins.pop(instruction.result, None)
+        freed.pop(instruction.result, None)
+    elif instruction.operation is IROperation.LOAD and instruction.result:
+        address = instruction.operands[-1] if instruction.operands else None
+        address_taint = taint.get(address, frozenset()) if address else frozenset()
+        if {"input_data", "input_buffer"} & address_taint:
+            identities = {tag for tag in address_taint if tag.startswith("input_source:")}
+            taint[instruction.result] = frozenset({"input_scalar", *identities})
+        else:
+            taint.pop(instruction.result, None)
         origins.pop(instruction.result, None)
         freed.pop(instruction.result, None)
 
@@ -707,8 +955,33 @@ def _operand_taint(
     )
 
 
-def _input_source_tags(instruction: IRInstruction) -> frozenset[str]:
-    return frozenset(tag for tag in instruction.tags if tag.startswith("input_"))
+def _input_source_taint(instruction: IRInstruction) -> frozenset[str]:
+    input_classes = _EXPLICIT_INPUT_CLASSES.intersection(instruction.tags)
+    if not input_classes or instruction.result is None:
+        return frozenset()
+    identity = f"input_source:{instruction.address:x}:{instruction.result}"
+    return frozenset({*input_classes, identity})
+
+
+def _mark_read_session_buffer(
+    instruction: IRInstruction,
+    taint: dict[str, frozenset[str]],
+) -> None:
+    if "read_session_input" not in instruction.tags:
+        return
+    indexes: set[int] = set()
+    for tag in instruction.tags:
+        match = re.fullmatch(r"input_buffer_operand:(\d+)", tag)
+        if match:
+            indexes.add(int(match.group(1)))
+    for operand_index in indexes:
+        if operand_index >= len(instruction.operands):
+            continue
+        variable = instruction.operands[operand_index]
+        identity = f"input_source:read_session:{instruction.address:x}"
+        taint[variable] = taint.get(variable, frozenset()) | frozenset(
+            {"input_buffer", "input_data", identity}
+        )
 
 
 def _first_origin(
@@ -1003,6 +1276,41 @@ def _finding_sort_key(item: BinaryStaticFinding) -> tuple[int, int, str, str]:
         item.vulnerability_class.value,
         item.finding_id,
     )
+
+
+def _scalar_flow_id(
+    function_identifier: str,
+    variable: str,
+    definition_address: int,
+    source_identities: tuple[str, ...],
+    uses: tuple[BinaryScalarUseEvidence, ...],
+) -> str:
+    payload = {
+        "definition_address": definition_address,
+        "function_id": function_identifier,
+        "source_identities": source_identities,
+        "uses": [item.model_dump(mode="json") for item in uses],
+        "variable": variable,
+    }
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    return "scalarflow_" + hashlib.sha256(canonical).hexdigest()[:20]
+
+
+def _provenance_report_digest(
+    ir_sha256: str,
+    discovery_sha256: str,
+    analyzed_function_count: int,
+    flows: tuple[BinaryInputScalarFlow, ...],
+) -> str:
+    payload = {
+        "analyzed_function_count": analyzed_function_count,
+        "discovery_sha256": discovery_sha256,
+        "flows": [item.model_dump(mode="json") for item in flows],
+        "ir_sha256": ir_sha256,
+        "schema_version": "binary-input-provenance-v1",
+    }
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    return "sha256:" + hashlib.sha256(canonical).hexdigest()
 
 
 def _report_digest(

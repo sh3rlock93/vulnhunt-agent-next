@@ -27,6 +27,7 @@ from .analyzers import (
     BinaryStaticFinding,
     BinaryVulnerabilityClass,
     analyze_binary_candidates,
+    analyze_input_scalar_provenance,
 )
 from .discovery import discover_imageio_parsers
 from .ranking import pack_ranked_binary_contexts, rank_binary_functions
@@ -227,6 +228,7 @@ class ImageIOPilotResult(DomainModel):
     ir_sha256: str | None = Field(default=None, pattern=SHA256_PATTERN)
     function_count: int = Field(default=0, ge=0)
     parser_candidate_count: int = Field(default=0, ge=0)
+    input_scalar_flow_count: int = Field(default=0, ge=0)
     static_finding_count: int = Field(default=0, ge=0)
     ranked_function_count: int = Field(default=0, ge=0)
     context_pack_count: int = Field(default=0, ge=0)
@@ -636,6 +638,7 @@ def run_imageio_ghidra_pilot(
             expected_snapshot_sha256=snapshot.snapshot_sha256,
         )
         discovery = discover_imageio_parsers(ir)
+        provenance = analyze_input_scalar_provenance(ir, discovery)
         report = analyze_binary_candidates(ir, discovery)
         ranking = rank_binary_functions(ir, discovery, report)
         context_plan = pack_ranked_binary_contexts(ir, discovery, report, ranking)
@@ -665,6 +668,7 @@ def run_imageio_ghidra_pilot(
     )
     _write_private_json(output / "normalized-ir.json", ir.model_dump(mode="json"))
     _write_private_json(output / "parser-discovery.json", discovery.model_dump(mode="json"))
+    _write_private_json(output / "input-provenance.json", provenance.model_dump(mode="json"))
     _write_private_json(output / "static-analysis.json", report.model_dump(mode="json"))
     _write_private_json(output / "binary-ranking.json", ranking.model_dump(mode="json"))
     _write_private_json(output / "context-plan.json", context_plan.model_dump(mode="json"))
@@ -679,6 +683,7 @@ def run_imageio_ghidra_pilot(
         ir_sha256=ir.ir_sha256,
         function_count=len(ir.functions),
         parser_candidate_count=len(discovery.candidates),
+        input_scalar_flow_count=len(provenance.flows),
         static_finding_count=len(report.findings),
         ranked_function_count=len(ranking.entries),
         context_pack_count=len(context_plan.packs),

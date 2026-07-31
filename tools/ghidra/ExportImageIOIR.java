@@ -57,6 +57,8 @@ public class ExportImageIOIR extends GhidraScript {
 		"decode", "decoder", "decompress", "compressed", "malformed", "corrupt",
 		"rle", "tiff", "dng", "jpeg", "jp2", "png", "gif", "heif", "webp",
 		"dicom", "sgi");
+	private static final Set<String> RANGE_READER_IDENTITIES = Set.of(
+		"getbytesatoffset", "iioimagereadsessiongetbytesatoffset");
 
 	@Override
 	protected void run() throws Exception {
@@ -291,6 +293,7 @@ public class ExportImageIOIR extends GhidraScript {
 		}
 		appendControlFlowTags(tags, operation, mnemonic);
 		if (operation.getOutput() != null) appendInputSourceTags(tags, callee);
+		appendRangeReaderTags(tags, operation, callee, inputStart);
 		json.add("tags", sorted(tags));
 		json.addProperty("text", truncate(mnemonic + " " + operation.toString(), 1900));
 		return json;
@@ -334,6 +337,34 @@ public class ExportImageIOIR extends GhidraScript {
 			tags.add("input_data");
 			tags.add("source_api:data_provider_bytes");
 		}
+	}
+
+	private void appendRangeReaderTags(JsonArray tags, PcodeOp operation,
+			String callee, int inputStart) {
+		if (callee == null) return;
+		String canonical = callee.toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9]", "");
+		if (!RANGE_READER_IDENTITIES.contains(canonical)) return;
+		int argumentCount = operation.getNumInputs() - inputStart;
+		int bufferIndex;
+		int offsetIndex;
+		int lengthIndex;
+		if (argumentCount >= 4) {
+			bufferIndex = 1;
+			offsetIndex = 2;
+			lengthIndex = 3;
+		}
+		else if (argumentCount == 3) {
+			bufferIndex = 0;
+			offsetIndex = 1;
+			lengthIndex = 2;
+		}
+		else {
+			return;
+		}
+		tags.add("read_session_input");
+		tags.add("input_buffer_operand:" + bufferIndex);
+		tags.add("scalar_role:offset:" + offsetIndex);
+		tags.add("scalar_role:requested_length:" + lengthIndex);
 	}
 
 	private JsonObject parameterInstruction(Function function, Parameter parameter, long at) {
@@ -612,6 +643,10 @@ public class ExportImageIOIR extends GhidraScript {
 			if (lowered.contains("memcpy") || lowered.contains("memmove") || lowered.contains("bcopy")) return "copy";
 			if (lowered.contains("malloc") || lowered.contains("calloc") || lowered.contains("realloc") || lowered.contains("cfallocatorallocate")) return "alloc";
 			if (lowered.equals("free") || lowered.contains("operator_delete")) return "free";
+			String canonical = lowered.replaceAll("[^a-z0-9]", "");
+			if (canonical.contains("byteswap") || canonical.contains("swapint") ||
+				canonical.equals("bswap16") || canonical.equals("bswap32") ||
+				canonical.equals("bswap64")) return "byte_swap";
 			return "call";
 		}
 		return switch (mnemonic) {
@@ -622,6 +657,11 @@ public class ExportImageIOIR extends GhidraScript {
 			case "INT_MULT" -> "int_mult";
 			case "INT_LEFT" -> "int_left";
 			case "INT_AND" -> "and";
+			case "INT_BSWAP" -> "byte_swap";
+			case "BOOL_AND" -> "boolean_and";
+			case "BOOL_OR" -> "boolean_or";
+			case "BOOL_XOR" -> "boolean_xor";
+			case "BOOL_NEGATE" -> "boolean_not";
 			case "INT_ZEXT", "INT_SEXT", "CAST", "SUBPIECE", "PIECE" -> "cast";
 			case "INT_EQUAL", "INT_NOTEQUAL", "INT_LESS", "INT_SLESS", "INT_LESSEQUAL", "INT_SLESSEQUAL" -> "cmp";
 			case "BRANCH", "CBRANCH", "BRANCHIND" -> "branch";
@@ -637,18 +677,28 @@ public class ExportImageIOIR extends GhidraScript {
 		HighVariable high = node.getHigh();
 		if (high != null && high.getName() != null && !high.getName().isBlank() &&
 				!high.getName().equalsIgnoreCase("UNNAMED")) {
-			return truncate(high.getName(), 150);
+			// Ghidra display names such as uVar14 can be reused by several SSA
+			// definitions. Parameters have no defining p-code operation and must
+			// retain their declared name so the synthetic PARAMETER record joins
+			// with its uses. Defined locals receive a deterministic storage/def
+			// suffix so loop and PHI flows cannot collapse by display name alone.
+			if (node.getDef() == null) return truncate(high.getName(), 150);
+			return truncate(high.getName(), 72) + "_" + varnodeIdentity(node);
 		}
+		return truncate("v_" + varnodeIdentity(node), 150);
+	}
+
+	private String varnodeIdentity(Varnode node) {
 		String space = node.getAddress() == null ? "none" :
 			node.getAddress().getAddressSpace().getName().replaceAll("[^A-Za-z0-9_]", "_");
-		String identity = "v_" + space + "_" + Long.toUnsignedString(node.getOffset(), 16) +
+		String identity = space + "_" + Long.toUnsignedString(node.getOffset(), 16) +
 			"_" + node.getSize();
 		if (node.getDef() != null) {
 			identity += "_" + Long.toUnsignedString(
 				node.getDef().getSeqnum().getTarget().getOffset(), 16) + "_" +
 				node.getDef().getSeqnum().getTime();
 		}
-		return truncate(identity, 150);
+		return identity;
 	}
 
 	private String parameterName(Parameter parameter) {
