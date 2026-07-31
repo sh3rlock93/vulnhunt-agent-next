@@ -27,6 +27,7 @@ from .analyzers import (
     BinaryStaticFinding,
     BinaryVulnerabilityClass,
     analyze_binary_candidates,
+    analyze_composite_ranges,
     analyze_input_scalar_provenance,
 )
 from .discovery import discover_imageio_parsers
@@ -42,8 +43,16 @@ _GHIDRA_FOOTER = b"Ghidra DYLD extraction v1"
 _DEFAULT_IMAGE_PATH = "/System/Library/Frameworks/ImageIO.framework/Versions/A/ImageIO"
 _UUID_PATTERN = r"^[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}$"
 _MAX_LOG_BYTES = 4 * 1024 * 1024
-_SUPPORTED_BINARY_CLASSES = tuple(
-    sorted(BinaryVulnerabilityClass, key=lambda item: item.value)
+_M15_REQUIRED_BINARY_CLASSES = tuple(
+    sorted(
+        {
+            BinaryVulnerabilityClass.ALLOCATION_COPY_MISMATCH,
+            BinaryVulnerabilityClass.INTEGER_OVERFLOW,
+            BinaryVulnerabilityClass.OFFSET_LENGTH_OOB,
+            BinaryVulnerabilityClass.USE_AFTER_FREE,
+        },
+        key=lambda item: item.value,
+    )
 )
 
 
@@ -120,7 +129,7 @@ class BlindRegressionGatePolicy(DomainModel):
     schema_version: Literal["m15-blind-gate-policy-v1"] = "m15-blind-gate-policy-v1"
     minimum_case_count: int = Field(default=10, ge=1, le=1000)
     required_classes: tuple[BinaryVulnerabilityClass, ...] = Field(
-        default=_SUPPORTED_BINARY_CLASSES, min_length=1, max_length=4
+        default=_M15_REQUIRED_BINARY_CLASSES, min_length=1, max_length=4
     )
     minimum_expected_findings_per_class: int = Field(default=1, ge=1, le=1000)
     minimum_recall_per_class: float = Field(default=1.0, ge=0.0, le=1.0)
@@ -229,6 +238,8 @@ class ImageIOPilotResult(DomainModel):
     function_count: int = Field(default=0, ge=0)
     parser_candidate_count: int = Field(default=0, ge=0)
     input_scalar_flow_count: int = Field(default=0, ge=0)
+    range_call_count: int = Field(default=0, ge=0)
+    composite_range_finding_count: int = Field(default=0, ge=0)
     static_finding_count: int = Field(default=0, ge=0)
     ranked_function_count: int = Field(default=0, ge=0)
     context_pack_count: int = Field(default=0, ge=0)
@@ -426,7 +437,7 @@ def _class_results(
 ) -> tuple[BlindRegressionClassResult, ...]:
     oracle_by_case = _oracle_map(manifest, oracles)
     results: list[BlindRegressionClassResult] = []
-    for vulnerability_class in _SUPPORTED_BINARY_CLASSES:
+    for vulnerability_class in _M15_REQUIRED_BINARY_CLASSES:
         expected_keys: set[tuple[str, str]] = set()
         observed_keys: set[tuple[str, str]] = set()
         for case in manifest.cases:
@@ -639,6 +650,7 @@ def run_imageio_ghidra_pilot(
         )
         discovery = discover_imageio_parsers(ir)
         provenance = analyze_input_scalar_provenance(ir, discovery)
+        range_report = analyze_composite_ranges(ir, discovery)
         report = analyze_binary_candidates(ir, discovery)
         ranking = rank_binary_functions(ir, discovery, report)
         context_plan = pack_ranked_binary_contexts(ir, discovery, report, ranking)
@@ -669,6 +681,7 @@ def run_imageio_ghidra_pilot(
     _write_private_json(output / "normalized-ir.json", ir.model_dump(mode="json"))
     _write_private_json(output / "parser-discovery.json", discovery.model_dump(mode="json"))
     _write_private_json(output / "input-provenance.json", provenance.model_dump(mode="json"))
+    _write_private_json(output / "range-analysis.json", range_report.model_dump(mode="json"))
     _write_private_json(output / "static-analysis.json", report.model_dump(mode="json"))
     _write_private_json(output / "binary-ranking.json", ranking.model_dump(mode="json"))
     _write_private_json(output / "context-plan.json", context_plan.model_dump(mode="json"))
@@ -684,6 +697,8 @@ def run_imageio_ghidra_pilot(
         function_count=len(ir.functions),
         parser_candidate_count=len(discovery.candidates),
         input_scalar_flow_count=len(provenance.flows),
+        range_call_count=len(range_report.calls),
+        composite_range_finding_count=len(range_report.findings),
         static_finding_count=len(report.findings),
         ranked_function_count=len(ranking.entries),
         context_pack_count=len(context_plan.packs),
