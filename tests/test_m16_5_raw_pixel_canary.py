@@ -235,6 +235,7 @@ def test_interposer_is_fixed_to_vm_harness_and_preserves_calloc() -> None:
     harness = (root / "tools/macos/imageio_harness.swift").read_text()
     worker = (root / "tools/macos/imageio_vm_worker.swift").read_text()
     interposer = (root / "tools/macos/imageio_canary_interposer.c").read_text()
+    builder = (root / "tools/macos/build_imageio_vm_payload.sh").read_text()
     installer = (root / "tools/macos/install_imageio_vm_worker.sh").read_text()
 
     assert "image.dataProvider" in harness
@@ -247,4 +248,6 @@ def test_interposer_is_fixed_to_vm_harness_and_preserves_calloc() -> None:
     assert "malloc_zone_malloc" in interposer
     assert "malloc_zone_from_ptr" in interposer
     assert "hostInjectionAllowed" in worker
+    assert "imageio_canary_interposer.c" in builder
+    assert builder.count("imageio-canary-interposer.dylib") >= 3
     assert "imageio-canary-interposer.dylib" in installer

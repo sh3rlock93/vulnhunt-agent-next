@@ -32,11 +32,15 @@ xcrun swiftc \
 xcrun clang -std=c17 -Wall -Wextra -Werror \
     "$repository_root/tools/macos/imageio_job_runner.c" \
     -o "$temporary_directory/imageio-job-runner"
+xcrun clang -std=c17 -Wall -Wextra -Werror -dynamiclib \
+    "$repository_root/tools/macos/imageio_canary_interposer.c" \
+    -o "$temporary_directory/imageio-canary-interposer.dylib"
 xcrun swiftc \
     "$repository_root/tools/macos/imageio_vm_worker.swift" \
     -o "$temporary_directory/imageio-vm-worker"
 
-for binary in imageio-harness imageio-job-runner imageio-vm-worker; do
+for binary in imageio-harness imageio-job-runner imageio-vm-worker \
+    imageio-canary-interposer.dylib; do
     codesign --force --sign - "$temporary_directory/$binary"
     install -m 0755 "$temporary_directory/$binary" "$payload_directory/$binary"
 done
@@ -44,6 +48,7 @@ done
 (
     cd "$payload_directory"
     shasum -a 256 imageio-harness imageio-job-runner imageio-vm-worker \
+        imageio-canary-interposer.dylib \
         > payload-sha256.txt.new
     chmod 0600 payload-sha256.txt.new
     mv -f payload-sha256.txt.new payload-sha256.txt
