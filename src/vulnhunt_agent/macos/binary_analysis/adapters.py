@@ -14,18 +14,21 @@ from .ir import (
     DecompilerEngine,
     IRBasicBlock,
     IRFunction,
+    IRFunctionCoverage,
+    IRFunctionCoverageManifest,
     IRInstruction,
     IROperation,
     IRStringReference,
     NormalizedBinaryIR,
     block_id,
     function_id,
+    function_coverage_digest,
     normalized_ir_digest,
     pseudocode_digest,
 )
 from .snapshot import DyldArchitecture
 
-_MAX_EXPORT_BYTES = 128 * 1024 * 1024
+_MAX_EXPORT_BYTES = 256 * 1024 * 1024
 
 _OPERATION_ALIASES = {
     "param": IROperation.PARAMETER,
@@ -87,17 +90,29 @@ class GhidraJSONAdapter:
         expected_snapshot_sha256: str,
         created_at: datetime | None = None,
     ) -> NormalizedBinaryIR:
-        if payload.get("schema_version") != "ghidra-imageio-export-v1":
+        schema_version = payload.get("schema_version")
+        if schema_version not in {
+            "ghidra-imageio-export-v1",
+            "ghidra-imageio-export-v2",
+        }:
             raise ValueError("unsupported Ghidra export schema")
         if payload.get("snapshot_sha256") != expected_snapshot_sha256:
             raise ValueError("Ghidra export is not bound to the expected binary snapshot")
         image = _mapping(payload.get("image"), label="Ghidra image")
+        image_uuid = _canonical_uuid(image.get("uuid"))
+        coverage = None
+        if schema_version == "ghidra-imageio-export-v2":
+            coverage = _normalize_ghidra_coverage(
+                payload.get("function_coverage"),
+                image_uuid=image_uuid,
+                expected_snapshot_sha256=expected_snapshot_sha256,
+            )
         return _normalize_export(
             engine=self.engine,
             decompiler_version=_text(payload.get("decompiler_version"), label="version"),
             snapshot_sha256=expected_snapshot_sha256,
             image_name=_text(image.get("name"), label="image name"),
-            image_uuid=_canonical_uuid(image.get("uuid")),
+            image_uuid=image_uuid,
             architecture=DyldArchitecture(_text(image.get("architecture"), label="architecture")),
             base_address=_address(image.get("base_address")),
             imports=_string_sequence(payload.get("imports", ()), label="imports"),
@@ -109,7 +124,7 @@ class GhidraJSONAdapter:
             ),
             functions=_normalize_functions(
                 payload.get("functions"),
-                image_uuid=_canonical_uuid(image.get("uuid")),
+                image_uuid=image_uuid,
                 function_start_key="entry",
                 function_size_key="size",
                 function_name_key="name",
@@ -124,6 +139,7 @@ class GhidraJSONAdapter:
                 instruction_operands_key="inputs",
                 instruction_callee_key="target",
             ),
+            function_coverage=coverage,
             created_at=created_at,
         )
 
@@ -176,6 +192,7 @@ class BinaryNinjaJSONAdapter:
                 instruction_operands_key="sources",
                 instruction_callee_key="target",
             ),
+            function_coverage=None,
             created_at=created_at,
         )
 
@@ -215,11 +232,29 @@ def _normalize_export(
     imports: tuple[str, ...],
     strings: tuple[IRStringReference, ...],
     functions: tuple[IRFunction, ...],
+    function_coverage: IRFunctionCoverageManifest | None,
     created_at: datetime | None,
 ) -> NormalizedBinaryIR:
     ordered_imports = tuple(sorted(set(imports)))
     ordered_strings = tuple(sorted(strings, key=lambda item: (item.address, item.value)))
     ordered_functions = tuple(sorted(functions, key=lambda item: item.start_address))
+    if function_coverage is not None:
+        selected = {
+            item.function_id: item
+            for item in function_coverage.functions
+            if item.selected
+        }
+        exported = {item.function_id: item for item in ordered_functions}
+        if set(selected) != set(exported):
+            raise ValueError("exported functions do not match the coverage selection")
+        for identifier, function in exported.items():
+            census = selected[identifier]
+            if (
+                census.name != function.name
+                or census.start_address != function.start_address
+                or census.end_address != function.end_address
+            ):
+                raise ValueError("exported function metadata does not match its census")
     digest = normalized_ir_digest(
         snapshot_sha256=snapshot_sha256,
         image_name=image_name,
@@ -231,6 +266,7 @@ def _normalize_export(
         imports=ordered_imports,
         strings=ordered_strings,
         functions=ordered_functions,
+        function_coverage=function_coverage,
     )
     return NormalizedBinaryIR(
         created_at=created_at or datetime.now(UTC),
@@ -244,7 +280,91 @@ def _normalize_export(
         imports=ordered_imports,
         strings=ordered_strings,
         functions=ordered_functions,
+        function_coverage=function_coverage,
         ir_sha256=digest,
+    )
+
+
+def _normalize_ghidra_coverage(
+    raw: object,
+    *,
+    image_uuid: str,
+    expected_snapshot_sha256: str,
+) -> IRFunctionCoverageManifest:
+    manifest = _mapping(raw, label="Ghidra function coverage")
+    if manifest.get("schema_version") != "ghidra-function-coverage-v1":
+        raise ValueError("unsupported Ghidra function coverage schema")
+    if manifest.get("snapshot_sha256") != expected_snapshot_sha256:
+        raise ValueError("Ghidra function coverage is not bound to the expected snapshot")
+    functions: list[IRFunctionCoverage] = []
+    for raw_function in _sequence(manifest.get("functions"), label="coverage functions"):
+        item = _mapping(raw_function, label="coverage function")
+        start = _address(item.get("entry"))
+        size = _positive_int(item.get("size"), label="coverage function size")
+        tier_value = item.get("selection_tier")
+        functions.append(
+            IRFunctionCoverage(
+                function_id=function_id(image_uuid, start),
+                name=_text(item.get("name"), label="coverage function name"),
+                start_address=start,
+                end_address=start + size,
+                direct_strings=tuple(
+                    sorted(set(_string_sequence(item.get("direct_strings", ()), label="direct strings")))
+                ),
+                callers=tuple(
+                    sorted({_address(value) for value in _sequence(item.get("callers", ()), label="callers")})
+                ),
+                callees=tuple(
+                    sorted({_address(value) for value in _sequence(item.get("callees", ()), label="callees")})
+                ),
+                selected=_boolean(item.get("selected"), label="coverage selection"),
+                selection_tier=(
+                    None if tier_value is None else str(tier_value)
+                ),
+                selection_reasons=tuple(
+                    sorted(set(_string_sequence(item.get("selection_reasons", ()), label="selection reasons")))
+                ),
+                omission_reason=_optional_text(item.get("omission_reason")),
+            )
+        )
+    ordered = tuple(sorted(functions, key=lambda item: item.start_address))
+    maximum_functions = _positive_int(
+        manifest.get("maximum_functions"), label="maximum functions"
+    )
+    maximum_evidence = _positive_int(
+        manifest.get("maximum_evidence_functions"),
+        label="maximum evidence functions",
+    )
+    callgraph_depth = _non_negative_int(
+        manifest.get("callgraph_depth"), label="callgraph depth"
+    )
+    warnings = tuple(
+        sorted(set(_string_sequence(manifest.get("warnings", ()), label="coverage warnings")))
+    )
+    selected_count = sum(item.selected for item in ordered)
+    cap_saturated = any(not item.selected for item in ordered)
+    digest = function_coverage_digest(
+        snapshot_sha256=expected_snapshot_sha256,
+        maximum_functions=maximum_functions,
+        maximum_evidence_functions=maximum_evidence,
+        callgraph_depth=callgraph_depth,
+        total_function_count=len(ordered),
+        selected_function_count=selected_count,
+        cap_saturated=cap_saturated,
+        warnings=warnings,
+        functions=ordered,
+    )
+    return IRFunctionCoverageManifest(
+        snapshot_sha256=expected_snapshot_sha256,
+        maximum_functions=maximum_functions,
+        maximum_evidence_functions=maximum_evidence,
+        callgraph_depth=callgraph_depth,
+        total_function_count=len(ordered),
+        selected_function_count=selected_count,
+        cap_saturated=cap_saturated,
+        warnings=warnings,
+        functions=ordered,
+        coverage_sha256=digest,
     )
 
 
@@ -418,6 +538,19 @@ def _positive_int(value: object, *, label: str) -> int:
     if parsed <= 0:
         raise ValueError(f"{label} must be positive")
     return parsed
+
+
+def _non_negative_int(value: object, *, label: str) -> int:
+    parsed = _integer(value, label=label)
+    if parsed < 0:
+        raise ValueError(f"{label} may not be negative")
+    return parsed
+
+
+def _boolean(value: object, *, label: str) -> bool:
+    if not isinstance(value, bool):
+        raise ValueError(f"{label} must be boolean")
+    return value
 
 
 def _optional_positive_int(value: object) -> int | None:

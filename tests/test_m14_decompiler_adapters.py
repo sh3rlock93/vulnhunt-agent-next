@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -175,6 +176,85 @@ def _binary_ninja_export() -> dict[str, object]:
     }
 
 
+def _coverage_function(address: int, name: str) -> dict[str, object]:
+    return {
+        "entry": hex(address),
+        "size": 32,
+        "name": name,
+        "parameters": [],
+        "pseudocode": "",
+        "blocks": [
+            {
+                "name": "entry",
+                "start": hex(address),
+                "size": 32,
+                "successors": [],
+                "instructions": [
+                    {
+                        "address": hex(address),
+                        "op": "unknown",
+                        "inputs": [],
+                        "text": "bounded placeholder",
+                    }
+                ],
+            }
+        ],
+    }
+
+
+def _coverage_export() -> dict[str, object]:
+    payload = _ghidra_export()
+    payload["schema_version"] = "ghidra-imageio-export-v2"
+    payload["functions"] = [
+        _coverage_function(0x100000100, "read_sgi"),
+        _coverage_function(0x100900100, "FUN_100900100"),
+    ]
+    payload["function_coverage"] = {
+        "schema_version": "ghidra-function-coverage-v1",
+        "snapshot_sha256": _SNAPSHOT,
+        "maximum_functions": 1,
+        "maximum_evidence_functions": 8,
+        "callgraph_depth": 2,
+        "warnings": ["function_export_cap_saturated"],
+        "functions": [
+            {
+                "entry": "0x100000100",
+                "size": 32,
+                "name": "read_sgi",
+                "direct_strings": ["public.sgi-image"],
+                "callers": [],
+                "callees": ["0x100900100"],
+                "selected": True,
+                "selection_tier": "mandatory",
+                "selection_reasons": ["name_marker:read", "name_marker:sgi"],
+            },
+            {
+                "entry": "0x100001000",
+                "size": 32,
+                "name": "generic_unreferenced",
+                "direct_strings": [],
+                "callers": [],
+                "callees": [],
+                "selected": False,
+                "selection_reasons": [],
+                "omission_reason": "fallback_cap_reached",
+            },
+            {
+                "entry": "0x100900100",
+                "size": 32,
+                "name": "FUN_100900100",
+                "direct_strings": ["decode SGI RLE compressed"],
+                "callers": ["0x100000100"],
+                "callees": [],
+                "selected": True,
+                "selection_tier": "mandatory",
+                "selection_reasons": ["string_marker:rle", "string_marker:sgi"],
+            },
+        ],
+    }
+    return payload
+
+
 @pytest.mark.parametrize(
     ("adapter", "payload", "engine"),
     [
@@ -215,6 +295,87 @@ def test_normalized_ir_identity_excludes_creation_time() -> None:
 
     assert first.created_at != second.created_at
     assert first.ir_sha256 == second.ir_sha256
+
+
+def test_v2_coverage_preserves_mandatory_xref_seeds_beyond_fallback_cap() -> None:
+    ir = GhidraJSONAdapter().normalize(
+        _coverage_export(), expected_snapshot_sha256=_SNAPSHOT, created_at=_NOW
+    )
+
+    assert {item.name for item in ir.functions} == {"read_sgi", "FUN_100900100"}
+    assert ir.function_coverage is not None
+    assert ir.function_coverage.maximum_functions == 1
+    assert ir.function_coverage.selected_function_count == 2
+    assert ir.function_coverage.cap_saturated is True
+    by_name = {item.name: item for item in ir.function_coverage.functions}
+    assert by_name["FUN_100900100"].direct_strings == (
+        "decode SGI RLE compressed",
+    )
+    assert by_name["generic_unreferenced"].selected is False
+    assert by_name["generic_unreferenced"].omission_reason == "fallback_cap_reached"
+
+
+def test_coverage_manifest_is_deterministic_and_digest_bound() -> None:
+    adapter = GhidraJSONAdapter()
+    first = adapter.normalize(
+        _coverage_export(), expected_snapshot_sha256=_SNAPSHOT, created_at=_NOW
+    )
+    second = adapter.normalize(
+        _coverage_export(), expected_snapshot_sha256=_SNAPSHOT, created_at=_NOW
+    )
+    assert first.function_coverage == second.function_coverage
+    assert first.ir_sha256 == second.ir_sha256
+
+    changed_payload = copy.deepcopy(_coverage_export())
+    coverage = cast(dict[str, Any], changed_payload["function_coverage"])
+    functions = cast(list[dict[str, Any]], coverage["functions"])
+    functions[2]["direct_strings"] = ["decode SGI RLE changed UTI"]
+    changed = adapter.normalize(
+        changed_payload, expected_snapshot_sha256=_SNAPSHOT, created_at=_NOW
+    )
+    assert changed.function_coverage is not None
+    assert first.function_coverage is not None
+    assert changed.function_coverage.coverage_sha256 != (
+        first.function_coverage.coverage_sha256
+    )
+    assert changed.ir_sha256 != first.ir_sha256
+
+    reason_payload = copy.deepcopy(_coverage_export())
+    reason_coverage = cast(dict[str, Any], reason_payload["function_coverage"])
+    reason_functions = cast(list[dict[str, Any]], reason_coverage["functions"])
+    reason_functions[2]["selection_reasons"] = [
+        "string_marker:decode",
+        "string_marker:rle",
+        "string_marker:sgi",
+    ]
+    reason_changed = adapter.normalize(
+        reason_payload, expected_snapshot_sha256=_SNAPSHOT, created_at=_NOW
+    )
+    assert reason_changed.function_coverage is not None
+    assert reason_changed.function_coverage.coverage_sha256 != (
+        first.function_coverage.coverage_sha256
+    )
+
+    xref_payload = copy.deepcopy(_coverage_export())
+    xref_coverage = cast(dict[str, Any], xref_payload["function_coverage"])
+    xref_functions = cast(list[dict[str, Any]], xref_coverage["functions"])
+    xref_functions[2]["callers"] = ["0x100000100", "0x100000120"]
+    xref_changed = adapter.normalize(
+        xref_payload, expected_snapshot_sha256=_SNAPSHOT, created_at=_NOW
+    )
+    assert xref_changed.function_coverage is not None
+    assert xref_changed.function_coverage.coverage_sha256 != (
+        first.function_coverage.coverage_sha256
+    )
+
+
+def test_v2_export_must_exactly_match_coverage_selection() -> None:
+    payload = _coverage_export()
+    functions = cast(list[dict[str, Any]], payload["functions"])
+    functions.pop()
+
+    with pytest.raises(ValueError, match="do not match the coverage selection"):
+        GhidraJSONAdapter().normalize(payload, expected_snapshot_sha256=_SNAPSHOT)
 
 
 def test_normalized_ir_rejects_tampered_instruction() -> None:

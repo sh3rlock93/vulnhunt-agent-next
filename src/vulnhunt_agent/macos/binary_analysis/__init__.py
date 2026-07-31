@@ -17,8 +17,11 @@ from .adapters import (
 )
 from .ir import (
     DecompilerEngine,
+    FunctionCoverageTier,
     IRBasicBlock,
     IRFunction,
+    IRFunctionCoverage,
+    IRFunctionCoverageManifest,
     IRInstruction,
     IROperation,
     IRStringReference,
@@ -147,8 +150,11 @@ __all__ = [
     "DyldSharedCacheFile",
     "DyldSharedCacheFileRole",
     "GhidraJSONAdapter",
+    "FunctionCoverageTier",
     "IRBasicBlock",
     "IRFunction",
+    "IRFunctionCoverage",
+    "IRFunctionCoverageManifest",
     "IRInstruction",
     "IROperation",
     "IRStringReference",

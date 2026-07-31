@@ -13,7 +13,10 @@ import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
+import java.util.TreeMap;
+import java.util.TreeSet;
 
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
@@ -41,17 +44,28 @@ import ghidra.program.model.symbol.Reference;
 
 public class ExportImageIOIR extends GhidraScript {
 	private static final int MAX_PSEUDOCODE_CHARS = 240000;
+	private static final int MAX_CENSUS_EDGES = 128;
+	private static final int MAX_DIRECT_STRINGS = 256;
 	private static final Set<String> PARSER_MARKERS = Set.of(
-		"decode", "decoder", "parse", "parser", "reader", "image", "tiff", "dng",
-		"jpeg", "jp2", "png", "gif", "heif", "webp", "dicom");
+		"decode", "decoder", "parse", "parser", "reader", "read", "decompress",
+		"rle", "tiff", "dng", "jpeg", "jp2", "png", "gif", "heif", "webp",
+		"dicom", "sgi");
+	private static final Set<String> NAME_ACTION_MARKERS = Set.of(
+		"decode", "decoder", "parse", "parser", "reader", "read", "decompress",
+		"rle");
+	private static final Set<String> EVIDENCE_STRING_MARKERS = Set.of(
+		"decode", "decoder", "decompress", "compressed", "malformed", "corrupt",
+		"rle", "tiff", "dng", "jpeg", "jp2", "png", "gif", "heif", "webp",
+		"dicom", "sgi");
 
 	@Override
 	protected void run() throws Exception {
 		String[] args = getScriptArgs();
-		if (args.length != 6) {
+		if (args.length != 8) {
 			throw new IllegalArgumentException(
 				"usage: ExportImageIOIR.java <output> <snapshot-sha256> <image-uuid> " +
-				"<max-functions> <max-ops-per-function> <decompile-seconds>");
+				"<max-functions> <max-ops-per-function> <decompile-seconds> " +
+				"<coverage-depth> <max-evidence-functions>");
 		}
 		File output = new File(args[0]).getCanonicalFile();
 		String snapshot = args[1];
@@ -59,6 +73,9 @@ public class ExportImageIOIR extends GhidraScript {
 		int maxFunctions = boundedInt(args[3], "max-functions", 1, 10000);
 		int maxOps = boundedInt(args[4], "max-ops-per-function", 1, 9990);
 		int decompileSeconds = boundedInt(args[5], "decompile-seconds", 1, 120);
+		int coverageDepth = boundedInt(args[6], "coverage-depth", 0, 8);
+		int maxEvidenceFunctions = boundedInt(
+			args[7], "max-evidence-functions", 1, 10000);
 		if (!snapshot.matches("sha256:[0-9a-f]{64}")) {
 			throw new IllegalArgumentException("invalid snapshot digest");
 		}
@@ -73,7 +90,7 @@ public class ExportImageIOIR extends GhidraScript {
 		}
 
 		JsonObject root = new JsonObject();
-		root.addProperty("schema_version", "ghidra-imageio-export-v1");
+		root.addProperty("schema_version", "ghidra-imageio-export-v2");
 		root.addProperty("decompiler_version", Application.getApplicationVersion());
 		root.addProperty("snapshot_sha256", snapshot);
 		JsonObject image = new JsonObject();
@@ -83,7 +100,13 @@ public class ExportImageIOIR extends GhidraScript {
 		image.addProperty("base_address", address(currentProgram.getImageBase()));
 		root.add("image", image);
 		root.add("imports", imports());
-		root.add("strings", strings(20000));
+		Census census = census(20000);
+		root.add("strings", census.strings);
+		List<CoverageRow> selected = selectFunctions(
+			census.rows, maxFunctions, coverageDepth, maxEvidenceFunctions);
+		root.add("function_coverage", coverageManifest(
+			census.rows, selected, snapshot, maxFunctions, coverageDepth,
+			maxEvidenceFunctions));
 
 		DecompInterface decompiler = new DecompInterface();
 		DecompileOptions options = new DecompileOptions();
@@ -96,11 +119,11 @@ public class ExportImageIOIR extends GhidraScript {
 		}
 		try {
 			JsonArray functions = new JsonArray();
-			List<Function> selected = selectFunctions(maxFunctions);
 			monitor.initialize(selected.size(), "Exporting bounded ImageIO IR");
-			for (Function function : selected) {
+			for (CoverageRow row : selected) {
 				monitor.checkCancelled();
-				functions.add(exportFunction(decompiler, function, maxOps, decompileSeconds));
+				functions.add(exportFunction(
+					decompiler, row.function, maxOps, decompileSeconds));
 				monitor.incrementProgress(1);
 			}
 			if (functions.isEmpty()) {
@@ -251,9 +274,10 @@ public class ExportImageIOIR extends GhidraScript {
 		JsonArray inputs = new JsonArray();
 		JsonArray constants = new JsonArray();
 		for (int index = inputStart; index < operation.getNumInputs(); index++) {
+			if (inputs.size() >= 32) break;
 			Varnode input = operation.getInput(index);
 			inputs.add(varnodeName(input));
-			if (input.isConstant()) constants.add(input.getOffset());
+			if (input.isConstant() && constants.size() < 16) constants.add(input.getOffset());
 		}
 		json.add("inputs", inputs);
 		json.add("constants", constants);
@@ -357,17 +381,183 @@ public class ExportImageIOIR extends GhidraScript {
 		return instruction;
 	}
 
-	private List<Function> selectFunctions(int maximum) {
-		List<Function> functions = new ArrayList<>();
+	private Census census(int maximumStrings) throws Exception {
+		List<CoverageRow> rows = new ArrayList<>();
+		Map<Long, CoverageRow> byEntry = new TreeMap<>();
 		FunctionIterator iterator = currentProgram.getFunctionManager().getFunctions(true);
 		while (iterator.hasNext()) {
 			Function function = iterator.next();
-			if (!function.isExternal() && !function.isThunk()) functions.add(function);
+			if (function.isExternal() || function.isThunk()) continue;
+			CoverageRow row = new CoverageRow(function);
+			rows.add(row);
+			byEntry.put(row.entry(), row);
 		}
-		functions.sort(Comparator
-			.comparingInt((Function function) -> -parserScore(function.getName()))
-			.thenComparingLong(function -> function.getEntryPoint().getOffset()));
-		return new ArrayList<>(functions.subList(0, Math.min(maximum, functions.size())));
+		rows.sort(Comparator.comparingLong(CoverageRow::entry));
+
+		for (CoverageRow row : rows) {
+			monitor.checkCancelled();
+			List<Function> called = new ArrayList<>(row.function.getCalledFunctions(monitor));
+			called.removeIf(function -> function.isExternal() || function.isThunk() ||
+				!byEntry.containsKey(function.getEntryPoint().getOffset()));
+			called.sort(Comparator.comparingLong(
+				function -> function.getEntryPoint().getOffset()));
+			for (Function callee : called.subList(0, Math.min(MAX_CENSUS_EDGES, called.size()))) {
+				long target = callee.getEntryPoint().getOffset();
+				row.callees.add(target);
+				byEntry.get(target).callers.add(row.entry());
+			}
+		}
+		for (CoverageRow row : rows) {
+			while (row.callers.size() > MAX_CENSUS_EDGES) row.callers.pollLast();
+		}
+
+		JsonArray strings = new JsonArray();
+		Iterator<Data> dataIterator = currentProgram.getListing().getDefinedData(true);
+		while (dataIterator.hasNext() && strings.size() < maximumStrings) {
+			monitor.checkCancelled();
+			Data data = dataIterator.next();
+			Object value = data.getValue();
+			if (!(value instanceof String) || ((String) value).isBlank()) continue;
+			String text = truncate((String) value, 3900);
+			JsonObject item = new JsonObject();
+			item.addProperty("address", address(data.getAddress()));
+			item.addProperty("value", text);
+			TreeSet<Long> references = new TreeSet<>();
+			for (Reference reference :
+					currentProgram.getReferenceManager().getReferencesTo(data.getAddress())) {
+				long from = reference.getFromAddress().getOffset();
+				references.add(from);
+				Function containing = currentProgram.getFunctionManager()
+					.getFunctionContaining(reference.getFromAddress());
+				if (containing == null) continue;
+				CoverageRow row = byEntry.get(containing.getEntryPoint().getOffset());
+				if (row != null && row.directStrings.size() < MAX_DIRECT_STRINGS) {
+					row.directStrings.add(truncate(text, 500));
+				}
+				if (references.size() >= 1024) break;
+			}
+			JsonArray referenceJson = new JsonArray();
+			for (long reference : references) referenceJson.add(hex(reference));
+			item.add("references", referenceJson);
+			strings.add(item);
+		}
+		return new Census(rows, strings);
+	}
+
+	private List<CoverageRow> selectFunctions(List<CoverageRow> rows, int maximum,
+			int coverageDepth, int maximumEvidence) {
+		Map<Long, CoverageRow> byEntry = new TreeMap<>();
+		for (CoverageRow row : rows) byEntry.put(row.entry(), row);
+
+		List<CoverageRow> frontier = new ArrayList<>();
+		for (CoverageRow row : rows) {
+			TreeSet<String> directReasons = new TreeSet<>();
+			boolean hasNameAction = false;
+			for (String marker : PARSER_MARKERS) {
+				if (hasNameMarker(row.function.getName(), marker)) {
+					directReasons.add("name_marker:" + marker);
+					hasNameAction |= NAME_ACTION_MARKERS.contains(marker);
+				}
+			}
+			boolean hasStringEvidence = false;
+			for (String value : row.directStrings) {
+				String lowered = value.toLowerCase(Locale.ROOT);
+				for (String marker : EVIDENCE_STRING_MARKERS) {
+					if (lowered.contains(marker)) {
+						directReasons.add("string_marker:" + marker);
+						hasStringEvidence = true;
+					}
+				}
+			}
+			if (hasNameAction || hasStringEvidence) {
+				row.selected = true;
+				row.selectionTier = "mandatory";
+				row.selectionReasons.addAll(directReasons);
+				frontier.add(row);
+			}
+		}
+		if (frontier.size() > maximumEvidence) {
+			throw new IllegalStateException(
+				"mandatory evidence functions exceed max-evidence-functions");
+		}
+
+		int evidenceCount = frontier.size();
+		int evidenceBudget = Math.max(
+			frontier.size(), Math.min(maximum, maximumEvidence));
+		boolean neighborhoodTruncated = false;
+		for (int depth = 1; depth <= coverageDepth && !frontier.isEmpty(); depth++) {
+			TreeMap<Long, TreeSet<String>> nextReasons = new TreeMap<>();
+			for (CoverageRow source : frontier) {
+				for (long caller : source.callers) {
+					nextReasons.computeIfAbsent(caller, ignored -> new TreeSet<>()).add(
+						"callgraph:caller:depth=" + depth + ":seed=" + hex(source.entry()));
+				}
+				for (long callee : source.callees) {
+					nextReasons.computeIfAbsent(callee, ignored -> new TreeSet<>()).add(
+						"callgraph:callee:depth=" + depth + ":seed=" + hex(source.entry()));
+				}
+			}
+			List<CoverageRow> next = new ArrayList<>();
+			for (Map.Entry<Long, TreeSet<String>> candidate : nextReasons.entrySet()) {
+				CoverageRow row = byEntry.get(candidate.getKey());
+				if (row == null || row.selected) continue;
+				if (evidenceCount >= evidenceBudget) {
+					neighborhoodTruncated = true;
+					continue;
+				}
+				row.selected = true;
+				row.selectionTier = "neighborhood";
+				row.selectionReasons.addAll(candidate.getValue());
+				evidenceCount++;
+				next.add(row);
+			}
+			frontier = next;
+		}
+
+		List<CoverageRow> fallback = new ArrayList<>(rows);
+		fallback.sort(Comparator
+			.comparingInt((CoverageRow row) -> -parserScore(row.function.getName()))
+			.thenComparingLong(CoverageRow::entry));
+		int selectedCount = evidenceCount;
+		for (CoverageRow row : fallback) {
+			if (row.selected || selectedCount >= maximum) continue;
+			row.selected = true;
+			row.selectionTier = "fallback";
+			row.selectionReasons.add("parser_score_fallback:" +
+				parserScore(row.function.getName()));
+			selectedCount++;
+		}
+		for (CoverageRow row : rows) {
+			if (!row.selected) {
+				row.omissionReason = neighborhoodTruncated && evidenceCount >= evidenceBudget ?
+					"evidence_neighborhood_or_fallback_cap_reached" :
+					"fallback_cap_reached";
+			}
+		}
+
+		List<CoverageRow> selected = new ArrayList<>();
+		for (CoverageRow row : rows) if (row.selected) selected.add(row);
+		selected.sort(Comparator
+			.comparingInt((CoverageRow row) -> tierOrder(row.selectionTier))
+			.thenComparingLong(CoverageRow::entry));
+		return selected;
+	}
+
+	private JsonObject coverageManifest(List<CoverageRow> rows, List<CoverageRow> selected,
+			String snapshot, int maximum, int depth, int maximumEvidence) {
+		JsonObject manifest = new JsonObject();
+		manifest.addProperty("schema_version", "ghidra-function-coverage-v1");
+		manifest.addProperty("snapshot_sha256", snapshot);
+		manifest.addProperty("maximum_functions", maximum);
+		manifest.addProperty("maximum_evidence_functions", maximumEvidence);
+		manifest.addProperty("callgraph_depth", depth);
+		JsonArray warnings = new JsonArray();
+		if (selected.size() < rows.size()) warnings.add("function_export_cap_saturated");
+		manifest.add("warnings", warnings);
+		JsonArray functions = new JsonArray();
+		for (CoverageRow row : rows) functions.add(row.toJson());
+		manifest.add("functions", functions);
+		return manifest;
 	}
 
 	private int parserScore(String name) {
@@ -379,6 +569,15 @@ public class ExportImageIOIR extends GhidraScript {
 		return score;
 	}
 
+	private boolean hasNameMarker(String name, String marker) {
+		String lowered = name.toLowerCase(Locale.ROOT);
+		if (!marker.equals("read") && !marker.equals("rle")) {
+			return lowered.contains(marker);
+		}
+		return lowered.matches(".*(?:^|[^a-z0-9])" + marker +
+			"(?:[^a-z0-9]|$).*");
+	}
+
 	private JsonArray imports() {
 		Set<String> names = new HashSet<>();
 		FunctionIterator iterator = currentProgram.getFunctionManager().getExternalFunctions();
@@ -388,27 +587,6 @@ public class ExportImageIOIR extends GhidraScript {
 		JsonArray json = new JsonArray();
 		for (String name : ordered) json.add(name);
 		return json;
-	}
-
-	private JsonArray strings(int maximum) {
-		JsonArray result = new JsonArray();
-		Iterator<Data> iterator = currentProgram.getListing().getDefinedData(true);
-		while (iterator.hasNext() && result.size() < maximum) {
-			Data data = iterator.next();
-			Object value = data.getValue();
-			if (!(value instanceof String) || ((String) value).isBlank()) continue;
-			JsonObject item = new JsonObject();
-			item.addProperty("address", address(data.getAddress()));
-			item.addProperty("value", truncate((String) value, 3900));
-			JsonArray references = new JsonArray();
-			for (Reference reference : currentProgram.getReferenceManager().getReferencesTo(data.getAddress())) {
-				references.add(address(reference.getFromAddress()));
-				if (references.size() >= 1024) break;
-			}
-			item.add("references", references);
-			result.add(item);
-		}
-		return result;
 	}
 
 	private String resolveCallee(PcodeOp operation) {
@@ -500,6 +678,12 @@ public class ExportImageIOIR extends GhidraScript {
 		return parsed;
 	}
 
+	private static int tierOrder(String tier) {
+		if ("mandatory".equals(tier)) return 0;
+		if ("neighborhood".equals(tier)) return 1;
+		return 2;
+	}
+
 	private static String blockName(int ordinal, long start) {
 		return "bb_" + ordinal + "_" + Long.toUnsignedString(start, 16);
 	}
@@ -514,5 +698,59 @@ public class ExportImageIOIR extends GhidraScript {
 
 	private static String truncate(String value, int maximum) {
 		return value.length() <= maximum ? value : value.substring(0, maximum);
+	}
+
+	private static class Census {
+		final List<CoverageRow> rows;
+		final JsonArray strings;
+
+		Census(List<CoverageRow> rows, JsonArray strings) {
+			this.rows = rows;
+			this.strings = strings;
+		}
+	}
+
+	private static class CoverageRow {
+		final Function function;
+		final TreeSet<String> directStrings = new TreeSet<>();
+		final TreeSet<Long> callers = new TreeSet<>();
+		final TreeSet<Long> callees = new TreeSet<>();
+		final TreeSet<String> selectionReasons = new TreeSet<>();
+		boolean selected;
+		String selectionTier;
+		String omissionReason;
+
+		CoverageRow(Function function) {
+			this.function = function;
+		}
+
+		long entry() {
+			return function.getEntryPoint().getOffset();
+		}
+
+		JsonObject toJson() {
+			long start = entry();
+			long end = Math.max(start, function.getBody().getMaxAddress().getOffset());
+			JsonObject json = new JsonObject();
+			json.addProperty("entry", hex(start));
+			json.addProperty("size", Math.max(1L, end - start + 1L));
+			json.addProperty("name", function.getName());
+			JsonArray strings = new JsonArray();
+			for (String value : directStrings) strings.add(value);
+			json.add("direct_strings", strings);
+			JsonArray callerJson = new JsonArray();
+			for (long caller : callers) callerJson.add(hex(caller));
+			json.add("callers", callerJson);
+			JsonArray calleeJson = new JsonArray();
+			for (long callee : callees) calleeJson.add(hex(callee));
+			json.add("callees", calleeJson);
+			json.addProperty("selected", selected);
+			if (selectionTier != null) json.addProperty("selection_tier", selectionTier);
+			JsonArray reasons = new JsonArray();
+			for (String reason : selectionReasons) reasons.add(reason);
+			json.add("selection_reasons", reasons);
+			if (omissionReason != null) json.addProperty("omission_reason", omissionReason);
+			return json;
+		}
 	}
 }

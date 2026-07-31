@@ -37,6 +37,8 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--max-functions", type=int, default=600)
     parser.add_argument("--max-ops-per-function", type=int, default=4000)
     parser.add_argument("--decompile-seconds", type=int, default=3)
+    parser.add_argument("--coverage-depth", type=int, default=2)
+    parser.add_argument("--max-evidence-functions", type=int, default=2000)
     parser.add_argument("--analysis-timeout-seconds", type=int, default=600)
     parser.add_argument("--process-timeout-seconds", type=int, default=900)
     parser.add_argument("--ghidra-heap", default="8G")
@@ -62,6 +64,8 @@ def main() -> int:
         max_functions=arguments.max_functions,
         max_ops_per_function=arguments.max_ops_per_function,
         decompile_seconds=arguments.decompile_seconds,
+        coverage_depth=arguments.coverage_depth,
+        max_evidence_functions=arguments.max_evidence_functions,
         analysis_timeout_seconds=arguments.analysis_timeout_seconds,
         process_timeout_seconds=arguments.process_timeout_seconds,
         ghidra_heap=arguments.ghidra_heap,

@@ -26,6 +26,10 @@ VM_STABLE = "sha256:" + "1" * 64
 VM_BETA = "sha256:" + "2" * 64
 
 
+def test_sgi_is_a_typed_inventory_format() -> None:
+    assert ImageIOFormatFamily.SGI.value == "sgi"
+
+
 class FakeRunner:
     def __init__(self) -> None:
         self.calls: list[tuple[tuple[str, ...], Mapping[str, str] | None]] = []

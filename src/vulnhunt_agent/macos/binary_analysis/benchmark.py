@@ -496,6 +496,8 @@ def run_imageio_ghidra_pilot(
     max_functions: int = 600,
     max_ops_per_function: int = 4000,
     decompile_seconds: int = 3,
+    coverage_depth: int = 2,
+    max_evidence_functions: int = 2000,
     analysis_timeout_seconds: int = 600,
     process_timeout_seconds: int = 900,
     ghidra_heap: str = "8G",
@@ -606,6 +608,8 @@ def run_imageio_ghidra_pilot(
         str(max_functions),
         str(max_ops_per_function),
         str(decompile_seconds),
+        str(coverage_depth),
+        str(max_evidence_functions),
         "-deleteProject",
     ]
     export_stage = _run_ghidra_stage(
