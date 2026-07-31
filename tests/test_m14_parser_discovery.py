@@ -149,6 +149,10 @@ def test_discovery_combines_strings_input_apis_and_callgraph() -> None:
     assert by_name["public_wrapper"].callgraph_distance == 1
 
 
+def test_sgi_is_a_typed_binary_format_family() -> None:
+    assert BinaryFormatFamily.SGI.value == "sgi"
+
+
 def test_discovery_does_not_promote_isolated_memory_sink() -> None:
     discovery = discover_imageio_parsers(_ir())
     assert "unrelated_allocator" not in {

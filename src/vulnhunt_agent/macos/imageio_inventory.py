@@ -58,6 +58,7 @@ class ImageIOFormatFamily(StrEnum):
     DICOM = "dicom"
     RAW_DNG = "raw_dng"
     TEXTURE_CONTAINER = "texture_container"
+    SGI = "sgi"
 
 
 class ImageIOInventory(DomainModel):

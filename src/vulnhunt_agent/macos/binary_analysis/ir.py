@@ -136,6 +136,96 @@ class IRFunction(DomainModel):
         return self
 
 
+class FunctionCoverageTier(StrEnum):
+    MANDATORY = "mandatory"
+    NEIGHBORHOOD = "neighborhood"
+    FALLBACK = "fallback"
+
+
+class IRFunctionCoverage(DomainModel):
+    function_id: str = Field(pattern=r"^fn_[0-9a-f]{20}$")
+    name: str = Field(min_length=1, max_length=500)
+    start_address: int = Field(ge=0)
+    end_address: int = Field(ge=0)
+    direct_strings: tuple[str, ...] = Field(default=(), max_length=256)
+    callers: tuple[int, ...] = Field(default=(), max_length=256)
+    callees: tuple[int, ...] = Field(default=(), max_length=256)
+    selected: bool
+    selection_tier: FunctionCoverageTier | None = None
+    selection_reasons: tuple[str, ...] = Field(default=(), max_length=256)
+    omission_reason: str | None = Field(default=None, min_length=1, max_length=200)
+
+    @model_validator(mode="after")
+    def validate_coverage(self) -> "IRFunctionCoverage":
+        if self.end_address <= self.start_address:
+            raise ValueError("coverage function end must follow its start")
+        if tuple(sorted(set(self.direct_strings))) != self.direct_strings:
+            raise ValueError("coverage direct strings must be sorted and unique")
+        if tuple(sorted(set(self.callers))) != self.callers:
+            raise ValueError("coverage callers must be sorted and unique")
+        if tuple(sorted(set(self.callees))) != self.callees:
+            raise ValueError("coverage callees must be sorted and unique")
+        if tuple(sorted(set(self.selection_reasons))) != self.selection_reasons:
+            raise ValueError("coverage selection reasons must be sorted and unique")
+        if self.selected:
+            if self.selection_tier is None or not self.selection_reasons:
+                raise ValueError("selected coverage functions require a tier and reason")
+            if self.omission_reason is not None:
+                raise ValueError("selected coverage functions cannot have an omission reason")
+        elif self.selection_tier is not None or self.selection_reasons:
+            raise ValueError("omitted coverage functions cannot have selection metadata")
+        elif self.omission_reason is None:
+            raise ValueError("omitted coverage functions require an omission reason")
+        return self
+
+
+class IRFunctionCoverageManifest(DomainModel):
+    schema_version: Literal["binary-function-coverage-v1"] = (
+        "binary-function-coverage-v1"
+    )
+    snapshot_sha256: str = Field(pattern=SHA256_PATTERN)
+    maximum_functions: int = Field(ge=1, le=10000)
+    maximum_evidence_functions: int = Field(ge=1, le=10000)
+    callgraph_depth: int = Field(ge=0, le=8)
+    total_function_count: int = Field(ge=1, le=100000)
+    selected_function_count: int = Field(ge=1, le=100000)
+    cap_saturated: bool
+    warnings: tuple[str, ...] = Field(default=(), max_length=32)
+    functions: tuple[IRFunctionCoverage, ...] = Field(min_length=1, max_length=100000)
+    coverage_sha256: str = Field(pattern=SHA256_PATTERN)
+
+    @model_validator(mode="after")
+    def validate_manifest(self) -> "IRFunctionCoverageManifest":
+        if tuple(sorted(set(self.warnings))) != self.warnings:
+            raise ValueError("coverage warnings must be sorted and unique")
+        starts = tuple(item.start_address for item in self.functions)
+        if tuple(sorted(set(starts))) != starts:
+            raise ValueError("coverage functions must be ordered at unique start addresses")
+        if self.total_function_count != len(self.functions):
+            raise ValueError("coverage total does not match its function census")
+        selected = sum(item.selected for item in self.functions)
+        if self.selected_function_count != selected:
+            raise ValueError("coverage selected count does not match its census")
+        if self.cap_saturated != any(not item.selected for item in self.functions):
+            raise ValueError("coverage cap saturation does not match its omissions")
+        if self.cap_saturated and "function_export_cap_saturated" not in self.warnings:
+            raise ValueError("saturated function coverage requires a visible warning")
+        expected = function_coverage_digest(
+            snapshot_sha256=self.snapshot_sha256,
+            maximum_functions=self.maximum_functions,
+            maximum_evidence_functions=self.maximum_evidence_functions,
+            callgraph_depth=self.callgraph_depth,
+            total_function_count=self.total_function_count,
+            selected_function_count=self.selected_function_count,
+            cap_saturated=self.cap_saturated,
+            warnings=self.warnings,
+            functions=self.functions,
+        )
+        if self.coverage_sha256 != expected:
+            raise ValueError("function coverage digest does not match its evidence")
+        return self
+
+
 class NormalizedBinaryIR(DomainModel):
     schema_version: Literal["binary-ir-v1"] = "binary-ir-v1"
     created_at: datetime
@@ -149,6 +239,7 @@ class NormalizedBinaryIR(DomainModel):
     imports: tuple[str, ...] = Field(default=(), max_length=50000)
     strings: tuple[IRStringReference, ...] = Field(default=(), max_length=100000)
     functions: tuple[IRFunction, ...] = Field(min_length=1, max_length=100000)
+    function_coverage: IRFunctionCoverageManifest | None = None
     ir_sha256: str = Field(pattern=SHA256_PATTERN)
 
     @model_validator(mode="after")
@@ -163,6 +254,16 @@ class NormalizedBinaryIR(DomainModel):
         function_order = tuple(item.start_address for item in self.functions)
         if tuple(sorted(set(function_order))) != function_order:
             raise ValueError("IR functions must be ordered at unique start addresses")
+        if self.function_coverage is not None:
+            if self.function_coverage.snapshot_sha256 != self.snapshot_sha256:
+                raise ValueError("function coverage is bound to a different snapshot")
+            selected_ids = {
+                item.function_id
+                for item in self.function_coverage.functions
+                if item.selected
+            }
+            if selected_ids != {item.function_id for item in self.functions}:
+                raise ValueError("IR functions do not match the function coverage selection")
         expected = normalized_ir_digest(
             snapshot_sha256=self.snapshot_sha256,
             image_name=self.image_name,
@@ -174,6 +275,7 @@ class NormalizedBinaryIR(DomainModel):
             imports=self.imports,
             strings=self.strings,
             functions=self.functions,
+            function_coverage=self.function_coverage,
         )
         if self.ir_sha256 != expected:
             raise ValueError("normalized IR digest does not match its evidence")
@@ -206,6 +308,7 @@ def normalized_ir_digest(
     imports: tuple[str, ...],
     strings: tuple[IRStringReference, ...],
     functions: tuple[IRFunction, ...],
+    function_coverage: IRFunctionCoverageManifest | None = None,
 ) -> str:
     payload = {
         "architecture": architecture.value,
@@ -219,6 +322,36 @@ def normalized_ir_digest(
         "schema_version": "binary-ir-v1",
         "snapshot_sha256": snapshot_sha256,
         "strings": [item.model_dump(mode="json") for item in strings],
+    }
+    if function_coverage is not None:
+        payload["function_coverage"] = function_coverage.model_dump(mode="json")
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    return "sha256:" + hashlib.sha256(canonical).hexdigest()
+
+
+def function_coverage_digest(
+    *,
+    snapshot_sha256: str,
+    maximum_functions: int,
+    maximum_evidence_functions: int,
+    callgraph_depth: int,
+    total_function_count: int,
+    selected_function_count: int,
+    cap_saturated: bool,
+    warnings: tuple[str, ...],
+    functions: tuple[IRFunctionCoverage, ...],
+) -> str:
+    payload = {
+        "callgraph_depth": callgraph_depth,
+        "cap_saturated": cap_saturated,
+        "functions": [item.model_dump(mode="json") for item in functions],
+        "maximum_evidence_functions": maximum_evidence_functions,
+        "maximum_functions": maximum_functions,
+        "schema_version": "binary-function-coverage-v1",
+        "selected_function_count": selected_function_count,
+        "snapshot_sha256": snapshot_sha256,
+        "total_function_count": total_function_count,
+        "warnings": warnings,
     }
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     return "sha256:" + hashlib.sha256(canonical).hexdigest()

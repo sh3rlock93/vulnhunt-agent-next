@@ -26,6 +26,7 @@ class BinaryFormatFamily(StrEnum):
     HEIF = "heif"
     WEBP = "webp"
     TEXTURE = "texture"
+    SGI = "sgi"
 
 
 class ImageIOEntryRoute(StrEnum):
@@ -124,6 +125,7 @@ _FORMAT_MARKERS: dict[BinaryFormatFamily, tuple[str, ...]] = {
     BinaryFormatFamily.HEIF: ("heif", "heic", "avif", "ftypheic"),
     BinaryFormatFamily.WEBP: ("webp", "vp8x", "vp8l"),
     BinaryFormatFamily.TEXTURE: ("texture", "ktx", "astc", "dds"),
+    BinaryFormatFamily.SGI: ("sgi", "silicon graphics", "image/x-sgi"),
 }
 _INPUT_TAGS = {
     "decoder_entry",
