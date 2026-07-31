@@ -176,6 +176,7 @@ tools/*
 !tools/ghidra/*.java
 !tools/macos/
 tools/macos/*
+!tools/macos/imageio_canary_interposer.c
 !tools/macos/run_m14_imageio_pilot.py
 docker/local/
 prompts/hunters/*/

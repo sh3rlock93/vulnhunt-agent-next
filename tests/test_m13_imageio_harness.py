@@ -11,6 +11,7 @@ import pytest
 from pydantic import ValidationError
 
 from vulnhunt_agent.macos.imageio_harness import (
+    ImageIOCanaryInterposer,
     ImageIOHarnessLimits,
     ImageIOVMCommand,
     ImageIOVMCommandResult,
@@ -123,6 +124,16 @@ class FakeVMRunner:
             crash_log=self.crash_log,
             memory_limit_exceeded=self.memory_limit_exceeded,
             crash_log_truncated=self.crash_log_truncated,
+            canary_interposer_sha256=(
+                command.canary_interposer.binary_sha256
+                if command.canary_interposer is not None
+                else None
+            ),
+            canary_value=(
+                command.canary_interposer.canary_value
+                if command.canary_interposer is not None
+                else None
+            ),
         )
 
 
@@ -134,6 +145,7 @@ class FakeVMRunner:
         ImageIOAPIRoute.THUMBNAIL_DECODE,
         ImageIOAPIRoute.FULL_DECODE,
         ImageIOAPIRoute.INCREMENTAL_DECODE,
+        ImageIOAPIRoute.RAW_PIXEL_COPY,
     ],
 )
 def test_each_harness_route_runs_only_after_two_vm_attestations(
@@ -192,6 +204,40 @@ def test_inventory_route_cannot_accept_an_image(tmp_path: Path) -> None:
 
     assert runner.attest_calls == 0
     assert runner.commands == []
+
+
+def test_canary_requires_reviewed_raw_vm_route(tmp_path: Path) -> None:
+    trigger = tmp_path / "opaque.bin"
+    trigger.write_bytes(b"opaque")
+    runner = FakeVMRunner(
+        stdout=b'{"raw_pixels_copied":true}\n',
+    )
+    canary = ImageIOCanaryInterposer(
+        binary_sha256="sha256:" + "f" * 64,
+        canary_value=165,
+        maximum_allocation_bytes=16 * 1024 * 1024,
+        human_review_approved=True,
+    )
+
+    run = run_imageio_harness(
+        runner=runner,
+        environment=_environment(),
+        route=ImageIOAPIRoute.RAW_PIXEL_COPY,
+        input_path=trigger,
+        canary_interposer=canary,
+    )
+
+    assert runner.commands[0].canary_interposer == canary
+    assert run.evidence.canary_interposer_sha256 == canary.binary_sha256
+    assert run.evidence.canary_value == 165
+    with pytest.raises(ValueError, match="limited to the raw-pixel route"):
+        run_imageio_harness(
+            runner=runner,
+            environment=_environment(),
+            route=ImageIOAPIRoute.FULL_DECODE,
+            input_path=trigger,
+            canary_interposer=canary,
+        )
 
 
 def test_environment_rejects_any_networked_or_host_execution_mode() -> None:

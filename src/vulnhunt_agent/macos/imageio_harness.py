@@ -25,6 +25,7 @@ from .imageio_inventory import ImageIOAPIRoute
 
 _HARNESS_ROUTES = frozenset(ImageIOAPIRoute) - {ImageIOAPIRoute.TYPE_IDENTIFIERS}
 _GUEST_INPUT_PATH = "/private/tmp/vulnhunt-imageio/input.bin"
+_CANARY_INTERPOSER_REVISION = "m16-canary-interposer-v1"
 
 
 class ImageIOVMExitReason(StrEnum):
@@ -88,6 +89,39 @@ class ImageIOVMEnvironment(DomainModel):
         return self
 
 
+class ImageIOCanaryInterposer(DomainModel):
+    schema_version: Literal["imageio-canary-interposer-v1"] = (
+        "imageio-canary-interposer-v1"
+    )
+    source_revision: Literal["m16-canary-interposer-v1"] = (
+        "m16-canary-interposer-v1"
+    )
+    binary_sha256: str = Field(pattern=SHA256_PATTERN)
+    guest_path: str = (
+        "/Users/vulnhunt/Library/Application Support/VulnHunt/bin/"
+        "imageio-canary-interposer.dylib"
+    )
+    canary_value: int = Field(ge=0, le=255)
+    minimum_allocation_bytes: int = Field(default=1, ge=1, le=4 * 1024 * 1024 * 1024)
+    maximum_allocation_bytes: int = Field(
+        default=512 * 1024 * 1024,
+        ge=1,
+        le=4 * 1024 * 1024 * 1024,
+    )
+    human_review_approved: Literal[True]
+    host_injection_allowed: Literal[False] = False
+    third_party_injection_allowed: Literal[False] = False
+
+    @model_validator(mode="after")
+    def validate_interposer(self) -> "ImageIOCanaryInterposer":
+        _validate_absolute_guest_path(self.guest_path, label="canary interposer path")
+        if not self.guest_path.endswith("/imageio-canary-interposer.dylib"):
+            raise ValueError("canary interposer must use the fixed guest filename")
+        if self.minimum_allocation_bytes > self.maximum_allocation_bytes:
+            raise ValueError("canary allocation range is inverted")
+        return self
+
+
 class ImageIOVMIsolationAttestation(DomainModel):
     """Observed VM state immediately before and after one harness process."""
 
@@ -129,6 +163,7 @@ class ImageIOVMCommand:
     guest_input_path: str
     argv: tuple[str, ...]
     limits: ImageIOHarnessLimits
+    canary_interposer: ImageIOCanaryInterposer | None = None
     capture_crash_log: bool = True
 
 
@@ -149,6 +184,8 @@ class ImageIOVMCommandResult:
     crash_log: bytes | None
     memory_limit_exceeded: bool = False
     crash_log_truncated: bool = False
+    canary_interposer_sha256: str | None = None
+    canary_value: int | None = None
 
 
 class ImageIOVMRunner(Protocol):
@@ -182,6 +219,8 @@ class ImageIOHarnessEvidence(DomainModel):
     crash_log_sha256: str | None = Field(default=None, pattern=SHA256_PATTERN)
     pre_attestation_sha256: str = Field(pattern=SHA256_PATTERN)
     post_attestation_sha256: str = Field(pattern=SHA256_PATTERN)
+    canary_interposer_sha256: str | None = Field(default=None, pattern=SHA256_PATTERN)
+    canary_value: int | None = Field(default=None, ge=0, le=255)
     evidence_complete: bool
     evidence_gaps: tuple[str, ...] = ()
     raw_artifacts_public: Literal[False] = False
@@ -198,6 +237,8 @@ class ImageIOHarnessEvidence(DomainModel):
                 raise ValueError("a truncated crash log may not have an artifact digest")
             if "crash log exceeded the capture limit" not in self.evidence_gaps:
                 raise ValueError("a truncated crash log must record the evidence gap")
+        if (self.canary_interposer_sha256 is None) != (self.canary_value is None):
+            raise ValueError("canary digest and byte must be recorded together")
         return self
 
 
@@ -219,12 +260,18 @@ def run_imageio_harness(
     route: ImageIOAPIRoute,
     input_path: Path,
     limits: ImageIOHarnessLimits | None = None,
+    canary_interposer: ImageIOCanaryInterposer | None = None,
 ) -> PrivateImageIOHarnessRun:
     """Execute one route after fail-closed VM isolation attestation."""
 
     if route not in _HARNESS_ROUTES:
         raise ValueError(f"{route.value} is inventory-only and cannot execute an input")
     active_limits = limits or ImageIOHarnessLimits()
+    if canary_interposer is not None:
+        if route is not ImageIOAPIRoute.RAW_PIXEL_COPY:
+            raise ValueError("canary interposition is limited to the raw-pixel route")
+        if canary_interposer.maximum_allocation_bytes > active_limits.max_decoded_bytes:
+            raise ValueError("canary allocation ceiling exceeds the decoded-byte limit")
     source = _validate_input_path(input_path)
     input_size = source.stat().st_size
     if input_size > active_limits.max_input_bytes:
@@ -262,6 +309,7 @@ def run_imageio_harness(
         guest_input_path=_GUEST_INPUT_PATH,
         argv=argv,
         limits=active_limits,
+        canary_interposer=canary_interposer,
     )
 
     before = runner.attest(environment)
@@ -302,6 +350,8 @@ def run_imageio_harness(
         ),
         pre_attestation_sha256=_model_sha256(before),
         post_attestation_sha256=_model_sha256(after),
+        canary_interposer_sha256=result.canary_interposer_sha256,
+        canary_value=result.canary_value,
         evidence_complete=not gaps,
         evidence_gaps=tuple(gaps),
     )
@@ -388,6 +438,21 @@ def _validate_execution_identity(
         raise RuntimeError("guest input digest does not match the requested trigger")
     if result.enforced_limits != command.limits:
         raise RuntimeError("VM backend did not enforce the exact requested resource limits")
+    expected_canary_sha256 = (
+        command.canary_interposer.binary_sha256
+        if command.canary_interposer is not None
+        else None
+    )
+    expected_canary_value = (
+        command.canary_interposer.canary_value
+        if command.canary_interposer is not None
+        else None
+    )
+    if (
+        result.canary_interposer_sha256 != expected_canary_sha256
+        or result.canary_value != expected_canary_value
+    ):
+        raise RuntimeError("VM backend changed or omitted the canary interposer identity")
 
 
 def _validate_output_limits(

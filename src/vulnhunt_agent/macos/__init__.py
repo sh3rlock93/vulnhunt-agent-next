@@ -19,6 +19,13 @@ from .imageio_fuzzer import (
     generate_dicom_fuzz_cases,
     run_imageio_fuzz_campaign,
 )
+from .imageio_disclosure import (
+    ImageIODisclosureAssessment,
+    ImageIODisclosureOracleStatus,
+    ImageIORawPixelObservation,
+    assess_canary_disclosure,
+    normalize_raw_pixel_observation,
+)
 from .imageio_fuzz_benchmark import (
     ImageIOFuzzBenchmarkAssessment,
     ImageIOFuzzBenchmarkStatus,
@@ -47,21 +54,26 @@ from .imageio_hunter import (
     plan_imageio_experiments,
     review_imageio_experiment,
 )
+from .imageio_harness import ImageIOCanaryInterposer
 
 __all__ = [
     "FrozenImageIOCampaign",
     "ImageIOAPIRoute",
     "ImageIOBinaryContext",
     "ImageIOCampaignManifest",
+    "ImageIOCanaryInterposer",
     "ImageIOCrashHunterPlan",
     "ImageIOCrashTriageClass",
     "ImageIODecodeStage",
+    "ImageIODisclosureAssessment",
+    "ImageIODisclosureOracleStatus",
     "ImageIOFuzzBudget",
     "ImageIOFuzzBenchmarkAssessment",
     "ImageIOFuzzBenchmarkStatus",
     "ImageIOFuzzCampaignSummary",
     "ImageIOFormatFamily",
     "ImageIOInventory",
+    "ImageIORawPixelObservation",
     "ImageIOSeedQualification",
     "ImageIOExperimentPlan",
     "ImageIOExperimentPlanStatus",
@@ -71,6 +83,7 @@ __all__ = [
     "PrivateImageIOFuzzStore",
     "PrivateImageIOPayloadHistory",
     "assess_campaign_readiness",
+    "assess_canary_disclosure",
     "assess_imageio_fuzz_benchmark",
     "build_minimal_dicom_seed",
     "build_imageio_hunter_packet",
@@ -81,6 +94,7 @@ __all__ = [
     "generate_dicom_fuzz_cases",
     "load_imageio_crash_observations",
     "minimize_imageio_crash",
+    "normalize_raw_pixel_observation",
     "run_imageio_fuzz_campaign",
     "execute_imageio_hunter_plan",
     "plan_imageio_experiments",

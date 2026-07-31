@@ -40,6 +40,12 @@ struct options {
     uint64_t max_memory_bytes;
     uint64_t max_output_bytes;
     uint64_t max_open_files;
+    const char *canary_interposer;
+    const char *canary_interposer_sha256;
+    uint64_t canary_value;
+    uint64_t canary_minimum_allocation_bytes;
+    uint64_t canary_maximum_allocation_bytes;
+    bool canary_value_set;
     char **harness_argv;
 };
 
@@ -48,7 +54,10 @@ static void usage(void) {
             "usage: imageio-job-runner --expected-input-sha256 SHA256 "
             "--wall-time-seconds N --cpu-time-seconds N "
             "--max-process-memory-bytes N --max-output-bytes N "
-            "--max-open-files N -- HARNESS ARGS...\n");
+            "--max-open-files N [--canary-interposer PATH "
+            "--canary-interposer-sha256 SHA256 --canary-value BYTE "
+            "--canary-minimum-allocation-bytes N "
+            "--canary-maximum-allocation-bytes N] -- HARNESS ARGS...\n");
 }
 
 static bool parse_u64(const char *value, uint64_t *result) {
@@ -56,6 +65,17 @@ static bool parse_u64(const char *value, uint64_t *result) {
     errno = 0;
     unsigned long long parsed = strtoull(value, &end, 10);
     if (errno != 0 || end == value || *end != '\0' || parsed == 0) {
+        return false;
+    }
+    *result = (uint64_t)parsed;
+    return true;
+}
+
+static bool parse_u8(const char *value, uint64_t *result) {
+    char *end = NULL;
+    errno = 0;
+    unsigned long long parsed = strtoull(value, &end, 10);
+    if (errno != 0 || end == value || *end != '\0' || parsed > 255) {
         return false;
     }
     *result = (uint64_t)parsed;
@@ -103,6 +123,22 @@ static bool parse_options(int argc, char **argv, struct options *options) {
         } else if (strcmp(key, "--max-open-files") == 0 &&
                    options->max_open_files == 0) {
             if (!parse_u64(value, &options->max_open_files)) return false;
+        } else if (strcmp(key, "--canary-interposer") == 0 &&
+                   options->canary_interposer == NULL) {
+            options->canary_interposer = value;
+        } else if (strcmp(key, "--canary-interposer-sha256") == 0 &&
+                   options->canary_interposer_sha256 == NULL) {
+            options->canary_interposer_sha256 = value;
+        } else if (strcmp(key, "--canary-value") == 0 &&
+                   !options->canary_value_set) {
+            if (!parse_u8(value, &options->canary_value)) return false;
+            options->canary_value_set = true;
+        } else if (strcmp(key, "--canary-minimum-allocation-bytes") == 0 &&
+                   options->canary_minimum_allocation_bytes == 0) {
+            if (!parse_u64(value, &options->canary_minimum_allocation_bytes)) return false;
+        } else if (strcmp(key, "--canary-maximum-allocation-bytes") == 0 &&
+                   options->canary_maximum_allocation_bytes == 0) {
+            if (!parse_u64(value, &options->canary_maximum_allocation_bytes)) return false;
         } else {
             return false;
         }
@@ -112,12 +148,24 @@ static bool parse_options(int argc, char **argv, struct options *options) {
         return false;
     }
     options->harness_argv = &argv[index + 1];
+    bool any_canary = options->canary_interposer != NULL ||
+                      options->canary_interposer_sha256 != NULL ||
+                      options->canary_value_set ||
+                      options->canary_minimum_allocation_bytes > 0 ||
+                      options->canary_maximum_allocation_bytes > 0;
+    bool complete_canary = options->canary_interposer != NULL &&
+                           options->canary_interposer_sha256 != NULL &&
+                           valid_sha256(options->canary_interposer_sha256) &&
+                           options->canary_value_set &&
+                           options->canary_minimum_allocation_bytes > 0 &&
+                           options->canary_minimum_allocation_bytes <=
+                               options->canary_maximum_allocation_bytes;
     return options->expected_input_sha256 != NULL &&
            valid_sha256(options->expected_input_sha256) &&
            options->wall_seconds > 0 && options->cpu_seconds > 0 &&
            options->cpu_seconds <= options->wall_seconds &&
            options->max_memory_bytes > 0 && options->max_output_bytes > 0 &&
-           options->max_open_files > 0;
+           options->max_open_files > 0 && (!any_canary || complete_canary);
 }
 
 static const char *find_harness_input(char **argv) {
@@ -322,6 +370,14 @@ int main(int argc, char **argv) {
         fprintf(stderr, "guest input digest mismatch\n");
         return 65;
     }
+    char canary_sha256[72] = {0};
+    if (options.canary_interposer != NULL) {
+        if (!sha256_file(options.canary_interposer, canary_sha256) ||
+            strcmp(canary_sha256, options.canary_interposer_sha256) != 0) {
+            fprintf(stderr, "canary interposer digest mismatch\n");
+            return 65;
+        }
+    }
     char argv_sha256[72];
     sha256_argv(options.harness_argv, argv_sha256);
 
@@ -359,6 +415,24 @@ int main(int argc, char **argv) {
             !set_one_limit(RLIMIT_NOFILE, options.max_open_files, "open files") ||
             !set_one_limit(RLIMIT_FSIZE, options.max_output_bytes, "file size")) {
             _exit(71);
+        }
+        if (options.canary_interposer != NULL) {
+            char byte_value[4];
+            char minimum[32];
+            char maximum[32];
+            snprintf(byte_value, sizeof(byte_value), "%llu",
+                     (unsigned long long)options.canary_value);
+            snprintf(minimum, sizeof(minimum), "%llu",
+                     (unsigned long long)options.canary_minimum_allocation_bytes);
+            snprintf(maximum, sizeof(maximum), "%llu",
+                     (unsigned long long)options.canary_maximum_allocation_bytes);
+            if (setenv("DYLD_INSERT_LIBRARIES", options.canary_interposer, 1) != 0 ||
+                setenv("VULNHUNT_CANARY_BYTE", byte_value, 1) != 0 ||
+                setenv("VULNHUNT_CANARY_MIN_BYTES", minimum, 1) != 0 ||
+                setenv("VULNHUNT_CANARY_MAX_BYTES", maximum, 1) != 0 ||
+                setenv("VULNHUNT_CANARY_REVISION", "m16-canary-interposer-v1", 1) != 0) {
+                _exit(71);
+            }
         }
         execv(options.harness_argv[0], options.harness_argv);
         dprintf(STDERR_FILENO, "failed to exec harness: %s\n", strerror(errno));
@@ -420,6 +494,13 @@ int main(int argc, char **argv) {
     printf("\"duration_ms\":%llu,", (unsigned long long)duration_ms);
     printf("\"crash_log_present\":%s,", crash_present ? "true" : "false");
     printf("\"crash_log_truncated\":%s,", crash_truncated ? "true" : "false");
+    if (options.canary_interposer != NULL) {
+        printf("\"canary_interposer_sha256\":\"%s\",", canary_sha256);
+        printf("\"canary_value\":%llu,", (unsigned long long)options.canary_value);
+    } else {
+        printf("\"canary_interposer_sha256\":null,");
+        printf("\"canary_value\":null,");
+    }
     printf("\"wall_time_seconds\":%llu,", (unsigned long long)options.wall_seconds);
     printf("\"cpu_time_seconds\":%llu,", (unsigned long long)options.cpu_seconds);
     printf("\"max_process_memory_bytes\":%llu,",

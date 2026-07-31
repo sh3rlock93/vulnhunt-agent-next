@@ -59,6 +59,7 @@ class ImageIOUTMProvisioning(DomainModel):
     worker_sha256: str = Field(pattern=SHA256_PATTERN)
     harness_sha256: str = Field(pattern=SHA256_PATTERN)
     job_runner_sha256: str = Field(pattern=SHA256_PATTERN)
+    canary_interposer_sha256: str = Field(pattern=SHA256_PATTERN)
 
     @model_validator(mode="after")
     def validate_config_path(self) -> "ImageIOUTMProvisioning":
@@ -108,6 +109,7 @@ class ImageIOVMGuestHeartbeat(DomainModel):
     worker_sha256: str = Field(pattern=SHA256_PATTERN)
     harness_sha256: str = Field(pattern=SHA256_PATTERN)
     job_runner_sha256: str = Field(pattern=SHA256_PATTERN)
+    canary_interposer_sha256: str = Field(pattern=SHA256_PATTERN)
 
     @model_validator(mode="after")
     def require_aware_time(self) -> "ImageIOVMGuestHeartbeat":
@@ -132,6 +134,14 @@ class ImageIOVMQueueResult(DomainModel):
     duration_ms: int = Field(ge=0)
     crash_log_present: bool
     crash_log_truncated: bool
+    canary_interposer_sha256: str | None = Field(default=None, pattern=SHA256_PATTERN)
+    canary_value: int | None = Field(default=None, ge=0, le=255)
+
+    @model_validator(mode="after")
+    def validate_canary_identity(self) -> "ImageIOVMQueueResult":
+        if (self.canary_interposer_sha256 is None) != (self.canary_value is None):
+            raise ValueError("VM canary digest and byte must be returned together")
+        return self
 
 
 class UTMCLI(Protocol):
@@ -385,6 +395,11 @@ class UTMSharedDirectoryRunner:
             "guest_input_path": command.guest_input_path,
             "argv": list(command.argv),
             "limits": command.limits.model_dump(mode="json"),
+            "canary_interposer": (
+                command.canary_interposer.model_dump(mode="json")
+                if command.canary_interposer is not None
+                else None
+            ),
         }
         job_directory = self._stage_job(job_id, command, request)
         result_directory = self._paths.outbox / job_id
@@ -412,6 +427,16 @@ class UTMSharedDirectoryRunner:
                 stderr=b"",
                 crash_log=None,
                 crash_log_truncated=False,
+                canary_interposer_sha256=(
+                    command.canary_interposer.binary_sha256
+                    if command.canary_interposer is not None
+                    else None
+                ),
+                canary_value=(
+                    command.canary_interposer.canary_value
+                    if command.canary_interposer is not None
+                    else None
+                ),
             )
         finally:
             _remove_job_directory(job_directory, self._paths.inbox)
@@ -450,6 +475,10 @@ class UTMSharedDirectoryRunner:
             "job runner digest": (
                 self._provisioning.job_runner_sha256,
                 heartbeat.job_runner_sha256,
+            ),
+            "canary interposer digest": (
+                self._provisioning.canary_interposer_sha256,
+                heartbeat.canary_interposer_sha256,
             ),
         }
         for label, (expected, actual) in comparisons.items():
@@ -525,6 +554,8 @@ class UTMSharedDirectoryRunner:
             crash_log=crash_log,
             memory_limit_exceeded=result.memory_limit_exceeded,
             crash_log_truncated=result.crash_log_truncated,
+            canary_interposer_sha256=result.canary_interposer_sha256,
+            canary_value=result.canary_value,
         )
 
 
