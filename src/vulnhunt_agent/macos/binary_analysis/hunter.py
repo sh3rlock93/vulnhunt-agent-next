@@ -55,7 +55,7 @@ from .snapshot import BinarySnapshot
 
 BINARY_HUNTER = "binary-imageio-analysis"
 BINARY_HUNTER_PLANNING_POLICY: Literal["binary-hunter-planning-v1"] = "binary-hunter-planning-v1"
-BINARY_HUNTER_PROMPT_VERSION: Literal["binary-imageio-hunter-v1"] = "binary-imageio-hunter-v1"
+BINARY_HUNTER_PROMPT_VERSION: Literal["binary-imageio-hunter-v2"] = "binary-imageio-hunter-v2"
 BINARY_EXPERIMENT_POLICY: Literal["binary-experiment-planning-v1"] = "binary-experiment-planning-v1"
 _MAX_PACKET_BYTES = 512 * 1024
 _MAX_RAW_RESPONSE_BYTES = 128 * 1024
@@ -110,6 +110,10 @@ size/allocation/index or lifetime relationship, direct supporting evidence,
 contradicting evidence, and an observable falsification condition. A
 static_hypothesis must cite both one static_finding evidence ID and one
 parser_input, parser_api, or parser_format evidence ID from the packet.
+For partial_initialization_disclosure, also cite allocation_initialization and
+full_consumption_output evidence. A composite_range_gap is a range hypothesis,
+not a reportable disclosure; request the missing initialization/output evidence
+or a typed experiment instead of promoting it.
 
 Return only this JSON object:
 {
@@ -122,7 +126,7 @@ Return only this JSON object:
     {
       "hypothesis_id": "binhypothesis-<stable-label>",
       "title": "<concise>",
-      "vulnerability_class": "integer_overflow|offset_length_oob|allocation_copy_mismatch|use_after_free",
+      "vulnerability_class": "integer_overflow|offset_length_oob|allocation_copy_mismatch|use_after_free|composite_range_gap|partial_initialization_disclosure",
       "input_control": "<controlled value and evidence limit>",
       "parser_state": "<state before the candidate sink>",
       "security_relation": "<size/allocation/index or lifetime relation>",
@@ -137,7 +141,7 @@ Return only this JSON object:
     {
       "request_id": "binexperiment-<stable-label>",
       "hypothesis_id": "<one hypothesis_id>",
-      "kind": "exact_replay|structured_field_boundary|api_route_differential|incremental_chunk_schedule|guard_malloc|cross_build_replay|binary_context",
+      "kind": "exact_replay|structured_field_boundary|api_route_differential|incremental_chunk_schedule|guard_malloc|cross_build_replay|binary_context|raw_output_differential|canary_propagation",
       "rationale": "<why the observation discriminates the hypothesis>",
       "retained_input_sha256": null,
       "target_format": null,
@@ -148,6 +152,7 @@ Return only this JSON object:
       "incremental_chunk_sizes": [],
       "context_function_ids": [],
       "target_build": null,
+      "canary_value": null,
       "execution_limit": 1,
       "expected_observation": "<supporting result>",
       "falsification_condition": "<rejecting result>",
@@ -202,6 +207,8 @@ class BinaryHunterEvidenceKind(StrEnum):
     CONTEXT_PLAN = "context_plan"
     CONTEXT_PACK = "context_pack"
     STATIC_FINDING = "static_finding"
+    ALLOCATION_INITIALIZATION = "allocation_initialization"
+    FULL_CONSUMPTION_OUTPUT = "full_consumption_output"
     PARSER_INPUT = "parser_input"
     PARSER_API = "parser_api"
     PARSER_FORMAT = "parser_format"
@@ -217,7 +224,7 @@ class BinaryHunterEvidenceRef(DomainModel):
 
 class BinaryHunterPacket(DomainModel):
     schema_version: Literal["binary-hunter-packet-v1"] = "binary-hunter-packet-v1"
-    prompt_version: Literal["binary-imageio-hunter-v1"] = BINARY_HUNTER_PROMPT_VERSION
+    prompt_version: Literal["binary-imageio-hunter-v2"] = BINARY_HUNTER_PROMPT_VERSION
     work_id: str = Field(pattern=r"^work_[0-9a-f]{64}$")
     snapshot_sha256: str = Field(pattern=SHA256_PATTERN)
     ir_sha256: str = Field(pattern=SHA256_PATTERN)
@@ -308,6 +315,8 @@ class BinaryExperimentKind(StrEnum):
     GUARD_MALLOC = "guard_malloc"
     CROSS_BUILD_REPLAY = "cross_build_replay"
     BINARY_CONTEXT = "binary_context"
+    RAW_OUTPUT_DIFFERENTIAL = "raw_output_differential"
+    CANARY_PROPAGATION = "canary_propagation"
 
 
 class BinaryHunterHypothesis(DomainModel):
@@ -351,6 +360,7 @@ class BinaryExperimentRequest(DomainModel):
         default=None,
         pattern=r"^[0-9A-Za-z][0-9A-Za-z.() _-]{0,79}$",
     )
+    canary_value: int | None = Field(default=None, ge=0, le=255)
     execution_limit: int = Field(default=1, ge=1, le=6)
     expected_observation: str = Field(min_length=1, max_length=2000)
     falsification_condition: str = Field(min_length=1, max_length=2000)
@@ -384,6 +394,11 @@ class BinaryExperimentRequest(DomainModel):
             raise ValueError("binary context request requires named ranked functions")
         if self.kind is BinaryExperimentKind.CROSS_BUILD_REPLAY and self.target_build is None:
             raise ValueError("cross-build replay requires a target build label")
+        if self.kind is BinaryExperimentKind.RAW_OUTPUT_DIFFERENTIAL and self.route is None:
+            raise ValueError("raw-output differential requires a decode route")
+        if self.kind is BinaryExperimentKind.CANARY_PROPAGATION:
+            if self.route is None or self.canary_value is None:
+                raise ValueError("canary propagation requires a decode route and byte value")
         return self
 
 
@@ -841,6 +856,38 @@ def validate_binary_hunter_assessment(
                 raise ValueError("static hypothesis requires deterministic finding evidence")
             if not kinds.intersection(_INPUT_EVIDENCE_KINDS):
                 raise ValueError("static hypothesis requires parser input/reachability evidence")
+    partial_findings = {
+        item.finding_id
+        for item in packet.findings
+        if item.vulnerability_class
+        is BinaryVulnerabilityClass.PARTIAL_INITIALIZATION_DISCLOSURE
+    }
+    for hypothesis in assessment.hypotheses:
+        if (
+            hypothesis.vulnerability_class
+            is not BinaryVulnerabilityClass.PARTIAL_INITIALIZATION_DISCLOSURE
+        ):
+            continue
+        supporting = {
+            references[identifier].kind
+            for identifier in hypothesis.supporting_evidence_ids
+        }
+        static_subjects = {
+            references[identifier].subject_id
+            for identifier in hypothesis.supporting_evidence_ids
+            if references[identifier].kind is BinaryHunterEvidenceKind.STATIC_FINDING
+        }
+        if not static_subjects.intersection(partial_findings):
+            raise ValueError("disclosure hypothesis requires a partial finding")
+        if not {
+            BinaryHunterEvidenceKind.ALLOCATION_INITIALIZATION,
+            BinaryHunterEvidenceKind.FULL_CONSUMPTION_OUTPUT,
+        }.issubset(supporting):
+            raise ValueError(
+                "disclosure hypothesis requires allocation and full-consumption/output evidence"
+            )
+        if not {item.value for item in supporting}.intersection(_INPUT_EVIDENCE_KINDS):
+            raise ValueError("disclosure hypothesis requires parser input/reachability evidence")
     allowed_functions = set(packet.known_function_ids)
     allowed_inputs = set(packet.retained_input_sha256s)
     for request in assessment.experiment_requests:
@@ -875,6 +922,7 @@ def plan_binary_experiments(
                 request.baseline_route.value if request.baseline_route is not None else None
             ),
             "boundary_values": list(request.boundary_values),
+            "canary_value": request.canary_value,
             "context_function_ids": list(request.context_function_ids),
             "incremental_chunk_sizes": list(request.incremental_chunk_sizes),
             "retained_input_sha256": request.retained_input_sha256,
@@ -1188,13 +1236,32 @@ def _packet_evidence_refs(
         ),
     ]
     for finding in findings:
+        finding_digest = _model_digest(finding)
         refs.append(
             _evidence_ref(
                 BinaryHunterEvidenceKind.STATIC_FINDING,
-                _model_digest(finding),
+                finding_digest,
                 finding.finding_id,
             )
         )
+        if (
+            finding.vulnerability_class
+            is BinaryVulnerabilityClass.PARTIAL_INITIALIZATION_DISCLOSURE
+        ):
+            refs.extend(
+                (
+                    _evidence_ref(
+                        BinaryHunterEvidenceKind.ALLOCATION_INITIALIZATION,
+                        finding_digest,
+                        f"{finding.finding_id}:allocation-initialization",
+                    ),
+                    _evidence_ref(
+                        BinaryHunterEvidenceKind.FULL_CONSUMPTION_OUTPUT,
+                        finding_digest,
+                        f"{finding.finding_id}:full-consumption-output",
+                    ),
+                )
+            )
     for candidate in candidates:
         for evidence in candidate.evidence:
             refs.append(
@@ -1248,6 +1315,18 @@ def _experiment_status(
     ):
         return BinaryExperimentPlanStatus.REQUIRES_HARNESS, (
             "format_aware_mutator",
+            "retained_private_input",
+        )
+    if request.kind is BinaryExperimentKind.RAW_OUTPUT_DIFFERENTIAL:
+        return BinaryExperimentPlanStatus.REVIEW_REQUIRED, (
+            "networkless_disposable_vm",
+            "raw_output_capture_oracle",
+            "retained_private_input",
+        )
+    if request.kind is BinaryExperimentKind.CANARY_PROPAGATION:
+        return BinaryExperimentPlanStatus.REVIEW_REQUIRED, (
+            "canary_initialized_allocator_harness",
+            "networkless_disposable_vm",
             "retained_private_input",
         )
     return BinaryExperimentPlanStatus.REVIEW_REQUIRED, (

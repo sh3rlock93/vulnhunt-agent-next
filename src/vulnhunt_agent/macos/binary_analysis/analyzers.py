@@ -22,6 +22,36 @@ class BinaryVulnerabilityClass(StrEnum):
     ALLOCATION_COPY_MISMATCH = "allocation_copy_mismatch"
     USE_AFTER_FREE = "use_after_free"
     COMPOSITE_RANGE_GAP = "composite_range_gap"
+    PARTIAL_INITIALIZATION_DISCLOSURE = "partial_initialization_disclosure"
+
+
+class BinaryVulnerabilityMetadata(DomainModel):
+    vulnerability_class: BinaryVulnerabilityClass
+    cwe_id: str = Field(pattern=r"^CWE-[0-9]+$")
+    weakness_name: str = Field(min_length=1, max_length=160)
+
+
+_BINARY_VULNERABILITY_METADATA = {
+    BinaryVulnerabilityClass.PARTIAL_INITIALIZATION_DISCLOSURE: (
+        "CWE-908",
+        "Use of Uninitialized Resource",
+    ),
+}
+
+
+def binary_vulnerability_metadata(
+    vulnerability_class: BinaryVulnerabilityClass,
+) -> BinaryVulnerabilityMetadata | None:
+    """Return class metadata without changing frozen finding serialization."""
+
+    value = _BINARY_VULNERABILITY_METADATA.get(vulnerability_class)
+    if value is None:
+        return None
+    return BinaryVulnerabilityMetadata(
+        vulnerability_class=vulnerability_class,
+        cwe_id=value[0],
+        weakness_name=value[1],
+    )
 
 
 class BinaryFindingSeverity(StrEnum):
@@ -263,6 +293,111 @@ class BinaryRangeAnalysisReport(DomainModel):
         return self
 
 
+class BinaryDisclosureStatus(StrEnum):
+    CANDIDATE = "candidate"
+    SAFE_COMBINED_RANGE = "safe_combined_range"
+    ZERO_INITIALIZED = "zero_initialized"
+    ACTUAL_LENGTH_BOUNDED = "actual_length_bounded"
+    FULLY_OVERWRITTEN = "fully_overwritten"
+    NOT_OBSERVABLE = "not_observable"
+    INSUFFICIENT_EVIDENCE = "insufficient_evidence"
+
+
+class BinaryPartialInitializationSummary(DomainModel):
+    summary_id: str = Field(pattern=r"^disclosure_[0-9a-f]{20}$")
+    function_id: str = Field(pattern=r"^fn_[0-9a-f]{20}$")
+    function_name: str = Field(min_length=1, max_length=500)
+    allocation_address: int | None = Field(default=None, ge=0)
+    range_call_address: int = Field(ge=0)
+    consumer_address: int | None = Field(default=None, ge=0)
+    output_address: int | None = Field(default=None, ge=0)
+    allocation: str | None = Field(default=None, min_length=1, max_length=160)
+    allocation_capacity: str | None = Field(default=None, min_length=1, max_length=160)
+    maximum_initialized_bytes: str | None = Field(default=None, min_length=1, max_length=160)
+    downstream_consumed_bytes: str | None = Field(default=None, min_length=1, max_length=160)
+    output_route: str | None = Field(default=None, min_length=1, max_length=500)
+    call_depth: int = Field(default=0, ge=0, le=1)
+    status: BinaryDisclosureStatus
+    suppression_reasons: tuple[str, ...] = Field(default=(), max_length=8)
+
+    @model_validator(mode="after")
+    def validate_summary(self) -> "BinaryPartialInitializationSummary":
+        if tuple(sorted(set(self.suppression_reasons))) != self.suppression_reasons:
+            raise ValueError("disclosure suppression reasons must be sorted and unique")
+        if self.status is BinaryDisclosureStatus.CANDIDATE:
+            required = (
+                self.allocation_address,
+                self.consumer_address,
+                self.output_address,
+                self.allocation,
+                self.allocation_capacity,
+                self.maximum_initialized_bytes,
+                self.downstream_consumed_bytes,
+                self.output_route,
+            )
+            if any(value is None for value in required):
+                raise ValueError("disclosure candidate is missing required chain evidence")
+            if self.suppression_reasons:
+                raise ValueError("disclosure candidate may not retain suppression reasons")
+        expected = _disclosure_summary_id(
+            self.function_id,
+            self.allocation_address,
+            self.range_call_address,
+            self.consumer_address,
+            self.output_address,
+            self.allocation,
+            self.allocation_capacity,
+            self.maximum_initialized_bytes,
+            self.downstream_consumed_bytes,
+            self.output_route,
+            self.call_depth,
+            self.status,
+            self.suppression_reasons,
+        )
+        if self.summary_id != expected:
+            raise ValueError("disclosure summary id does not match its evidence")
+        return self
+
+
+class BinaryDisclosureAnalysisReport(DomainModel):
+    schema_version: Literal["binary-disclosure-analysis-v1"] = (
+        "binary-disclosure-analysis-v1"
+    )
+    ir_sha256: str = Field(pattern=SHA256_PATTERN)
+    discovery_sha256: str = Field(pattern=SHA256_PATTERN)
+    analyzed_function_count: int = Field(ge=0)
+    summaries: tuple[BinaryPartialInitializationSummary, ...] = Field(max_length=100000)
+    findings: tuple[BinaryStaticFinding, ...] = Field(max_length=10000)
+    report_sha256: str = Field(pattern=SHA256_PATTERN)
+
+    @model_validator(mode="after")
+    def validate_report(self) -> "BinaryDisclosureAnalysisReport":
+        order = tuple(
+            (item.function_id, item.range_call_address, item.summary_id)
+            for item in self.summaries
+        )
+        if tuple(sorted(set(order))) != order:
+            raise ValueError("disclosure summaries must be canonically ordered and unique")
+        if tuple(sorted(self.findings, key=_finding_sort_key)) != self.findings:
+            raise ValueError("disclosure findings must use canonical order")
+        if any(
+            item.vulnerability_class
+            is not BinaryVulnerabilityClass.PARTIAL_INITIALIZATION_DISCLOSURE
+            for item in self.findings
+        ):
+            raise ValueError("disclosure report contains an unrelated finding class")
+        expected = _disclosure_report_digest(
+            self.ir_sha256,
+            self.discovery_sha256,
+            self.analyzed_function_count,
+            self.summaries,
+            self.findings,
+        )
+        if self.report_sha256 != expected:
+            raise ValueError("disclosure analysis digest does not match its evidence")
+        return self
+
+
 @dataclass(frozen=True)
 class _ArithmeticOrigin:
     instruction: IRInstruction
@@ -317,6 +452,23 @@ class _RangeGuardAssessment:
 
 
 @dataclass(frozen=True)
+class _DisclosureConsumer:
+    function: IRFunction
+    instruction: IRInstruction
+    consumed_bytes: str
+    output_values: tuple[str, ...]
+    call_depth: int
+
+
+@dataclass(frozen=True)
+class _DisclosureOutput:
+    function: IRFunction
+    instruction: IRInstruction
+    route: str
+    fully_overwritten: bool
+
+
+@dataclass(frozen=True)
 class _EntailedComparison:
     compare: IRInstruction
     truth: bool
@@ -349,8 +501,13 @@ def analyze_binary_candidates(
     active_limits = limits or BinaryAnalyzerLimits()
     functions = {item.function_id: item for item in ir.functions}
     range_report = analyze_composite_ranges(ir, discovery)
+    disclosure_report = analyze_partial_initialization_disclosures(
+        ir,
+        discovery,
+        range_report=range_report,
+    )
     range_findings: dict[str, list[BinaryStaticFinding]] = {}
-    for finding in range_report.findings:
+    for finding in (*range_report.findings, *disclosure_report.findings):
         range_findings.setdefault(finding.function_id, []).append(finding)
     findings: list[BinaryStaticFinding] = []
     analyzed = 0
@@ -464,6 +621,77 @@ def analyze_composite_ranges(
         discovery_sha256=discovery.discovery_sha256,
         analyzed_function_count=analyzed,
         calls=ordered_calls,
+        findings=ordered_findings,
+        report_sha256=digest,
+    )
+
+
+def analyze_partial_initialization_disclosures(
+    ir: NormalizedBinaryIR,
+    discovery: ImageIOParserDiscovery,
+    *,
+    range_report: BinaryRangeAnalysisReport | None = None,
+) -> BinaryDisclosureAnalysisReport:
+    """Find partial-fill/full-consume paths that reach observable output.
+
+    The analysis is deliberately proof-oriented: an unsafe range summary alone
+    is retained as insufficient evidence and cannot become a disclosure finding.
+    Consumer expansion is bounded to one direct caller/callee hop.
+    """
+
+    if discovery.ir_sha256 != ir.ir_sha256:
+        raise ValueError("parser discovery is not bound to the supplied IR")
+    active_ranges = range_report or analyze_composite_ranges(ir, discovery)
+    if (
+        active_ranges.ir_sha256 != ir.ir_sha256
+        or active_ranges.discovery_sha256 != discovery.discovery_sha256
+    ):
+        raise ValueError("range analysis is not bound to disclosure inputs")
+    functions = {item.function_id: item for item in ir.functions}
+    functions_by_name = {_canonical_callee(item.name): item for item in ir.functions}
+    candidates = {item.function_id: item for item in discovery.candidates}
+    ranges_by_function: dict[str, list[BinaryRangeCallSummary]] = {}
+    for summary in active_ranges.calls:
+        ranges_by_function.setdefault(summary.function_id, []).append(summary)
+
+    summaries: list[BinaryPartialInitializationSummary] = []
+    findings: list[BinaryStaticFinding] = []
+    for function_id in (item.function_id for item in discovery.candidates):
+        function = functions.get(function_id)
+        candidate = candidates.get(function_id)
+        if function is None or candidate is None:
+            raise ValueError("parser discovery cites a function absent from the IR")
+        for range_summary in ranges_by_function.get(function_id, ()):
+            summary, finding = _partial_initialization_chain(
+                ir,
+                candidate,
+                function,
+                range_summary,
+                functions_by_name,
+            )
+            summaries.append(summary)
+            if finding is not None:
+                findings.append(finding)
+
+    ordered_summaries = tuple(
+        sorted(
+            summaries,
+            key=lambda item: (item.function_id, item.range_call_address, item.summary_id),
+        )
+    )
+    ordered_findings = tuple(sorted(_deduplicate(findings), key=_finding_sort_key))
+    digest = _disclosure_report_digest(
+        ir.ir_sha256,
+        discovery.discovery_sha256,
+        len(discovery.candidates),
+        ordered_summaries,
+        ordered_findings,
+    )
+    return BinaryDisclosureAnalysisReport(
+        ir_sha256=ir.ir_sha256,
+        discovery_sha256=discovery.discovery_sha256,
+        analyzed_function_count=len(discovery.candidates),
+        summaries=ordered_summaries,
         findings=ordered_findings,
         report_sha256=digest,
     )
@@ -749,6 +977,528 @@ def _function_range_analysis(
                 if finding is not None:
                     findings.append(finding)
     return summaries, findings
+
+
+def _partial_initialization_chain(
+    ir: NormalizedBinaryIR,
+    candidate: ParserCandidate,
+    function: IRFunction,
+    range_summary: BinaryRangeCallSummary,
+    functions_by_name: dict[str, IRFunction],
+) -> tuple[BinaryPartialInitializationSummary, BinaryStaticFinding | None]:
+    instructions = tuple(
+        instruction
+        for block in function.blocks
+        for instruction in block.instructions
+    )
+    indexed = {instruction.index: instruction for instruction in instructions}
+    range_instruction = indexed.get(range_summary.instruction_index)
+    if (
+        range_instruction is None
+        or range_instruction.address != range_summary.address
+        or range_summary.actual_length is None
+        or not range_summary.offset_source_identities
+        or not range_summary.length_source_identities
+    ):
+        return _make_disclosure_summary(
+            function,
+            range_summary,
+            status=BinaryDisclosureStatus.INSUFFICIENT_EVIDENCE,
+            reasons=("missing_typed_range_or_actual_length_evidence",),
+        ), None
+
+    aliases = _alias_groups(function)
+    allocation = _nearest_allocation(
+        instructions,
+        range_summary.destination,
+        range_instruction.index,
+        aliases,
+    )
+    if allocation is None:
+        return _make_disclosure_summary(
+            function,
+            range_summary,
+            status=BinaryDisclosureStatus.INSUFFICIENT_EVIDENCE,
+            reasons=("missing_uninitialized_allocation",),
+        ), None
+    allocation_instruction, allocation_capacity = allocation
+
+    if range_summary.guard_status in {
+        BinaryRangeGuardStatus.SAFE_COMBINED,
+        BinaryRangeGuardStatus.LENGTH_CLAMPED,
+    }:
+        return _make_disclosure_summary(
+            function,
+            range_summary,
+            allocation_instruction=allocation_instruction,
+            allocation_capacity=allocation_capacity,
+            status=BinaryDisclosureStatus.SAFE_COMBINED_RANGE,
+            reasons=("full_read_proved_by_combined_range_or_clamp",),
+        ), None
+
+    if _allocation_is_zero_initialized(
+        instructions,
+        allocation_instruction,
+        allocation_capacity,
+        range_summary.destination,
+        range_instruction.index,
+        aliases,
+    ):
+        return _make_disclosure_summary(
+            function,
+            range_summary,
+            allocation_instruction=allocation_instruction,
+            allocation_capacity=allocation_capacity,
+            status=BinaryDisclosureStatus.ZERO_INITIALIZED,
+            reasons=("allocation_fully_zero_initialized_before_read",),
+        ), None
+
+    actual_consumers = _matching_consumers(
+        function,
+        range_instruction.index,
+        range_summary.destination,
+        range_summary.actual_length,
+        aliases,
+        functions_by_name,
+    )
+    requested_consumers = _matching_consumers(
+        function,
+        range_instruction.index,
+        range_summary.destination,
+        range_summary.requested_length,
+        aliases,
+        functions_by_name,
+    )
+    if not requested_consumers and actual_consumers:
+        return _make_disclosure_summary(
+            function,
+            range_summary,
+            allocation_instruction=allocation_instruction,
+            allocation_capacity=allocation_capacity,
+            consumer=actual_consumers[0],
+            status=BinaryDisclosureStatus.ACTUAL_LENGTH_BOUNDED,
+            reasons=("every_observed_consumer_uses_actual_length",),
+        ), None
+    if not requested_consumers:
+        return _make_disclosure_summary(
+            function,
+            range_summary,
+            allocation_instruction=allocation_instruction,
+            allocation_capacity=allocation_capacity,
+            status=BinaryDisclosureStatus.INSUFFICIENT_EVIDENCE,
+            reasons=("missing_full_length_consumer",),
+        ), None
+
+    consumer = requested_consumers[0]
+    if _actual_length_proves_full_read(
+        function,
+        consumer.instruction,
+        range_summary.actual_length,
+        range_summary.requested_length,
+    ):
+        return _make_disclosure_summary(
+            function,
+            range_summary,
+            allocation_instruction=allocation_instruction,
+            allocation_capacity=allocation_capacity,
+            consumer=consumer,
+            status=BinaryDisclosureStatus.ACTUAL_LENGTH_BOUNDED,
+            reasons=("actual_length_guard_proves_full_read_before_consumer",),
+        ), None
+
+    output = _observable_output_after(
+        function,
+        consumer,
+        aliases,
+    )
+    if output is None:
+        return _make_disclosure_summary(
+            function,
+            range_summary,
+            allocation_instruction=allocation_instruction,
+            allocation_capacity=allocation_capacity,
+            consumer=consumer,
+            status=BinaryDisclosureStatus.NOT_OBSERVABLE,
+            reasons=("no_observable_output_route",),
+        ), None
+    if output.fully_overwritten:
+        return _make_disclosure_summary(
+            function,
+            range_summary,
+            allocation_instruction=allocation_instruction,
+            allocation_capacity=allocation_capacity,
+            consumer=consumer,
+            output=output,
+            status=BinaryDisclosureStatus.FULLY_OVERWRITTEN,
+            reasons=("output_fully_overwritten_before_observation",),
+        ), None
+
+    summary = _make_disclosure_summary(
+        function,
+        range_summary,
+        allocation_instruction=allocation_instruction,
+        allocation_capacity=allocation_capacity,
+        consumer=consumer,
+        output=output,
+        status=BinaryDisclosureStatus.CANDIDATE,
+    )
+    finding = _make_finding(
+        ir,
+        candidate,
+        function,
+        vulnerability_class=BinaryVulnerabilityClass.PARTIAL_INITIALIZATION_DISCLOSURE,
+        severity=BinaryFindingSeverity.HIGH,
+        confidence=0.84,
+        summary=(
+            "A possibly short range read initializes at most its actual return length, "
+            "while a downstream consumer uses the requested length and reaches observable "
+            "output."
+        ),
+        evidence=(
+            _step(
+                allocation_instruction,
+                variables=(range_summary.destination, allocation_capacity),
+                description="A non-zeroing allocation establishes destination capacity.",
+            ),
+            _step(
+                range_instruction,
+                variables=(
+                    range_summary.destination,
+                    range_summary.requested_length,
+                    range_summary.actual_length,
+                ),
+                description=(
+                    "The range read may initialize only the returned actual length."
+                ),
+            ),
+            _step(
+                consumer.instruction,
+                variables=(range_summary.destination, consumer.consumed_bytes),
+                description="A downstream consumer uses the full requested length.",
+            ),
+            _step(
+                output.instruction,
+                variables=consumer.output_values,
+                description=f"Decoded data reaches observable output via {output.route}.",
+            ),
+        ),
+    )
+    return summary, finding
+
+
+def _make_disclosure_summary(
+    function: IRFunction,
+    range_summary: BinaryRangeCallSummary,
+    *,
+    allocation_instruction: IRInstruction | None = None,
+    allocation_capacity: str | None = None,
+    consumer: _DisclosureConsumer | None = None,
+    output: _DisclosureOutput | None = None,
+    status: BinaryDisclosureStatus,
+    reasons: tuple[str, ...] = (),
+) -> BinaryPartialInitializationSummary:
+    allocation = allocation_instruction.result if allocation_instruction is not None else None
+    values = (
+        function.function_id,
+        allocation_instruction.address if allocation_instruction is not None else None,
+        range_summary.address,
+        consumer.instruction.address if consumer is not None else None,
+        output.instruction.address if output is not None else None,
+        allocation,
+        allocation_capacity,
+        range_summary.actual_length,
+        consumer.consumed_bytes if consumer is not None else None,
+        output.route if output is not None else None,
+        consumer.call_depth if consumer is not None else 0,
+        status,
+        tuple(sorted(set(reasons))),
+    )
+    return BinaryPartialInitializationSummary(
+        summary_id=_disclosure_summary_id(*values),
+        function_id=function.function_id,
+        function_name=function.name,
+        allocation_address=values[1],
+        range_call_address=range_summary.address,
+        consumer_address=values[3],
+        output_address=values[4],
+        allocation=allocation,
+        allocation_capacity=allocation_capacity,
+        maximum_initialized_bytes=range_summary.actual_length,
+        downstream_consumed_bytes=values[8],
+        output_route=values[9],
+        call_depth=values[10],
+        status=status,
+        suppression_reasons=values[12],
+    )
+
+
+def _alias_groups(function: IRFunction) -> dict[str, frozenset[str]]:
+    groups: dict[str, set[str]] = {}
+    for block in function.blocks:
+        for instruction in block.instructions:
+            if (
+                instruction.result is None
+                or instruction.operation
+                not in {IROperation.ASSIGN, IROperation.CAST, IROperation.PHI}
+            ):
+                continue
+            values = {instruction.result, *instruction.operands}
+            merged = set(values)
+            for value in values:
+                merged.update(groups.get(value, ()))
+            for value in merged:
+                groups[value] = merged
+    return {key: frozenset(value) for key, value in groups.items()}
+
+
+def _aliases(variable: str, groups: dict[str, frozenset[str]]) -> frozenset[str]:
+    return groups.get(variable, frozenset({variable}))
+
+
+def _nearest_allocation(
+    instructions: tuple[IRInstruction, ...],
+    destination: str,
+    before_index: int,
+    aliases: dict[str, frozenset[str]],
+) -> tuple[IRInstruction, str] | None:
+    destination_aliases = _aliases(destination, aliases)
+    matches: list[tuple[IRInstruction, str]] = []
+    for instruction in instructions:
+        if instruction.index >= before_index or instruction.operation is not IROperation.ALLOCATE:
+            continue
+        capacity = _allocation_capacity_expression(instruction)
+        if (
+            instruction.result is not None
+            and instruction.result in destination_aliases
+            and capacity is not None
+        ):
+            matches.append((instruction, capacity))
+    return max(matches, key=lambda item: item[0].index) if matches else None
+
+
+def _allocation_capacity_expression(instruction: IRInstruction) -> str | None:
+    callee = _canonical_callee(instruction.callee)
+    if callee in {"calloc", "malloctypecalloc", "malloczonecalloc"}:
+        if len(instruction.operands) < 2:
+            return None
+        return f"{instruction.operands[0]}*{instruction.operands[1]}"
+    return _allocation_size_variable(instruction)
+
+
+def _allocation_is_zero_initialized(
+    instructions: tuple[IRInstruction, ...],
+    allocation: IRInstruction,
+    capacity: str,
+    destination: str,
+    before_index: int,
+    aliases: dict[str, frozenset[str]],
+) -> bool:
+    if "calloc" in _canonical_callee(allocation.callee):
+        return True
+    destination_aliases = _aliases(destination, aliases)
+    for instruction in instructions:
+        if not (allocation.index < instruction.index < before_index):
+            continue
+        callee = _canonical_callee(instruction.callee)
+        if callee in {"bzero", "explicitbzero"} and len(instruction.operands) >= 2:
+            if instruction.operands[0] in destination_aliases and instruction.operands[1] == capacity:
+                return True
+        if callee in {"memset", "memsetchk"} and len(instruction.operands) >= 3:
+            if (
+                instruction.operands[0] in destination_aliases
+                and _constant_value(instruction.operands[1]) == 0
+                and instruction.operands[2] == capacity
+            ):
+                return True
+    return False
+
+
+def _matching_consumers(
+    function: IRFunction,
+    after_index: int,
+    source: str,
+    length: str,
+    aliases: dict[str, frozenset[str]],
+    functions_by_name: dict[str, IRFunction],
+) -> tuple[_DisclosureConsumer, ...]:
+    source_aliases = _aliases(source, aliases)
+    matches: list[_DisclosureConsumer] = []
+    for block in function.blocks:
+        for instruction in block.instructions:
+            if instruction.index <= after_index:
+                continue
+            if not source_aliases.intersection(instruction.operands) or length not in instruction.operands:
+                continue
+            if instruction.operation not in {IROperation.CALL, IROperation.COPY}:
+                continue
+            callee = _canonical_callee(instruction.callee)
+            if callee in _EXACT_RANGE_READER_IDENTITIES or _is_zeroing_call(callee):
+                continue
+            direct_callee = functions_by_name.get(callee)
+            call_depth = 1 if direct_callee is not None else 0
+            output_values = _consumer_output_values(
+                instruction,
+                source_aliases,
+                length,
+            )
+            if not output_values:
+                continue
+            matches.append(
+                _DisclosureConsumer(
+                    function=direct_callee or function,
+                    instruction=instruction,
+                    consumed_bytes=length,
+                    output_values=output_values,
+                    call_depth=call_depth,
+                )
+            )
+    return tuple(sorted(matches, key=lambda item: item.instruction.index))
+
+
+def _consumer_output_values(
+    instruction: IRInstruction,
+    source_aliases: frozenset[str],
+    length: str,
+) -> tuple[str, ...]:
+    values: list[str] = []
+    if instruction.result is not None:
+        values.append(instruction.result)
+    for tag in instruction.tags:
+        match = re.fullmatch(r"output_buffer_operand:(\d+)", tag)
+        if match and int(match.group(1)) < len(instruction.operands):
+            values.append(instruction.operands[int(match.group(1))])
+    if instruction.operation is IROperation.COPY:
+        roles = _copy_roles(instruction)
+        if roles is not None and roles.source in source_aliases and roles.length == length:
+            values.append(roles.destination)
+    return tuple(dict.fromkeys(values))
+
+
+def _is_zeroing_call(callee: str) -> bool:
+    return callee in {"bzero", "explicitbzero", "memset", "memsetchk"}
+
+
+def _actual_length_proves_full_read(
+    function: IRFunction,
+    consumer: IRInstruction,
+    actual_length: str,
+    requested_length: str,
+) -> bool:
+    block_id = next(
+        block.block_id
+        for block in function.blocks
+        if any(item.index == consumer.index for item in block.instructions)
+    )
+    definitions = {
+        instruction.result: instruction
+        for block in function.blocks
+        for instruction in block.instructions
+        if instruction.result is not None
+    }
+    flow = _control_flow_facts(function)
+    for entailed in _dominating_entailed_comparisons(function, block_id, definitions, flow):
+        compare = entailed.compare
+        if len(compare.operands) < 2:
+            continue
+        left, right = compare.operands[:2]
+        kind = _comparison_kind(compare)
+        if kind == "equal" and entailed.truth and {left, right} == {
+            actual_length,
+            requested_length,
+        }:
+            return True
+        if kind in {"unsigned_less", "unsigned_less_equal"}:
+            if left == actual_length and right == requested_length and not entailed.truth:
+                return True
+            if left == requested_length and right == actual_length and entailed.truth:
+                return True
+    return False
+
+
+def _observable_output_after(
+    function: IRFunction,
+    consumer: _DisclosureConsumer,
+    aliases: dict[str, frozenset[str]],
+) -> _DisclosureOutput | None:
+    instructions = tuple(
+        instruction for block in function.blocks for instruction in block.instructions
+    )
+    output_aliases = frozenset(
+        value
+        for output in consumer.output_values
+        for value in _aliases(output, aliases)
+    )
+    output_capacities = frozenset(
+        allocation[1]
+        for output in consumer.output_values
+        if (
+            allocation := _nearest_allocation(
+                instructions,
+                output,
+                consumer.instruction.index,
+                aliases,
+            )
+        )
+        is not None
+    )
+    overwritten = False
+    for block in function.blocks:
+        for instruction in block.instructions:
+            if instruction.index < consumer.instruction.index:
+                continue
+            if instruction.index > consumer.instruction.index and _fully_overwrites_output(
+                instruction,
+                output_aliases,
+                output_capacities,
+            ):
+                overwritten = True
+            route = _observable_output_route(instruction, output_aliases)
+            if route is not None:
+                return _DisclosureOutput(
+                    function=function,
+                    instruction=instruction,
+                    route=route,
+                    fully_overwritten=overwritten,
+                )
+    return None
+
+
+def _observable_output_route(
+    instruction: IRInstruction,
+    output_aliases: frozenset[str],
+) -> str | None:
+    if not output_aliases.intersection(instruction.operands) and instruction.result not in output_aliases:
+        return None
+    if instruction.operation is IROperation.RETURN:
+        return "function_return"
+    callee = _canonical_callee(instruction.callee)
+    if "observable_output" in instruction.tags:
+        return callee or "tagged_observable_output"
+    output_tokens = ("cgimage", "createimage", "publish", "output", "appenddata")
+    if instruction.operation is IROperation.CALL and any(
+        token in callee for token in output_tokens
+    ):
+        return callee
+    return None
+
+
+def _fully_overwrites_output(
+    instruction: IRInstruction,
+    output_aliases: frozenset[str],
+    capacities: frozenset[str],
+) -> bool:
+    if "full_output_overwrite" in instruction.tags and output_aliases.intersection(
+        instruction.operands
+    ):
+        return True
+    if instruction.operation is not IROperation.COPY:
+        return False
+    roles = _copy_roles(instruction)
+    return bool(
+        roles is not None
+        and roles.destination in output_aliases
+        and roles.length in capacities
+    )
 
 
 def _range_call_roles(instruction: IRInstruction) -> _RangeRoles | None:
@@ -2241,6 +2991,59 @@ def _range_report_digest(
         "findings": [item.model_dump(mode="json") for item in findings],
         "ir_sha256": ir_sha256,
         "schema_version": "binary-range-analysis-v1",
+    }
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    return "sha256:" + hashlib.sha256(canonical).hexdigest()
+
+
+def _disclosure_summary_id(
+    function_identifier: str,
+    allocation_address: int | None,
+    range_call_address: int,
+    consumer_address: int | None,
+    output_address: int | None,
+    allocation: str | None,
+    allocation_capacity: str | None,
+    maximum_initialized_bytes: str | None,
+    downstream_consumed_bytes: str | None,
+    output_route: str | None,
+    call_depth: int,
+    status: BinaryDisclosureStatus,
+    suppression_reasons: tuple[str, ...],
+) -> str:
+    payload = {
+        "allocation": allocation,
+        "allocation_address": allocation_address,
+        "allocation_capacity": allocation_capacity,
+        "call_depth": call_depth,
+        "consumer_address": consumer_address,
+        "downstream_consumed_bytes": downstream_consumed_bytes,
+        "function_id": function_identifier,
+        "maximum_initialized_bytes": maximum_initialized_bytes,
+        "output_address": output_address,
+        "output_route": output_route,
+        "range_call_address": range_call_address,
+        "status": status.value,
+        "suppression_reasons": suppression_reasons,
+    }
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    return "disclosure_" + hashlib.sha256(canonical).hexdigest()[:20]
+
+
+def _disclosure_report_digest(
+    ir_sha256: str,
+    discovery_sha256: str,
+    analyzed_function_count: int,
+    summaries: tuple[BinaryPartialInitializationSummary, ...],
+    findings: tuple[BinaryStaticFinding, ...],
+) -> str:
+    payload = {
+        "analyzed_function_count": analyzed_function_count,
+        "discovery_sha256": discovery_sha256,
+        "findings": [item.model_dump(mode="json") for item in findings],
+        "ir_sha256": ir_sha256,
+        "schema_version": "binary-disclosure-analysis-v1",
+        "summaries": [item.model_dump(mode="json") for item in summaries],
     }
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     return "sha256:" + hashlib.sha256(canonical).hexdigest()

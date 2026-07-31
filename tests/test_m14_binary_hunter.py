@@ -284,6 +284,10 @@ def _assessment(
             request.update(route="full_decode")
         elif experiment_kind == "cross_build_replay":
             request.update(target_build="26.1-25B100")
+        elif experiment_kind == "raw_output_differential":
+            request.update(route="full_decode")
+        elif experiment_kind == "canary_propagation":
+            request.update(route="full_decode", canary_value=165)
     return {
         "work_id": packet["work_id"],
         "pack_id": packet["pack"]["pack_id"],
@@ -538,6 +542,8 @@ def test_unsafe_or_unbound_model_output_is_rejected(tmp_path: Path) -> None:
         ("guard_malloc", BinaryExperimentPlanStatus.REQUIRES_HARNESS),
         ("cross_build_replay", BinaryExperimentPlanStatus.REQUIRES_SNAPSHOT),
         ("binary_context", BinaryExperimentPlanStatus.REQUIRES_CONTEXT),
+        ("raw_output_differential", BinaryExperimentPlanStatus.REVIEW_REQUIRED),
+        ("canary_propagation", BinaryExperimentPlanStatus.REVIEW_REQUIRED),
     ],
 )
 def test_typed_experiment_requests_map_without_execution(

@@ -209,6 +209,32 @@
         "The callee contract proves ownership transfer before the failing operation."
       ],
       "base_priority": 3
+    },
+    {
+      "pattern_id": "vpattern_partial_fill_full_consume_disclosure",
+      "title": "Partial input fill is consumed as a complete decoded buffer",
+      "weakness_family": "uninitialized-data disclosure",
+      "applicability": {
+        "languages": ["c"],
+        "hunter_roles": ["binary-imageio-analysis", "c-bounds-integers"],
+        "semantic_tags": ["allocation", "read", "return_consumption", "missing_capacity_guard", "write"],
+        "minimum_structural_matches": 2
+      },
+      "invariant": "For an input-backed range, offset and requested length must be valid together, and every downstream consumer must be bounded by the bytes actually initialized rather than the requested bytes.",
+      "investigation_steps": [
+        "Trace the allocation capacity, requested range, and actual copied length as distinct values.",
+        "Follow every consumer of the partially filled buffer through at most the measured call depth.",
+        "Establish whether decoded data reaches an observable output before being fully overwritten."
+      ],
+      "required_evidence": [
+        "An input-reachable range read with allocation capacity and actual copied length.",
+        "A downstream full-length consumer and an observable output route."
+      ],
+      "falsifiers": [
+        "A combined range guard proves the complete request fits before the read.",
+        "Zero initialization, actual-length bounding, or a complete overwrite prevents uninitialized bytes from reaching output."
+      ],
+      "base_priority": 5
     }
   ]
 }
