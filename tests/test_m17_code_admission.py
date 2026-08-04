@@ -125,6 +125,7 @@ def _inputs():
                         result="buffer",
                         inputs=["size"],
                         target="malloc",
+                        tags=["source_op:CALL"],
                     ),
                     _instruction(base + 0x2004, "return", inputs=["buffer"]),
                 ],
