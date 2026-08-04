@@ -125,6 +125,16 @@ from .decompiler_hunt import (
     load_decompiler_hunt_manifest,
     run_decompiler_hunt_plan,
 )
+from .admission import (
+    CodeHuntAdmission,
+    CodeHuntAdmissionPolicy,
+    CodeHuntAdmissionReason,
+    CodeHuntOmission,
+    CodeHuntOmissionReason,
+    CodeHuntRoot,
+    admit_code_hunt_roots,
+    materialize_code_hunt_admission,
+)
 
 __all__ = [
     "BinaryAnalysisReport",
@@ -168,6 +178,12 @@ __all__ = [
     "BinaryStaticFinding",
     "BinaryVulnerabilityClass",
     "BinaryVulnerabilityMetadata",
+    "CodeHuntAdmission",
+    "CodeHuntAdmissionPolicy",
+    "CodeHuntAdmissionReason",
+    "CodeHuntOmission",
+    "CodeHuntOmissionReason",
+    "CodeHuntRoot",
     "BlindBenchmarkCase",
     "BlindBenchmarkCaseResult",
     "BlindBenchmarkExpectedFinding",
@@ -213,6 +229,7 @@ __all__ = [
     "analyze_composite_ranges",
     "analyze_input_scalar_provenance",
     "analyze_partial_initialization_disclosures",
+    "admit_code_hunt_roots",
     "binary_vulnerability_metadata",
     "build_binary_hunter_plan",
     "capture_dyld_shared_cache_snapshot",
@@ -222,6 +239,7 @@ __all__ = [
     "load_decompiler_export",
     "load_decompiler_hunt_manifest",
     "load_binary_hunter_packet",
+    "materialize_code_hunt_admission",
     "macho_uuid",
     "pack_ranked_binary_contexts",
     "plan_binary_experiments",
