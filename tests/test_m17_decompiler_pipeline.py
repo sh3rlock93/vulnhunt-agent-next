@@ -67,20 +67,19 @@ def _completed_pilot(**kwargs) -> ImageIOPilotResult:
     return result
 
 
-def _run(tmp_path: Path, output: Path, **overrides):
+def _run(tmp_path: Path, output: Path):
     ghidra, scripts, java = _tooling(tmp_path)
-    arguments = {
-        "cache_path": tmp_path / "cache",
-        "output_directory": output,
-        "product_version": "26.5.2",
-        "build_version": "25F84",
-        "ghidra_headless": ghidra,
-        "script_directory": scripts,
-        "java_home": java,
-        "pilot_runner": _completed_pilot,
-    }
-    arguments.update(overrides)
-    return run_decompiler_hunt_plan(**arguments), (ghidra, scripts, java)
+    manifest = run_decompiler_hunt_plan(
+        cache_path=tmp_path / "cache",
+        output_directory=output,
+        product_version="26.5.2",
+        build_version="25F84",
+        ghidra_headless=ghidra,
+        script_directory=scripts,
+        java_home=java,
+        pilot_runner=_completed_pilot,
+    )
+    return manifest, (ghidra, scripts, java)
 
 
 def test_static_plan_binds_artifacts_and_zero_execution_counters(tmp_path: Path) -> None:
