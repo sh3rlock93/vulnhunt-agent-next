@@ -168,6 +168,7 @@ docs/milestones/*
 !docs/milestones/m14-binary-native-imageio-analysis.md
 !docs/milestones/m15-binary-static-precision.md
 !docs/milestones/m16-composite-range-disclosure.md
+!docs/milestones/m17-decompiler-first-binary-hunting.md
 notes/
 tools/
 !tools/
@@ -178,6 +179,7 @@ tools/*
 tools/macos/*
 !tools/macos/imageio_canary_interposer.c
 !tools/macos/run_m14_imageio_pilot.py
+!tools/macos/run_m17_decompiler_hunt.py
 docker/local/
 prompts/hunters/*/
 prompts/rankers/*/
