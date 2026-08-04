@@ -117,6 +117,14 @@ from .benchmark import (
     run_blind_binary_regression_gate,
     run_imageio_ghidra_pilot,
 )
+from .decompiler_hunt import (
+    DecompilerArtifactDigest,
+    DecompilerHuntConfiguration,
+    DecompilerHuntManifest,
+    DecompilerHuntStatus,
+    load_decompiler_hunt_manifest,
+    run_decompiler_hunt_plan,
+)
 
 __all__ = [
     "BinaryAnalysisReport",
@@ -171,6 +179,10 @@ __all__ = [
     "BlindRegressionGatePolicy",
     "BlindRegressionGateResult",
     "DecompilerEngine",
+    "DecompilerArtifactDigest",
+    "DecompilerHuntConfiguration",
+    "DecompilerHuntManifest",
+    "DecompilerHuntStatus",
     "DecompilerExportAdapter",
     "DyldArchitecture",
     "DyldSharedCacheFile",
@@ -208,6 +220,7 @@ __all__ = [
     "discover_imageio_parsers",
     "freeze_blind_benchmark",
     "load_decompiler_export",
+    "load_decompiler_hunt_manifest",
     "load_binary_hunter_packet",
     "macho_uuid",
     "pack_ranked_binary_contexts",
@@ -216,6 +229,7 @@ __all__ = [
     "run_blind_binary_benchmark",
     "run_blind_binary_regression_gate",
     "run_imageio_ghidra_pilot",
+    "run_decompiler_hunt_plan",
     "run_binary_hunter_work_item",
     "execute_binary_hunter_plan",
     "validate_binary_hunter_assessment",
