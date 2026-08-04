@@ -50,7 +50,6 @@ _DIRECT_INPUT_EVIDENCE = frozenset(
         ParserEvidenceKind.INPUT_MARKER,
     }
 )
-_INPUT_TAG_PREFIXES = ("input", "source")
 
 
 class CodeHuntAdmissionReason(StrEnum):
@@ -446,7 +445,7 @@ def _code_signals(function: IRFunction, candidate: ParserCandidate) -> _CodeSign
     input_tags = sum(
         1
         for instruction in instructions
-        if any(tag.startswith(_INPUT_TAG_PREFIXES) for tag in instruction.tags)
+        if any(_is_input_tag(tag) for tag in instruction.tags)
     )
     input_evidence_count = input_tags + sum(
         item.kind in _DIRECT_INPUT_EVIDENCE for item in candidate.evidence
@@ -479,6 +478,12 @@ def _code_signals(function: IRFunction, candidate: ParserCandidate) -> _CodeSign
         security_sink_count=security_sink_count,
         parser_reachable=parser_reachable,
         stub_like=stub_like,
+    )
+
+
+def _is_input_tag(tag: str) -> bool:
+    return tag.startswith("input") or (
+        tag.startswith("source") and not tag.startswith("source_op:")
     )
 
 
