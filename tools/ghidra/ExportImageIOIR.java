@@ -494,12 +494,16 @@ public class ExportImageIOIR extends GhidraScript {
 		for (CoverageRow row : rows) byEntry.put(row.entry(), row);
 
 		List<CoverageRow> frontier = new ArrayList<>();
+		List<CoverageRow> rangeReaderBoundaries = new ArrayList<>();
 		for (CoverageRow row : rows) {
 			TreeSet<String> directReasons = new TreeSet<>();
 			boolean hasNameAction = false;
 			boolean isRangeReader = RANGE_READER_IDENTITIES.contains(
 				row.function.getName().toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9]", ""));
-			if (isRangeReader) directReasons.add("range_reader_boundary");
+			if (isRangeReader) {
+				directReasons.add("range_reader_boundary");
+				rangeReaderBoundaries.add(row);
+			}
 			for (String marker : PARSER_MARKERS) {
 				if (hasNameMarker(row.function.getName(), marker)) {
 					directReasons.add("name_marker:" + marker);
@@ -523,6 +527,22 @@ public class ExportImageIOIR extends GhidraScript {
 				frontier.add(row);
 			}
 		}
+		for (CoverageRow boundary : rangeReaderBoundaries) {
+			for (long target : boundary.callees) {
+				CoverageRow callee = byEntry.get(target);
+				if (callee == null) continue;
+				if (callee.callers.size() != 1 || !callee.callers.contains(boundary.entry())) {
+					continue;
+				}
+				callee.selectionReasons.add(
+					"range_reader_exclusive_callee:seed=" + hex(boundary.entry()));
+				if (callee.selected) continue;
+				callee.selected = true;
+				callee.selectionTier = "mandatory";
+				frontier.add(callee);
+			}
+		}
+		frontier.sort(Comparator.comparingLong(CoverageRow::entry));
 		if (frontier.size() > maximumEvidence) {
 			throw new IllegalStateException(
 				"mandatory evidence functions exceed max-evidence-functions");
