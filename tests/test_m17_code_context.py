@@ -40,6 +40,7 @@ from vulnhunt_agent.macos.binary_analysis import (
     resolve_binary_code_context,
     select_context_continuation_roots,
 )
+from vulnhunt_agent.macos.binary_analysis.capsules import _recover_call_edges
 
 _SNAPSHOT = "sha256:" + "b" * 64
 _UUID = "B2345678-1234-5678-9ABC-DEF012345678"
@@ -693,6 +694,143 @@ def test_direct_caller_remains_an_exact_edge(tmp_path) -> None:
     assert response.call_edges[0].dispatch_candidate_count == 1
 
 
+@pytest.mark.parametrize("address_tag", ["exact", "absent", "conflicting"])
+def test_direct_callee_address_disambiguates_duplicate_range_readers(
+    tmp_path,
+    address_tag: str,
+) -> None:
+    client_address = 0x100004000
+    first_reader_address = 0x100005000
+    second_reader_address = 0x100006000
+    tags = {
+        "exact": [f"callee_address:{second_reader_address:x}"],
+        "absent": None,
+        "conflicting": [
+            f"callee_address:{first_reader_address:x}",
+            f"callee_address:{second_reader_address:x}",
+        ],
+    }[address_tag]
+    ir, packet, _, _, _ = _fixture(
+        tmp_path,
+        extra_functions=[
+            _function(
+                client_address,
+                "decode_range_client",
+                [
+                    _instruction(
+                        client_address,
+                        "call",
+                        result="read_count",
+                        inputs=["session", "buffer", "offset", "length"],
+                        target="getBytesAtOffset",
+                        tags=tags,
+                    ),
+                    _instruction(client_address + 4, "return", inputs=["read_count"]),
+                ],
+            ),
+            _function(
+                first_reader_address,
+                "getBytesAtOffset",
+                [_instruction(first_reader_address, "return")],
+            ),
+            _function(
+                second_reader_address,
+                "getBytesAtOffset",
+                [_instruction(second_reader_address, "store", inputs=["buffer", "length"])],
+            ),
+        ],
+    )
+    client = next(item for item in ir.functions if item.start_address == client_address)
+    second_reader = next(
+        item for item in ir.functions if item.start_address == second_reader_address
+    )
+    request = _request(
+        packet,
+        BinaryCodeContextRequestKind.DIRECT_CALLEE,
+        function_id=client.function_id,
+        related=second_reader.function_id,
+    )
+
+    response = resolve_binary_code_context(ir=ir, packet=packet, request=request)
+    capsule_edges, _ = _recover_call_edges(ir)
+    matching_capsule_edges = tuple(
+        item for item in capsule_edges if item.caller_function_id == client.function_id
+    )
+
+    if address_tag == "exact":
+        assert response.status is BinaryCodeContextStatus.RESOLVED
+        assert response.call_edges[0].callee_function_id == second_reader.function_id
+        assert response.call_edges[0].resolution is BinaryCodeContextEdgeResolution.DIRECT
+        assert len(matching_capsule_edges) == 1
+        assert matching_capsule_edges[0].callee_function_id == second_reader.function_id
+    else:
+        assert response.status is BinaryCodeContextStatus.UNAVAILABLE
+        assert response.rejection is BinaryCodeContextRejection.PROOF_UNAVAILABLE
+        assert matching_capsule_edges == ()
+
+
+def test_direct_callee_response_exposes_nested_exact_call_edge(tmp_path) -> None:
+    client_address = 0x100004000
+    wrapper_address = 0x100005000
+    sink_address = 0x100003000
+    ir, packet, _, _, sink = _fixture(
+        tmp_path,
+        extra_functions=[
+            _function(
+                client_address,
+                "decode_range_client",
+                [
+                    _instruction(
+                        client_address,
+                        "call",
+                        inputs=["session", "buffer", "offset", "length"],
+                        target="range_reader_wrapper",
+                        tags=[f"callee_address:{wrapper_address:x}"],
+                    ),
+                    _instruction(client_address + 4, "return"),
+                ],
+            ),
+            _function(
+                wrapper_address,
+                "range_reader_wrapper",
+                [
+                    _instruction(
+                        wrapper_address,
+                        "call",
+                        inputs=["buffer", "length"],
+                        target="write_png_rows",
+                        tags=[
+                            f"callee_address:{sink_address:x}",
+                            "read_session_input",
+                        ],
+                    ),
+                    _instruction(wrapper_address + 4, "return"),
+                ],
+            ),
+        ],
+    )
+    client = next(item for item in ir.functions if item.start_address == client_address)
+    wrapper = next(item for item in ir.functions if item.start_address == wrapper_address)
+    request = _request(
+        packet,
+        BinaryCodeContextRequestKind.DIRECT_CALLEE,
+        function_id=client.function_id,
+        related=wrapper.function_id,
+    )
+
+    response = resolve_binary_code_context(ir=ir, packet=packet, request=request)
+
+    assert response.status is BinaryCodeContextStatus.RESOLVED
+    edge_pairs = {
+        (item.caller_function_id, item.callee_function_id)
+        for item in response.call_edges
+    }
+    assert edge_pairs == {
+        (client.function_id, wrapper.function_id),
+        (wrapper.function_id, sink.function_id),
+    }
+
+
 @pytest.mark.asyncio
 async def test_missing_caller_guard_withdraws_false_hypothesis_and_resumes(tmp_path) -> None:
     ir, packet, caller, worker, _ = _fixture(tmp_path)
@@ -916,6 +1054,30 @@ def test_definition_use_request_binds_multiple_independent_proof_anchors(tmp_pat
         for instruction in block.instructions
     } | {item.address for item in instructions}
     assert set((request.address, *request.supporting_addresses)).issubset(combined_addresses)
+
+
+def test_definition_use_response_exposes_exact_edge_at_requested_callsite(tmp_path) -> None:
+    ir, packet, _, worker, sink = _fixture(tmp_path)
+    callsite = worker.start_address + 72
+    request = BinaryCodeContextRequest(
+        request_id="codectx-requested-call-edge",
+        kind=BinaryCodeContextRequestKind.DEFINITION_USE_CHAIN,
+        rationale="Resolve the requested length and its exact range-reader boundary.",
+        function_id=worker.function_id,
+        address=callsite,
+        variable="bytes",
+        supporting_addresses=(callsite,),
+        evidence_ids=(packet.allowed_evidence_ids[0],),
+        maximum_bytes=12 * 1024,
+    )
+
+    response = resolve_binary_code_context(ir=ir, packet=packet, request=request)
+
+    assert response.status is BinaryCodeContextStatus.RESOLVED
+    assert len(response.call_edges) == 1
+    assert response.call_edges[0].callsite_address == callsite
+    assert response.call_edges[0].caller_function_id == worker.function_id
+    assert response.call_edges[0].callee_function_id == sink.function_id
 
 
 def test_definition_use_request_compacts_same_address_decompiler_noise(tmp_path) -> None:

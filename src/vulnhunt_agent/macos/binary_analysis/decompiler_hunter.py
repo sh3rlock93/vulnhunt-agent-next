@@ -51,8 +51,8 @@ DECOMPILER_HUNTER = "decompiler-imageio-analysis"
 DECOMPILER_HUNTER_PLANNING_POLICY: Literal["decompiler-hunter-planning-v1"] = (
     "decompiler-hunter-planning-v1"
 )
-DECOMPILER_HUNTER_PROMPT_VERSION: Literal["decompiler-imageio-hunter-v1"] = (
-    "decompiler-imageio-hunter-v1"
+DECOMPILER_HUNTER_PROMPT_VERSION: Literal["decompiler-imageio-hunter-v2"] = (
+    "decompiler-imageio-hunter-v2"
 )
 _MAX_PACKET_BYTES = 512 * 1024
 _MAX_RAW_RESPONSE_BYTES = 128 * 1024
@@ -101,6 +101,11 @@ boundary, confidence, and a condition that would falsify the claim. If the
 capsule is proof_incomplete, request one typed frozen-IR context slice instead
 of treating omitted code as a missing guard. A not_vulnerable conclusion must
 cite a guard or safe failure/return-use path.
+
+When a hypothesis depends on whether a range-reader writes or clamps its
+requested length, do not infer that callee's behavior from its name. Request
+direct_callee using the caller and exact address-backed related function IDs
+from the supplied call edge when that implementation is omitted.
 
 Return only one JSON object matching the packet's response contract. Preserve
 work_id, root_id, capsule_sha256, and admission_rank exactly. Use only IDs and
@@ -291,7 +296,10 @@ class DecompilerHunterPolicy(DomainModel):
 
 class DecompilerHunterPacket(DomainModel):
     schema_version: Literal["decompiler-hunter-packet-v1"] = "decompiler-hunter-packet-v1"
-    prompt_version: Literal["decompiler-imageio-hunter-v1"] = DECOMPILER_HUNTER_PROMPT_VERSION
+    prompt_version: Literal[
+        "decompiler-imageio-hunter-v1",
+        "decompiler-imageio-hunter-v2",
+    ] = DECOMPILER_HUNTER_PROMPT_VERSION
     work_id: str = Field(pattern=r"^work_[0-9a-f]{64}$")
     root_id: str = Field(pattern=r"^coderoot_[0-9a-f]{20}$")
     admission_rank: int = Field(ge=1, le=100000)

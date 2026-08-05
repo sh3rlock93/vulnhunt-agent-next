@@ -51,8 +51,8 @@ from .decompiler_hunter import (
 from .ir import NormalizedBinaryIR
 
 CODE_REVIEWER_QUEUE_SCOPE: Literal["decompiler-code-reviewer"] = "decompiler-code-reviewer"
-CODE_REVIEWER_PROMPT_VERSION: Literal["decompiler-code-reviewer-v4"] = (
-    "decompiler-code-reviewer-v4"
+CODE_REVIEWER_PROMPT_VERSION: Literal["decompiler-code-reviewer-v5"] = (
+    "decompiler-code-reviewer-v5"
 )
 _MAX_PACKET_BYTES = 1024 * 1024
 _MAX_RAW_RESPONSE_BYTES = 128 * 1024
@@ -90,6 +90,9 @@ requests, leave every definition/use-only selector empty. In particular,
 supporting_addresses, supporting_variables, and supporting_field_offsets are
 permitted only on a definition_use_chain request. Do not combine a caller edge
 request with field provenance in one request.
+If acceptance depends on whether a range-reader writes or clamps its requested
+length, request direct_callee for the exact address-backed target instead of
+inferring behavior from the API name.
 
 Return only one JSON object matching BinaryCodeReviewerVerdict. Preserve every
 identity and digest exactly. Sort and deduplicate every evidence-ID array. The
@@ -235,6 +238,7 @@ class BinaryCodeReviewerPacket(DomainModel):
         "decompiler-code-reviewer-v2",
         "decompiler-code-reviewer-v3",
         "decompiler-code-reviewer-v4",
+        "decompiler-code-reviewer-v5",
     ] = CODE_REVIEWER_PROMPT_VERSION
     queue_scope: Literal["decompiler-code-reviewer"] = CODE_REVIEWER_QUEUE_SCOPE
     reviewer_session_id: str = Field(pattern=r"^review_[0-9a-f]{64}$")

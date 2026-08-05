@@ -60,7 +60,8 @@ public class ExportImageIOIR extends GhidraScript {
 		"rle", "tiff", "dng", "jpeg", "jp2", "png", "gif", "heif", "webp",
 		"dicom", "sgi");
 	private static final Set<String> RANGE_READER_IDENTITIES = Set.of(
-		"getbytesatoffset", "iioimagereadsessiongetbytesatoffset");
+		"getbytesatoffset", "iioimagereadsessiongetbytesatoffset",
+		"cgimagereadsessiongetbytesatoffset");
 
 	@Override
 	protected void run() throws Exception {
@@ -294,12 +295,21 @@ public class ExportImageIOIR extends GhidraScript {
 		if (mnemonic.equals("PTRADD") || mnemonic.equals("PTRSUB")) {
 			tags.add("pointer_arithmetic");
 		}
+		appendDirectCalleeAddressTag(tags, operation, mnemonic);
 		appendControlFlowTags(tags, operation, mnemonic);
 		if (operation.getOutput() != null) appendInputSourceTags(tags, callee);
 		appendRangeReaderTags(tags, operation, callee, inputStart);
 		json.add("tags", sorted(tags));
 		json.addProperty("text", truncate(mnemonic + " " + operation.toString(), 1900));
 		return json;
+	}
+
+	private void appendDirectCalleeAddressTag(JsonArray tags, PcodeOp operation,
+			String mnemonic) {
+		if (!mnemonic.equals("CALL") || operation.getNumInputs() == 0) return;
+		Address target = operation.getInput(0).getAddress();
+		if (target == null || !target.isMemoryAddress()) return;
+		tags.add("callee_address:" + Long.toUnsignedString(target.getOffset(), 16));
 	}
 
 	private void appendControlFlowTags(JsonArray tags, PcodeOp operation, String mnemonic) {
@@ -487,6 +497,9 @@ public class ExportImageIOIR extends GhidraScript {
 		for (CoverageRow row : rows) {
 			TreeSet<String> directReasons = new TreeSet<>();
 			boolean hasNameAction = false;
+			boolean isRangeReader = RANGE_READER_IDENTITIES.contains(
+				row.function.getName().toLowerCase(Locale.ROOT).replaceAll("[^a-z0-9]", ""));
+			if (isRangeReader) directReasons.add("range_reader_boundary");
 			for (String marker : PARSER_MARKERS) {
 				if (hasNameMarker(row.function.getName(), marker)) {
 					directReasons.add("name_marker:" + marker);
@@ -503,7 +516,7 @@ public class ExportImageIOIR extends GhidraScript {
 					}
 				}
 			}
-			if (hasNameAction || hasStringEvidence) {
+			if (hasNameAction || hasStringEvidence || isRangeReader) {
 				row.selected = true;
 				row.selectionTier = "mandatory";
 				row.selectionReasons.addAll(directReasons);
