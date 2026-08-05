@@ -1269,6 +1269,59 @@ change must reject this internally inconsistent request shape and let the
 existing bounded repair set the already supplied block ID; it must not infer or
 insert the block automatically.
 
+### M17-21 — Block-reference consistency repair
+
+#### Trigger
+
+M17-20 preserved a previously included block ID, but the proof-closing KTX
+successor was present in a prior response's `omitted_block_ids`, not its included
+block bodies. The model named that exact frozen ID in request rationale while
+leaving `block_id` null. Canonicalization and validation therefore could not
+accept the target even if a repair supplied it, and the broker repeated a
+variable-only slice.
+
+#### Implementation scope
+
+- Treat both included and explicitly omitted block IDs from prior immutable
+  responses as known continuation block identifiers. They authorize only a
+  bounded request back into the same frozen IR; they do not count as proof.
+- When a definition/use rationale references a known `bb_...` identifier but
+  `block_id` is null, reject the response with one precise validation error so
+  the existing M17-19 repair can correct the shape.
+- Never infer, insert, or silently rewrite the block target. Invented IDs remain
+  rejected or removed under the existing rules.
+- Bump continuation prompt identity to v10. Preserve resolver behavior,
+  schemas, calls, continuations, evidence budget, and reportability.
+
+#### Exit criteria
+
+Contract tests must prove that a prior omitted-block ID survives
+canonicalization, that a rationale/block-field mismatch reaches the bounded
+repair and is corrected, and that invented IDs remain excluded. Focused tests
+must pass twice, followed by M14/M16/M17, full, type, lint, and unchanged M15
+blind gates. Then run a fresh KTX v10 chain over the same frozen IR and require
+the positive-transfer block to produce new address-backed facts before any
+Hunter conclusion. Dynamic and new-decompiler activity remain prohibited.
+
+#### Current-ImageIO observation
+
+The fresh v10 chain emitted explicit frozen block IDs on every definition/use
+request after the underlying reader was reached, proving both prior omitted-ID
+admission and rationale/block repair behavior. The run used one root session,
+six total model calls, 718,409 input tokens, 12,073 output tokens, and 219,905
+evidence bytes. No schema error, budget deferral, new decompilation, or dynamic
+activity occurred.
+
+The terminal state remained `reviewer_inconclusive`. Entry five correctly
+recovered the selected effective-length PHI and positive-length check in
+`bb_b658b14a72a80a5e`, whose exact CFG successors are
+`bb_8cf6af2391c86276` and `bb_acec6d125b307cf0`. Both successors remained in
+the frozen omitted-block list. The final request asked for the post-check write
+but targeted the already supplied predecessor block; deduplication therefore
+returned `proof_unavailable` without another model call. No vulnerability is
+claimed. The next change must make a block-targeted definition/use slice include
+the target's immediate frozen CFG successors under the existing bounds.
+
 ## Per-PR validation and merge procedure
 
 For each M17 PR:
