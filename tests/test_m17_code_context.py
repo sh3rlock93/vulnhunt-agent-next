@@ -1000,6 +1000,39 @@ async def test_definition_use_drops_only_an_unknown_optional_block_hint(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_definition_use_preserves_a_prior_response_block_hint(tmp_path) -> None:
+    ir, packet, _caller, _worker, sink = _fixture(tmp_path)
+    first = _request(
+        packet,
+        BinaryCodeContextRequestKind.EXACT_FUNCTION,
+        function_id=sink.function_id,
+    )
+    first_response = resolve_binary_code_context(ir=ir, packet=packet, request=first)
+    supplied_block_id = first_response.functions[0].blocks[0].block_id
+    next_request = _request(
+        packet,
+        BinaryCodeContextRequestKind.DEFINITION_USE_CHAIN,
+        function_id=sink.function_id,
+        variable="bytes",
+        block_id=supplied_block_id,
+    )
+    payload = _needs_next(packet, first_response, next_request)
+
+    result = await continue_decompiler_hunter_session(
+        store_root=tmp_path,
+        ir=ir,
+        packet=packet,
+        initial_assessment=_needs(packet, first),
+        initial_usage=_initial_usage(packet),
+        client=_FakeClient([json.dumps(payload)]),
+        policy=BinaryCodeContextPolicy(maximum_continuations_per_root=1),
+    )
+
+    assert result.terminal_assessment.disposition is DecompilerHunterDisposition.NEEDS_CODE_CONTEXT
+    assert result.terminal_assessment.context_requests[0].block_id == supplied_block_id
+
+
+@pytest.mark.asyncio
 async def test_one_root_can_close_a_proof_on_third_continuation(tmp_path) -> None:
     metadata = _function(
         0x100007000,
