@@ -491,6 +491,14 @@ def _normalize_functions(
         size = _positive_int(item.get(function_size_key), label="function size")
         identifier = function_id(image_uuid, start)
         raw_blocks = _sequence(item.get(blocks_key), label="basic blocks")
+        raw_parameters = _string_sequence(item.get(parameters_key, ()), label="parameters")
+        preserved_argument_aliases = _argument_preserving_stack_probe_aliases(
+            raw_blocks,
+            parameters=raw_parameters,
+            instructions_key=instructions_key,
+            instruction_operation_key=instruction_operation_key,
+            instruction_operands_key=instruction_operands_key,
+        )
         label_to_id: dict[str, str] = {}
         for ordinal, raw_block in enumerate(raw_blocks):
             block = _mapping(raw_block, label="basic block")
@@ -512,18 +520,29 @@ def _normalize_functions(
                 tags = _string_sequence(instruction.get("tags", ()), label="tags")
                 if operation is IROperation.UNKNOWN:
                     tags = (*tags, f"source_op:{raw_operation.lower()}")
+                address = _address(instruction.get("address"))
+                result = _optional_text(instruction.get("result"))
+                operands = _string_sequence(
+                    instruction.get(instruction_operands_key, ()),
+                    label="instruction operands",
+                )
+                preserved_parameter = preserved_argument_aliases.get((address, result))
+                text = str(instruction.get("text", ""))
+                if preserved_parameter is not None:
+                    operands = (preserved_parameter, *operands[1:])
+                    tags = (*tags, "abi:preserved_argument")
+                    text = (
+                        f"{text} [stack-probe preserved argument: {preserved_parameter}]"
+                    )[:2000]
                 callee_value = instruction.get(instruction_callee_key)
                 callee = None if callee_value is None else str(callee_value)
                 instructions.append(
                     IRInstruction(
                         index=instruction_index,
-                        address=_address(instruction.get("address")),
+                        address=address,
                         operation=operation,
-                        result=_optional_text(instruction.get("result")),
-                        operands=_string_sequence(
-                            instruction.get(instruction_operands_key, ()),
-                            label="instruction operands",
-                        ),
+                        result=result,
+                        operands=operands,
                         constants=tuple(
                             _integer(value, label="instruction constant")
                             for value in _sequence(
@@ -534,7 +553,7 @@ def _normalize_functions(
                         width_bits=_optional_positive_int(instruction.get("width")),
                         signed=_optional_bool(instruction.get("signed")),
                         tags=tuple(sorted(set(tags))),
-                        text=str(instruction.get("text", "")),
+                        text=text,
                     )
                 )
                 instruction_index += 1
@@ -555,9 +574,7 @@ def _normalize_functions(
                 )
             )
         pseudocode = str(item.get("pseudocode", ""))
-        parameters = tuple(
-            sorted(set(_string_sequence(item.get(parameters_key, ()), label="parameters")))
-        )
+        parameters = tuple(sorted(set(raw_parameters)))
         functions.append(
             IRFunction(
                 function_id=identifier,
@@ -571,6 +588,73 @@ def _normalize_functions(
             )
         )
     return tuple(functions)
+
+
+def _argument_preserving_stack_probe_aliases(
+    raw_blocks: Sequence[object],
+    *,
+    parameters: tuple[str, ...],
+    instructions_key: str,
+    instruction_operation_key: str,
+    instruction_operands_key: str,
+) -> dict[tuple[int, str | None], str]:
+    marker = "abi:argument_preserving_stack_probe"
+    instructions = tuple(
+        _mapping(raw_instruction, label="instruction")
+        for raw_block in raw_blocks
+        for raw_instruction in _sequence(
+            _mapping(raw_block, label="basic block").get(instructions_key),
+            label="instructions",
+        )
+    )
+    probes: dict[int, set[str]] = {}
+    for instruction in instructions:
+        if marker not in _string_sequence(instruction.get("tags", ()), label="tags"):
+            continue
+        if _operation(
+            _text(instruction.get(instruction_operation_key), label="operation")
+        ) is not IROperation.CALL:
+            continue
+        result = _optional_text(instruction.get("result"))
+        if result is None:
+            continue
+        probes.setdefault(_address(instruction.get("address")), set()).add(result)
+
+    aliases: dict[tuple[int, str | None], str] = {}
+    for instruction in instructions:
+        address = _address(instruction.get("address"))
+        if address not in probes:
+            continue
+        if _operation(
+            _text(instruction.get(instruction_operation_key), label="operation")
+        ) is not IROperation.CAST:
+            continue
+        operands = _string_sequence(
+            instruction.get(instruction_operands_key, ()),
+            label="instruction operands",
+        )
+        if not operands or operands[0] not in probes[address]:
+            continue
+        constants = tuple(
+            _integer(value, label="instruction constant")
+            for value in _sequence(instruction.get("constants", ()), label="constants")
+        )
+        if not constants or constants[0] < 0 or constants[0] % 8 != 0:
+            continue
+        if _optional_positive_int(instruction.get("width")) != 64:
+            continue
+        parameter_index = constants[0] // 8
+        if parameter_index >= len(parameters):
+            continue
+        key = (
+            address,
+            _optional_text(instruction.get("result")),
+        )
+        parameter = parameters[parameter_index]
+        if key in aliases and aliases[key] != parameter:
+            raise ValueError("conflicting stack-probe preserved argument aliases")
+        aliases[key] = parameter
+    return aliases
 
 
 def _operation(value: str) -> IROperation:
