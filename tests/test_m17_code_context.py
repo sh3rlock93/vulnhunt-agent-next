@@ -52,6 +52,7 @@ def _instruction(
     inputs: list[str] | None = None,
     target: str | None = None,
     tags: list[str] | None = None,
+    constants: list[int] | None = None,
 ) -> dict[str, Any]:
     value: dict[str, Any] = {
         "address": hex(address),
@@ -65,6 +66,8 @@ def _instruction(
         value["target"] = target
     if tags:
         value["tags"] = tags
+    if constants:
+        value["constants"] = constants
     return value
 
 
@@ -87,7 +90,7 @@ def _function(address: int, name: str, instructions: list[dict[str, Any]]) -> di
     }
 
 
-def _fixture(tmp_path):
+def _fixture(tmp_path, *, extra_functions: list[dict[str, Any]] | None = None):
     caller = 0x100001000
     worker = 0x100002000
     sink = 0x100003000
@@ -161,6 +164,7 @@ def _fixture(tmp_path):
                     _instruction(sink + 8, "return"),
                 ],
             ),
+            *(extra_functions or []),
         ],
     }
     worker_instructions = payload["functions"][1]["blocks"][0]["instructions"]
@@ -488,11 +492,26 @@ async def test_missing_callee_sink_completes_code_hypothesis(tmp_path) -> None:
 
 @pytest.mark.asyncio
 async def test_one_root_can_close_a_proof_on_third_continuation(tmp_path) -> None:
-    ir, packet, _caller, worker, sink = _fixture(tmp_path)
+    metadata = _function(
+        0x100007000,
+        "decode_metadata",
+        [
+            _instruction(0x100007000, "param", result="metadata"),
+            _instruction(
+                0x100007004,
+                "assign",
+                result="metadata_copy",
+                inputs=["metadata"],
+            ),
+            _instruction(0x100007008, "return", inputs=["metadata_copy"]),
+        ],
+    )
+    ir, packet, _caller, worker, sink = _fixture(tmp_path, extra_functions=[metadata])
+    metadata_function = next(item for item in ir.functions if item.name == "decode_metadata")
     first = _request(
         packet,
         BinaryCodeContextRequestKind.EXACT_FUNCTION,
-        function_id=worker.function_id,
+        function_id=metadata_function.function_id,
     ).model_copy(update={"request_id": "codectx-worker-proof"})
     first_response = resolve_binary_code_context(ir=ir, packet=packet, request=first)
     second = _request(
@@ -638,6 +657,187 @@ def test_supporting_anchors_are_rejected_for_non_definition_use_request(tmp_path
             rationale="Invalid mixed request.",
             function_id=worker.function_id,
             supporting_variables=("tmp13",),
+            evidence_ids=(packet.allowed_evidence_ids[0],),
+        )
+
+
+def test_definition_use_request_recovers_bounded_cross_function_field_provenance(
+    tmp_path,
+) -> None:
+    prepare = _function(
+        0x100004000,
+        "prepareGeometry",
+        [
+            _instruction(0x100004000, "param", result="this"),
+            _instruction(
+                0x100004004,
+                "add",
+                result="width_field",
+                inputs=["this", "const_114"],
+                constants=[0x114],
+            ),
+            _instruction(
+                0x100004008,
+                "store",
+                inputs=["width_field", "parsed_width"],
+            ),
+            _instruction(
+                0x10000400C,
+                "add",
+                result="height_field",
+                inputs=["this", "const_118"],
+                constants=[0x118],
+            ),
+            _instruction(
+                0x100004010,
+                "store",
+                inputs=["height_field", "parsed_height"],
+            ),
+            *[
+                _instruction(
+                    0x100004014 + index * 4,
+                    "unknown",
+                    result=f"field_filler_{index}",
+                )
+                for index in range(50)
+            ],
+            _instruction(
+                0x1000040DC,
+                "load",
+                result="parsed_width_value",
+                inputs=["width_field"],
+            ),
+            _instruction(
+                0x1000040E0,
+                "compare",
+                result="is_supported_format",
+                inputs=["parsed_width_value", "const_140b"],
+                constants=[0x140B],
+            ),
+            _instruction(0x1000040E4, "return"),
+        ],
+    )
+    prepare["pseudocode"] = (
+        "/* IIOReadPlugin::prepareGeometry(InfoRec*) */\n" + prepare["pseudocode"]
+    )
+    unrelated = _function(
+        0x100005000,
+        "initialize",
+        [
+            _instruction(0x100005000, "param", result="this"),
+            _instruction(
+                0x100005004,
+                "add",
+                result="wrong_width_field",
+                inputs=["this", "const_114"],
+                constants=[0x114],
+            ),
+            _instruction(
+                0x100005008,
+                "store",
+                inputs=["wrong_width_field", "unrelated_width"],
+            ),
+            _instruction(0x10000500C, "return"),
+        ],
+    )
+    unrelated["pseudocode"] = (
+        "/* OtherReadPlugin::initialize(IIODictionary*) */\n" + unrelated["pseudocode"]
+    )
+    ir, packet, _, worker, _ = _fixture(
+        tmp_path,
+        extra_functions=[prepare, unrelated],
+    )
+    prepare_function = next(item for item in ir.functions if item.start_address == 0x100004000)
+    unrelated_function = next(item for item in ir.functions if item.start_address == 0x100005000)
+    request = BinaryCodeContextRequest(
+        request_id="codectx-object-field-provenance",
+        kind=BinaryCodeContextRequestKind.DEFINITION_USE_CHAIN,
+        rationale="Recover frozen writers and guards for the decoder-state fields.",
+        function_id=worker.function_id,
+        variable="tmp13",
+        supporting_field_offsets=(0x114, 0x118),
+        evidence_ids=(packet.allowed_evidence_ids[0],),
+        maximum_bytes=32 * 1024,
+    )
+
+    response = resolve_binary_code_context(ir=ir, packet=packet, request=request)
+    response_ids = {item.function_id for item in response.functions}
+    response_addresses = {
+        instruction.address
+        for function in response.functions
+        for block in function.blocks
+        for instruction in block.instructions
+    }
+
+    assert response.status is BinaryCodeContextStatus.RESOLVED
+    assert prepare_function.function_id in response_ids
+    assert unrelated_function.function_id not in response_ids
+    assert {0x100004004, 0x10000400C, 0x1000040E0}.issubset(response_addresses)
+
+
+def test_definition_use_request_retains_phi_predecessor_origins(tmp_path) -> None:
+    phi_function = _function(
+        0x100006000,
+        "decode_phi_rows",
+        [
+            _instruction(0x100006000, "param", result="destination"),
+            _instruction(
+                0x100006004,
+                "assign",
+                result="initial_pointer",
+                inputs=["destination"],
+            ),
+            _instruction(
+                0x100006008,
+                "phi",
+                result="row_pointer",
+                inputs=["initial_pointer", "next_pointer"],
+            ),
+            _instruction(0x10000600C, "store", inputs=["row_pointer", "pixel"]),
+            _instruction(
+                0x100006010,
+                "ptradd",
+                result="next_pointer",
+                inputs=["row_pointer", "const_8"],
+            ),
+            _instruction(0x100006014, "return"),
+        ],
+    )
+    ir, packet, _, _, _ = _fixture(tmp_path, extra_functions=[phi_function])
+    target = next(item for item in ir.functions if item.start_address == 0x100006000)
+    request = BinaryCodeContextRequest(
+        request_id="codectx-phi-pointer-origin",
+        kind=BinaryCodeContextRequestKind.DEFINITION_USE_CHAIN,
+        rationale="Retain both incoming pointer definitions for the loop phi.",
+        function_id=target.function_id,
+        variable="row_pointer",
+        evidence_ids=(packet.allowed_evidence_ids[0],),
+        maximum_bytes=8 * 1024,
+    )
+
+    response = resolve_binary_code_context(ir=ir, packet=packet, request=request)
+    results = {
+        instruction.result
+        for function in response.functions
+        for block in function.blocks
+        for instruction in block.instructions
+    }
+
+    assert response.status is BinaryCodeContextStatus.RESOLVED
+    assert {"initial_pointer", "next_pointer", "row_pointer"}.issubset(results)
+
+
+def test_supporting_field_offsets_are_rejected_for_non_definition_use_request(
+    tmp_path,
+) -> None:
+    _, packet, _, worker, _ = _fixture(tmp_path)
+    with pytest.raises(ValidationError, match="require a definition/use request"):
+        BinaryCodeContextRequest(
+            request_id="codectx-invalid-field-provenance",
+            kind=BinaryCodeContextRequestKind.EXACT_FUNCTION,
+            rationale="Invalid field request.",
+            function_id=worker.function_id,
+            supporting_field_offsets=(0x114,),
             evidence_ids=(packet.allowed_evidence_ids[0],),
         )
 

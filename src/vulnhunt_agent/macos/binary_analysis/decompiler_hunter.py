@@ -157,6 +157,7 @@ class BinaryCodeContextRequest(DomainModel):
     variable: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_.:$@-]{1,160}$")
     supporting_addresses: tuple[int, ...] = Field(default=(), max_length=8)
     supporting_variables: tuple[str, ...] = Field(default=(), max_length=4)
+    supporting_field_offsets: tuple[int, ...] = Field(default=(), max_length=8)
     evidence_ids: tuple[str, ...] = Field(min_length=1, max_length=16)
     maximum_bytes: int = Field(default=32 * 1024, ge=1024, le=96 * 1024)
 
@@ -174,6 +175,10 @@ class BinaryCodeContextRequest(DomainModel):
             for variable in self.supporting_variables
         ):
             raise ValueError("supporting variables must be normalized IR identifiers")
+        if tuple(sorted(set(self.supporting_field_offsets))) != self.supporting_field_offsets:
+            raise ValueError("supporting field offsets must be sorted and unique")
+        if any(offset <= 0 or offset > 0x10000 for offset in self.supporting_field_offsets):
+            raise ValueError("supporting field offsets must be bounded positive object offsets")
         if self.kind is BinaryCodeContextRequestKind.EXACT_FUNCTION:
             if self.function_id is None:
                 raise ValueError("exact-function request requires a function ID")
@@ -193,7 +198,7 @@ class BinaryCodeContextRequest(DomainModel):
             if self.function_id is None or self.address is None:
                 raise ValueError("callsite return-use request requires function ID and address")
         if self.kind is not BinaryCodeContextRequestKind.DEFINITION_USE_CHAIN and (
-            self.supporting_addresses or self.supporting_variables
+            self.supporting_addresses or self.supporting_variables or self.supporting_field_offsets
         ):
             raise ValueError("supporting proof anchors require a definition/use request")
         return self

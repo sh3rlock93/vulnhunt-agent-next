@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import tempfile
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
@@ -37,8 +38,8 @@ from .decompiler_hunter import (
 )
 from .ir import IRBasicBlock, IRFunction, IRInstruction, IROperation, NormalizedBinaryIR
 
-DECOMPILER_CONTEXT_PROMPT_VERSION: Literal["decompiler-code-context-v2"] = (
-    "decompiler-code-context-v2"
+DECOMPILER_CONTEXT_PROMPT_VERSION: Literal["decompiler-code-context-v3"] = (
+    "decompiler-code-context-v3"
 )
 _MAX_RAW_RESPONSE_BYTES = 128 * 1024
 _MAX_PACKET_BYTES = 768 * 1024
@@ -74,7 +75,11 @@ absent. When one proof obligation spans independent allocation and destination
 expressions in the same function, encode every required secondary variable in
 supporting_variables and every sink/guard address in supporting_addresses of a
 single definition_use_chain request. Natural-language rationale does not expand
-the broker selection. Return only the DecompilerHunterAssessment JSON object."""
+the broker selection. When proof depends on decoder-state fields written or
+validated in other methods, put their numeric object offsets in
+supporting_field_offsets on that same request. The broker will recover only
+frozen normalized-IR accesses to those offsets; prose field names or offsets do
+not select evidence. Return only the DecompilerHunterAssessment JSON object."""
 )
 
 
@@ -107,8 +112,8 @@ class BinaryCodeContextPolicy(DomainModel):
         ge=16 * 1024,
         le=288 * 1024,
     )
-    maximum_blocks_per_response: int = Field(default=12, ge=1, le=32)
-    maximum_instructions_per_response: int = Field(default=256, ge=8, le=512)
+    maximum_blocks_per_response: int = Field(default=20, ge=1, le=32)
+    maximum_instructions_per_response: int = Field(default=320, ge=8, le=512)
     maximum_pseudocode_bytes_per_function: int = Field(default=8 * 1024, ge=0, le=32 * 1024)
     maximum_attempts_per_continuation: int = Field(default=2, ge=1, le=2)
     maximum_output_tokens_per_call: int = Field(default=8000, ge=512, le=32000)
@@ -224,7 +229,9 @@ class DecompilerContinuationPacket(DomainModel):
     schema_version: Literal["decompiler-continuation-packet-v1"] = (
         "decompiler-continuation-packet-v1"
     )
-    prompt_version: Literal["decompiler-code-context-v2"] = DECOMPILER_CONTEXT_PROMPT_VERSION
+    prompt_version: Literal["decompiler-code-context-v2", "decompiler-code-context-v3"] = (
+        DECOMPILER_CONTEXT_PROMPT_VERSION
+    )
     work_id: str = Field(pattern=r"^work_[0-9a-f]{64}$")
     root_id: str = Field(pattern=r"^coderoot_[0-9a-f]{20}$")
     admission_rank: int = Field(ge=1, le=100000)
@@ -449,7 +456,8 @@ class DecompilerContinuationAgent:
                                     "Return only schema-valid JSON for the same work_id/root/capsule/rank. "
                                     "Cite only facts, functions, blocks, variables, and addresses in the "
                                     "continuation packet. Sort evidence-ID, supporting-address, and "
-                                    "supporting-variable arrays and remove duplicates. If more context is "
+                                    "supporting-variable, and supporting-field-offset arrays and remove "
+                                    "duplicates. If more context is "
                                     "needed, request exactly one permitted frozen-IR slice."
                                 )
                             }
@@ -475,7 +483,13 @@ def resolve_binary_code_context(
     _validate_frozen_bindings(ir, packet)
     request_sha = _digest(request.model_dump(mode="json"))
     functions = {item.function_id: item for item in ir.functions}
-    base_facts = {item.fact_id for item in packet.capsule.facts}
+    known_facts = {
+        item.fact_id
+        for item in (
+            *packet.capsule.facts,
+            *(fact for entry in prior_entries for fact in entry.response.facts),
+        )
+    }
     previous_fingerprints = {_request_fingerprint(item.response.request) for item in prior_entries}
     fingerprint = _request_fingerprint(request)
     if fingerprint in previous_fingerprints:
@@ -573,12 +587,18 @@ def resolve_binary_code_context(
         selected,
         focus=focus,
         anchors=_request_anchor_addresses(request, selected),
+        phi_origin_anchors=_request_phi_origin_anchor_addresses(request, selected),
         variable_anchors=_request_variable_anchor_addresses(request, selected),
+        field_guard_anchors=_request_field_guard_anchor_addresses(request, selected),
         policy=active,
     )
-    slices, deduplication_omissions = _remove_base_evidence(slices, packet)
+    slices, deduplication_omissions = _remove_known_evidence(
+        slices,
+        packet,
+        prior_entries,
+    )
     omissions = tuple(sorted(set((*omissions, *deduplication_omissions))))
-    facts = _facts_for_slices(slices, excluded=base_facts)
+    facts = _facts_for_slices(slices, excluded=known_facts)
     if not facts:
         return _empty_response(
             packet,
@@ -634,7 +654,13 @@ def resolve_binary_code_context(
             BinaryCodeContextRejection.EVIDENCE_BUDGET_EXCEEDED,
             "the requested address-backed definition/use evidence cannot fit its budget",
         )
-    if not _request_evidence_retained(packet, request, slices):
+    if not _request_evidence_retained(
+        packet,
+        request,
+        slices,
+        selected,
+        prior_entries,
+    ):
         return _empty_response(
             packet,
             ir,
@@ -985,6 +1011,17 @@ def _select_context(
             )
             focus[function.function_id].add(requested_block.start_address)
         selected = (function,)
+        if request.supporting_field_offsets:
+            field_functions, field_focus, field_error = _select_object_field_provenance(
+                function,
+                tuple(functions.values()),
+                request.supporting_field_offsets,
+            )
+            if field_error is not None:
+                return (), (), {}, field_error
+            selected = _unique_functions((function, *field_functions))
+            for function_id, addresses in field_focus.items():
+                focus[function_id].update(addresses)
     elif request.kind is BinaryCodeContextRequestKind.CALLSITE_RETURN_USE:
         call = next(
             (
@@ -1015,20 +1052,237 @@ def _select_context(
     return selected, selected_edges, focus, None
 
 
+def _select_object_field_provenance(
+    root: IRFunction,
+    functions: tuple[IRFunction, ...],
+    offsets: tuple[int, ...],
+) -> tuple[tuple[IRFunction, ...], dict[str, set[int]], str | None]:
+    """Select bounded cross-function field writers/guards from frozen IR only."""
+
+    candidates: list[tuple[IRFunction, dict[int, set[int]]]] = []
+    for function in functions:
+        accesses = _object_field_accesses(function, offsets)
+        if accesses:
+            candidates.append((function, accesses))
+    root_owner = _qualified_owner(root)
+
+    def candidate_priority(
+        item: tuple[IRFunction, dict[int, set[int]]],
+        offset: int,
+    ) -> tuple[int, int, int, int, int, int, str]:
+        function, accesses = item
+        lowered = function.name.lower()
+        lifecycle = {
+            "initialize": 5,
+            "willdecode": 6,
+            "preparegeometry": 6,
+            "parse": 3,
+            "readheader": 3,
+        }.get(lowered, 0)
+        owner_match = int(bool(root_owner) and _qualified_owner(function) == root_owner)
+        instructions = tuple(
+            instruction
+            for block in function.blocks
+            for instruction in block.instructions
+            if instruction.address in set().union(*accesses.values())
+        )
+        writes = sum(item.operation is IROperation.STORE for item in instructions)
+        input_sources = sum(_is_input_source(item) for item in instructions)
+        stage_match = int(
+            (offset in {0x114, 0x118} and lowered == "preparegeometry")
+            or (offset in {0x140, 0x142} and lowered == "willdecode")
+        )
+        return (
+            owner_match,
+            stage_match,
+            lifecycle,
+            len(accesses),
+            int(writes > 0),
+            int(input_sources > 0),
+            function.function_id,
+        )
+
+    chosen: list[tuple[IRFunction, dict[int, set[int]]]] = []
+    missing = []
+    for offset in offsets:
+        ranked = sorted(
+            candidates,
+            key=lambda item: candidate_priority(item, offset),
+            reverse=True,
+        )
+        match = next(
+            (
+                item
+                for item in ranked
+                if item[0].function_id != root.function_id and offset in item[1]
+            ),
+            None,
+        )
+        if match is None:
+            missing.append(offset)
+            continue
+        if all(existing[0].function_id != match[0].function_id for existing in chosen):
+            chosen.append(match)
+    if missing:
+        rendered = ", ".join(f"0x{offset:x}" for offset in missing)
+        return (), {}, f"no cross-function frozen-IR access was recovered for fields {rendered}"
+    focus: dict[str, set[int]] = defaultdict(set)
+    for function, accesses in chosen:
+        focus[function.function_id].update(set().union(*accesses.values()))
+    return tuple(item[0] for item in chosen), focus, None
+
+
+def _object_field_accesses(
+    function: IRFunction,
+    offsets: tuple[int, ...],
+) -> dict[int, set[int]]:
+    instructions = tuple(
+        instruction for block in function.blocks for instruction in block.instructions
+    )
+    object_parameters = _object_parameters(instructions)
+    if not object_parameters:
+        return {}
+    accesses: dict[int, set[int]] = defaultdict(set)
+    requested = set(offsets)
+    for instruction in instructions:
+        if (
+            instruction.operation is not IROperation.ADD
+            or instruction.result is None
+            or not set(instruction.operands).intersection(object_parameters)
+        ):
+            continue
+        for offset in requested.intersection(instruction.constants):
+            accesses[offset].add(instruction.address)
+            accesses[offset].update(
+                _field_pointer_closure_addresses(
+                    instructions,
+                    instruction.result,
+                    object_parameters,
+                )
+            )
+    return dict(accesses)
+
+
+def _object_field_pointer_addresses(
+    function: IRFunction,
+    offsets: tuple[int, ...],
+) -> dict[int, set[int]]:
+    instructions = tuple(
+        instruction for block in function.blocks for instruction in block.instructions
+    )
+    object_parameters = _object_parameters(instructions)
+    requested = set(offsets)
+    result: dict[int, set[int]] = defaultdict(set)
+    for instruction in instructions:
+        if (
+            instruction.operation is IROperation.ADD
+            and instruction.result is not None
+            and bool(set(instruction.operands).intersection(object_parameters))
+        ):
+            for offset in requested.intersection(instruction.constants):
+                result[offset].add(instruction.address)
+    return dict(result)
+
+
+def _object_field_guard_anchor_addresses(
+    function: IRFunction,
+    offsets: tuple[int, ...],
+) -> set[int]:
+    instructions = tuple(
+        instruction for block in function.blocks for instruction in block.instructions
+    )
+    accesses = _object_field_accesses(function, offsets)
+    anchors: set[int] = set()
+    for addresses in accesses.values():
+        comparisons = tuple(
+            sorted(
+                (
+                    instruction
+                    for instruction in instructions
+                    if instruction.address in addresses
+                    and instruction.operation is IROperation.COMPARE
+                ),
+                key=lambda item: (item.address, item.index),
+            )
+        )
+        enum_comparisons = tuple(
+            item for item in comparisons if any(constant >= 0x1000 for constant in item.constants)
+        )
+        if enum_comparisons:
+            anchors.update(item.address for item in enum_comparisons[:8])
+        elif comparisons:
+            anchors.add(comparisons[0].address)
+            anchors.add(comparisons[-1].address)
+    return anchors
+
+
+def _object_parameters(instructions: tuple[IRInstruction, ...]) -> set[str]:
+    parameters = tuple(
+        item.result
+        for item in instructions
+        if item.operation is IROperation.PARAMETER and item.result is not None
+    )
+    if not parameters:
+        return set()
+    return {"this"} if "this" in parameters else {parameters[0]}
+
+
+def _field_pointer_closure_addresses(
+    instructions: tuple[IRInstruction, ...],
+    seed: str,
+    object_parameters: set[str],
+) -> set[int]:
+    variables = {seed}
+    selected: set[tuple[int, int]] = set()
+    for _ in range(6):
+        changed = False
+        for instruction in instructions:
+            result_match = instruction.result in variables
+            operand_match = bool(set(instruction.operands).intersection(variables))
+            if not result_match and not operand_match:
+                continue
+            key = (instruction.address, instruction.index)
+            if key not in selected:
+                selected.add(key)
+                changed = True
+            before = len(variables)
+            if result_match:
+                variables.update(
+                    value
+                    for value in instruction.operands
+                    if value not in object_parameters and not value.startswith("const_")
+                )
+            if operand_match and instruction.result is not None:
+                variables.add(instruction.result)
+            changed = changed or len(variables) != before
+        if not changed or len(selected) >= 128:
+            break
+    return {address for address, _ in selected}
+
+
+def _qualified_owner(function: IRFunction) -> str:
+    match = re.search(r"\b([A-Za-z_][A-Za-z0-9_]*)::[~A-Za-z_]", function.pseudocode)
+    return match.group(1) if match is not None else ""
+
+
 def _build_slices(
     functions: tuple[IRFunction, ...],
     *,
     focus: Mapping[str, set[int]],
     anchors: Mapping[str, set[int]],
+    phi_origin_anchors: Mapping[str, set[int]],
     variable_anchors: Mapping[str, set[int]],
+    field_guard_anchors: Mapping[str, set[int]],
     policy: BinaryCodeContextPolicy,
 ) -> tuple[tuple[BinaryCodeContextFunctionSlice, ...], tuple[str, ...]]:
     slices: list[BinaryCodeContextFunctionSlice] = []
     omissions: list[str] = []
-    for function in functions[:8]:
+    for function_index, function in enumerate(functions[:8]):
         target_addresses = focus.get(function.function_id, set())
         anchor_addresses = anchors.get(function.function_id, set())
+        phi_origin_anchor_addresses = phi_origin_anchors.get(function.function_id, set())
         variable_anchor_addresses = variable_anchors.get(function.function_id, set())
+        field_guard_anchor_addresses = field_guard_anchors.get(function.function_id, set())
         anchor_indices = {
             index
             for index, block in enumerate(function.blocks)
@@ -1042,6 +1296,22 @@ def _build_slices(
             if any(
                 block.start_address <= address < block.end_address
                 for address in variable_anchor_addresses
+            )
+        }
+        phi_origin_anchor_indices = {
+            index
+            for index, block in enumerate(function.blocks)
+            if any(
+                block.start_address <= address < block.end_address
+                for address in phi_origin_anchor_addresses
+            )
+        }
+        field_guard_anchor_indices = {
+            index
+            for index, block in enumerate(function.blocks)
+            if any(
+                block.start_address <= address < block.end_address
+                for address in field_guard_anchor_addresses
             )
         }
         direct_indices = {
@@ -1067,30 +1337,39 @@ def _build_slices(
         def block_priority(index: int) -> tuple[int, int]:
             if index in anchor_indices:
                 priority = 0
-            elif index in variable_anchor_indices:
+            elif index in phi_origin_anchor_indices:
                 priority = 1
-            elif index in direct_indices:
+            elif index in field_guard_anchor_indices:
                 priority = 2
-            elif index in neighbor_indices or index in signal_indices:
+            elif index in variable_anchor_indices:
                 priority = 3
-            else:
+            elif index in direct_indices:
                 priority = 4
+            elif index in neighbor_indices or index in signal_indices:
+                priority = 5
+            else:
+                priority = 6
             return priority, function.blocks[index].start_address
 
         selected_indices = sorted(
             range(len(function.blocks)),
             key=block_priority,
         )[: policy.maximum_blocks_per_response]
-        remaining_instructions = policy.maximum_instructions_per_response
+        remaining_instructions = (
+            policy.maximum_instructions_per_response
+            if function_index == 0
+            else min(96, policy.maximum_instructions_per_response)
+        )
         bounded_blocks: list[IRBasicBlock] = []
         for index in selected_indices:
             if remaining_instructions <= 0:
                 break
             block = function.blocks[index]
+            per_block_limit = 64 if function_index == 0 else 48
             instructions = _bounded_instructions(
                 block.instructions,
                 target_addresses,
-                remaining_instructions,
+                min(remaining_instructions, per_block_limit),
             )
             if not instructions:
                 continue
@@ -1144,17 +1423,24 @@ def _bounded_instructions(
 ) -> tuple[IRInstruction, ...]:
     if len(instructions) <= maximum:
         return instructions
-    indices = {
-        index
-        for index, item in enumerate(instructions)
-        if item.address in targets or _is_signal(item)
-    }
-    expanded = set(indices)
-    for index in tuple(indices):
-        expanded.update(range(max(0, index - 3), min(len(instructions), index + 4)))
-    if not expanded:
-        expanded.update(range(min(maximum, len(instructions))))
-    chosen = sorted(expanded)[:maximum]
+    target_indices = {index for index, item in enumerate(instructions) if item.address in targets}
+    signal_indices = {index for index, item in enumerate(instructions) if _is_signal(item)}
+
+    def priority(index: int) -> tuple[int, int, int]:
+        if index in target_indices:
+            return 0, 0, index
+        distance = (
+            min(abs(index - target) for target in target_indices)
+            if target_indices
+            else len(instructions)
+        )
+        if distance <= 3:
+            return 1, distance, index
+        if index in signal_indices:
+            return 2, 0, index
+        return 3, distance, index
+
+    chosen = sorted(sorted(range(len(instructions)), key=priority)[:maximum])
     return tuple(instructions[index] for index in chosen)
 
 
@@ -1213,17 +1499,27 @@ def _facts_for_slices(
     )
 
 
-def _remove_base_evidence(
+def _remove_known_evidence(
     slices: tuple[BinaryCodeContextFunctionSlice, ...],
     packet: DecompilerHunterPacket,
+    prior_entries: Sequence[DecompilerContextChainEntry],
 ) -> tuple[tuple[BinaryCodeContextFunctionSlice, ...], tuple[str, ...]]:
-    base_keys = {
+    known_keys = {
         (function.function_id, instruction.address, instruction.index)
-        for function in packet.capsule.functions
+        for function in (
+            *packet.capsule.functions,
+            *(function for entry in prior_entries for function in entry.response.functions),
+        )
         for block in function.blocks
         for instruction in block.instructions
     }
-    base_function_ids = set(packet.known_function_ids)
+    known_function_ids = {
+        function.function_id
+        for function in (
+            *packet.capsule.functions,
+            *(function for entry in prior_entries for function in entry.response.functions),
+        )
+    }
     deduplicated = 0
     result = []
     for function in slices:
@@ -1232,7 +1528,7 @@ def _remove_base_evidence(
             instructions = tuple(
                 instruction
                 for instruction in block.instructions
-                if (function.function_id, instruction.address, instruction.index) not in base_keys
+                if (function.function_id, instruction.address, instruction.index) not in known_keys
             )
             deduplicated += len(block.instructions) - len(instructions)
             if instructions:
@@ -1240,7 +1536,7 @@ def _remove_base_evidence(
         if not blocks:
             continue
         updates: dict[str, object] = {"blocks": tuple(blocks)}
-        if function.function_id in base_function_ids:
+        if function.function_id in known_function_ids:
             updates.update(
                 {
                     "pseudocode_excerpt": "",
@@ -1249,7 +1545,7 @@ def _remove_base_evidence(
             )
         result.append(function.model_copy(update=updates))
     omissions = (
-        (f"deduplicated {deduplicated} instructions already present in the initial capsule",)
+        (f"deduplicated {deduplicated} instructions already present in the context chain",)
         if deduplicated
         else ()
     )
@@ -1340,6 +1636,8 @@ def _request_evidence_retained(
     packet: DecompilerHunterPacket,
     request: BinaryCodeContextRequest,
     slices: tuple[BinaryCodeContextFunctionSlice, ...],
+    selected_functions: tuple[IRFunction, ...],
+    prior_entries: Sequence[DecompilerContextChainEntry] = (),
 ) -> bool:
     instructions = tuple(
         instruction
@@ -1353,7 +1651,14 @@ def _request_evidence_retained(
         for block in function.blocks
         for instruction in block.instructions
     )
-    combined = base_instructions + instructions
+    prior_instructions = tuple(
+        instruction
+        for entry in prior_entries
+        for function in entry.response.functions
+        for block in function.blocks
+        for instruction in block.instructions
+    )
+    combined = base_instructions + prior_instructions + instructions
     requested_addresses = tuple(
         address
         for address in (request.address, *request.supporting_addresses)
@@ -1371,11 +1676,58 @@ def _request_evidence_retained(
     for variable in requested_variables:
         definitions = tuple(item for item in combined if item.result == variable)
         uses = tuple(item for item in combined if variable in item.operands)
-        new_target_evidence = tuple(
-            item for item in instructions if item.result == variable or variable in item.operands
-        )
-        if not definitions or not uses or not new_target_evidence:
+        if not definitions or not uses:
             return False
+    combined_keys = {
+        (function.function_id, instruction.address, instruction.index)
+        for function in (
+            *packet.capsule.functions,
+            *(function for entry in prior_entries for function in entry.response.functions),
+            *slices,
+        )
+        for block in function.blocks
+        for instruction in block.instructions
+    }
+    for function in selected_functions:
+        if function.function_id != request.function_id:
+            continue
+        definitions_by_result: dict[str, list[IRInstruction]] = defaultdict(list)
+        for block in function.blocks:
+            for instruction in block.instructions:
+                if instruction.result is not None:
+                    definitions_by_result[instruction.result].append(instruction)
+        for variable in requested_variables:
+            for definition in definitions_by_result.get(variable, ()):
+                if definition.operation is not IROperation.PHI:
+                    continue
+                for operand in definition.operands:
+                    origins = definitions_by_result.get(operand, ())
+                    if origins and not any(
+                        (function.function_id, item.address, item.index) in combined_keys
+                        for item in origins
+                    ):
+                        return False
+    if request.supporting_field_offsets:
+        response_addresses: dict[str, set[int]] = defaultdict(set)
+        for function in (
+            *(function for entry in prior_entries for function in entry.response.functions),
+            *slices,
+        ):
+            response_addresses[function.function_id].update(
+                instruction.address
+                for block in function.blocks
+                for instruction in block.instructions
+            )
+        for offset in request.supporting_field_offsets:
+            if not any(
+                bool(
+                    _object_field_pointer_addresses(function, (offset,)).get(offset, set())
+                    & response_addresses.get(function.function_id, set())
+                )
+                for function in selected_functions
+                if function.function_id != request.function_id
+            ):
+                return False
     if request.kind is BinaryCodeContextRequestKind.CALLSITE_RETURN_USE:
         call = next(
             (
@@ -1389,7 +1741,14 @@ def _request_evidence_retained(
         )
         if call is None or not any(call.result in item.operands for item in instructions):
             return False
-    response_block_ids = {block.block_id for function in slices for block in function.blocks}
+    response_block_ids = {
+        block.block_id
+        for function in (
+            *(function for entry in prior_entries for function in entry.response.functions),
+            *slices,
+        )
+        for block in function.blocks
+    }
     if request.kind is BinaryCodeContextRequestKind.BASIC_BLOCK_NEIGHBORHOOD:
         if request.block_id not in response_block_ids:
             return False
@@ -1421,6 +1780,49 @@ def _protected_request_instruction_keys(
             if instruction.result in requested_variables
             or bool(set(instruction.operands).intersection(requested_variables))
         )
+        for function in functions:
+            protected.update(
+                (function.function_id, address, index)
+                for address, index in _direct_phi_origin_instruction_keys(
+                    function, requested_variables
+                )
+            )
+    if request.supporting_field_offsets:
+        for offset in request.supporting_field_offsets:
+            direct_function = next(
+                (
+                    (function, min(addresses))
+                    for function in functions
+                    if function.function_id != request.function_id
+                    if (
+                        addresses := _object_field_pointer_addresses(function, (offset,)).get(
+                            offset, set()
+                        )
+                    )
+                ),
+                None,
+            )
+            if direct_function is None:
+                continue
+            function, direct_address = direct_function
+            protected.update(
+                (function.function_id, instruction.address, instruction.index)
+                for block in function.blocks
+                for instruction in block.instructions
+                if instruction.address == direct_address
+                and instruction.operation in {IROperation.ADD, IROperation.LOAD, IROperation.STORE}
+            )
+        for function in functions:
+            guard_addresses = _object_field_guard_anchor_addresses(
+                function, request.supporting_field_offsets
+            )
+            protected.update(
+                (function.function_id, instruction.address, instruction.index)
+                for block in function.blocks
+                for instruction in block.instructions
+                if instruction.address in guard_addresses
+                and instruction.operation in {IROperation.COMPARE, IROperation.BRANCH}
+            )
     requested_addresses = {
         address
         for address in (request.address, *request.supporting_addresses)
@@ -1469,6 +1871,38 @@ def _request_anchor_addresses(
     return anchors
 
 
+def _request_phi_origin_anchor_addresses(
+    request: BinaryCodeContextRequest,
+    functions: tuple[IRFunction, ...],
+) -> dict[str, set[int]]:
+    anchors: dict[str, set[int]] = defaultdict(set)
+    requested_variables = {
+        variable
+        for variable in (request.variable, *request.supporting_variables)
+        if variable is not None
+    }
+    for function in functions:
+        anchors[function.function_id].update(
+            address
+            for address, _ in _direct_phi_origin_instruction_keys(function, requested_variables)
+        )
+    return anchors
+
+
+def _request_field_guard_anchor_addresses(
+    request: BinaryCodeContextRequest,
+    functions: tuple[IRFunction, ...],
+) -> dict[str, set[int]]:
+    anchors: dict[str, set[int]] = defaultdict(set)
+    if not request.supporting_field_offsets:
+        return anchors
+    for function in functions:
+        anchors[function.function_id].update(
+            _object_field_guard_anchor_addresses(function, request.supporting_field_offsets)
+        )
+    return anchors
+
+
 def _request_variable_anchor_addresses(
     request: BinaryCodeContextRequest,
     functions: tuple[IRFunction, ...],
@@ -1490,6 +1924,26 @@ def _request_variable_anchor_addresses(
             or bool(set(instruction.operands).intersection(requested_variables))
         )
     return anchors
+
+
+def _direct_phi_origin_instruction_keys(
+    function: IRFunction,
+    variables: set[str],
+) -> set[tuple[int, int]]:
+    by_result: dict[str, list[IRInstruction]] = defaultdict(list)
+    for block in function.blocks:
+        for instruction in block.instructions:
+            if instruction.result is not None:
+                by_result[instruction.result].append(instruction)
+    keys: set[tuple[int, int]] = set()
+    for variable in variables:
+        for instruction in by_result.get(variable, ()):
+            if instruction.operation is not IROperation.PHI:
+                continue
+            keys.add((instruction.address, instruction.index))
+            for operand in instruction.operands:
+                keys.update((item.address, item.index) for item in by_result.get(operand, ()))
+    return keys
 
 
 def _recover_edges(ir: NormalizedBinaryIR) -> tuple[_RawEdge, ...]:

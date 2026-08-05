@@ -541,6 +541,67 @@ hypothesis must not be reported until cross-function field provenance proves or
 falsifies the apparent guard. M17-8 therefore validates bounded proof closure;
 it does not claim a vulnerability.
 
+### M17-9 — Object-field provenance and PHI-origin closure
+
+#### Trigger
+
+The M17-8 KTX hypothesis depended on decoder-state fields whose writers and
+validators live outside `decodeImageImp`. The previous broker could recover a
+single function's definition/use chain, but it could neither name object-field
+offsets structurally nor retain both incoming definitions of a loop PHI. The
+Reviewer therefore could not distinguish an actual allocation/write mismatch
+from state validation performed by `prepareGeometry`, `willDecode`, or
+`initialize`.
+
+#### Implementation scope
+
+- Add sorted, bounded `supporting_field_offsets` only to
+  `definition_use_chain` requests. Natural-language field names still select
+  no evidence.
+- Select the minimum lifecycle/owner-matched frozen functions that directly
+  access every requested object offset; unrelated classes with the same offset
+  are excluded.
+- Retain exact object-field accesses, enum/range guards, requested variables and
+  addresses, and every direct incoming definition of a requested PHI.
+- Deduplicate instructions and facts already present in the immutable context
+  chain so a broader continuation spends bytes only on new evidence.
+- Prioritize exact targets inside large p-code blocks and keep the 96 KiB
+  serialized response ceiling. The root preselection allowance rises from 256
+  to 320 instructions solely to prevent a selected guard block from being
+  dropped before response compaction.
+- Return the exact validation error to a Reviewer schema-repair attempt and
+  explicitly prohibit mixing caller-edge requests with definition/use-only
+  selectors.
+- Do not invoke a decompiler, image, fuzzer, VM, generated input, network
+  search, or dynamic experiment.
+
+#### Exit criteria
+
+A deterministic replay over the frozen KTX root must return a resolved response
+that includes `decodeImageImp`, `prepareGeometry`, `willDecode`, and
+`initialize`; retains the loop's initial PHI pointer definition and the
+`0x140b` format dispatch; and stays within 96 KiB. Repeating a broader request
+must reuse prior chain evidence and fit the model-declared response budget.
+Synthetic tests must also prove that a late field guard in a large p-code block
+survives compaction and that unrelated owner functions are not selected.
+
+#### Current-ImageIO observation
+
+The deterministic frozen-IR replay resolved at 98,235 bytes and retained both
+the initial PHI pointer and the `0x140b` dispatch. The real Codex continuation
+then completed in one Hunter session, three model calls, 330,780 input tokens,
+8,188 output tokens, and 195,413 total evidence bytes. It requested eight
+numeric field offsets and received a 65,015-byte second response containing the
+four expected functions. All dynamic counters remained zero.
+
+The Hunter kept the KTX row-byte-wrap claim as a conditional
+`code_hypothesis`. The independent Reviewer did not accept it: it requested a
+schema-valid direct-caller slice, and the frozen IR contained no matching call
+edge. The deterministic gate therefore returned `reviewer_inconclusive`, with
+`reportable_static=0` and `apple_submission_ready=false`. The remaining defect
+is caller/parser-route recovery and dominance linkage, not field-provenance
+selection. This observation is not a vulnerability claim.
+
 ## Per-PR validation and merge procedure
 
 For each M17 PR:

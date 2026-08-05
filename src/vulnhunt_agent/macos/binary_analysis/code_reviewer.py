@@ -44,8 +44,8 @@ from .decompiler_hunter import (
 from .ir import NormalizedBinaryIR
 
 CODE_REVIEWER_QUEUE_SCOPE: Literal["decompiler-code-reviewer"] = "decompiler-code-reviewer"
-CODE_REVIEWER_PROMPT_VERSION: Literal["decompiler-code-reviewer-v1"] = (
-    "decompiler-code-reviewer-v1"
+CODE_REVIEWER_PROMPT_VERSION: Literal["decompiler-code-reviewer-v2"] = (
+    "decompiler-code-reviewer-v2"
 )
 _MAX_PACKET_BYTES = 1024 * 1024
 _MAX_RAW_RESPONSE_BYTES = 128 * 1024
@@ -65,6 +65,11 @@ only if every obligation is proven. Reject when cited code disproves the path
 or invariant. Use unknown when evidence is incomplete. You may request exactly
 one typed frozen-IR context slice; never request execution, an input, fuzzing,
 a VM, a file, a command, a network lookup, exploit material, or disclosure.
+For direct_caller, direct_callee, exact_function, and basic_block_neighborhood
+requests, leave every definition/use-only selector empty. In particular,
+supporting_addresses, supporting_variables, and supporting_field_offsets are
+permitted only on a definition_use_chain request. Do not combine a caller edge
+request with field provenance in one request.
 
 Return only one JSON object matching BinaryCodeReviewerVerdict. Preserve every
 identity and digest exactly. Sort and deduplicate every evidence-ID array. The
@@ -205,7 +210,10 @@ class BinaryCodeReviewerPacket(DomainModel):
     schema_version: Literal["binary-code-reviewer-packet-v1"] = (
         "binary-code-reviewer-packet-v1"
     )
-    prompt_version: Literal["decompiler-code-reviewer-v1"] = CODE_REVIEWER_PROMPT_VERSION
+    prompt_version: Literal[
+        "decompiler-code-reviewer-v1",
+        "decompiler-code-reviewer-v2",
+    ] = CODE_REVIEWER_PROMPT_VERSION
     queue_scope: Literal["decompiler-code-reviewer"] = CODE_REVIEWER_QUEUE_SCOPE
     reviewer_session_id: str = Field(pattern=r"^review_[0-9a-f]{64}$")
     hunter_session_id: str = Field(pattern=r"^work_[0-9a-f]{64}$")
@@ -419,6 +427,7 @@ class BinaryCodeReviewerAgent:
         }]
         totals = _zero_totals()
         raw: list[str] = []
+        validation_error = "response was not a JSON object"
         for _ in range(self.policy.maximum_attempts_per_call):
             try:
                 response = await self.client.chat(
@@ -447,8 +456,8 @@ class BinaryCodeReviewerAgent:
                     verdict = BinaryCodeReviewerVerdict.model_validate(parsed)
                     validate_binary_code_reviewer_verdict(packet, verdict)
                     return verdict, tuple(raw), totals
-            except ValueError:
-                pass
+            except ValueError as exc:
+                validation_error = str(exc)[:1000]
             messages.extend((
                 {"role": "assistant", "content": response.content_blocks},
                 {"role": "user", "content": [{"text": (
@@ -456,6 +465,7 @@ class BinaryCodeReviewerAgent:
                     "root_id, hypothesis_id, capsule_sha256, and context_chain_sha256. "
                     "Use all nine obligations in normative order and cite only allowed "
                     "codefact IDs. Do not set reportability or request dynamic work."
+                    f" The previous response failed validation: {validation_error}"
                 )}]},
             ))
         raise BinaryCodeReviewerDeferred(
