@@ -2413,6 +2413,11 @@ def _request_field_guard_anchor_addresses(
     if not request.supporting_field_offsets:
         return anchors
     for function in functions:
+        for addresses in _object_field_pointer_addresses(
+            function,
+            request.supporting_field_offsets,
+        ).values():
+            anchors[function.function_id].update(addresses)
         anchors[function.function_id].update(
             _object_field_guard_anchor_addresses(function, request.supporting_field_offsets)
         )
