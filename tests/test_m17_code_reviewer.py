@@ -531,6 +531,33 @@ async def test_one_reviewer_context_slice_uses_same_frozen_broker(tmp_path) -> N
     assert len(client.calls) == 2
 
 
+
+@pytest.mark.asyncio
+async def test_reviewer_repair_receives_the_exact_context_request_error(tmp_path) -> None:
+    ir, hunter_packet, assessment, packet = _fixture()
+    invalid = _needs_context_verdict(packet).model_dump(mode="json")
+    invalid["context_request"]["supporting_field_offsets"] = [0x114]
+    accepted = _verdict(packet)
+    client = _FakeClient([
+        json.dumps(invalid),
+        json.dumps(accepted.model_dump(mode="json")),
+    ])
+
+    result = await run_binary_code_review(
+        store_root=tmp_path,
+        ir=ir,
+        hunter_packet=hunter_packet,
+        hunter_assessment=assessment,
+        product_version="26.5.2",
+        build_version="25F84",
+        run_id="m17-review-schema-repair",
+        client=client,
+    )
+
+    repair = client.calls[1]["messages"][-1]["content"][0]["text"]
+    assert result.decision.status is StaticReportabilityStatus.REPORTABLE_STATIC
+    assert "supporting proof anchors require a definition/use request" in repair
+
 def test_unknown_attacker_control_and_alias_uncertainty_stay_inconclusive() -> None:
     _, _, _, packet = _fixture()
     accepted = _verdict(packet)
