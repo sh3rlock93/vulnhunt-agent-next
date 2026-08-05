@@ -133,7 +133,7 @@ class DecompilerContextTerminalStatus(StrEnum):
 
 class BinaryCodeContextPolicy(DomainModel):
     maximum_roots_per_run: int = Field(default=6, ge=1, le=6)
-    maximum_continuations_per_root: int = Field(default=3, ge=1, le=6)
+    maximum_continuations_per_root: int = Field(default=3, ge=1, le=7)
     maximum_total_evidence_bytes: int = Field(
         default=288 * 1024,
         ge=16 * 1024,
@@ -364,11 +364,11 @@ class DecompilerContinuationPacket(DomainModel):
     admission_rank: int = Field(ge=1, le=100000)
     capsule_sha256: str = Field(pattern=SHA256_PATTERN)
     ir_sha256: str = Field(pattern=SHA256_PATTERN)
-    continuation_ordinal: int = Field(ge=1, le=6)
+    continuation_ordinal: int = Field(ge=1, le=7)
     previous_chain_sha256: str = Field(pattern=SHA256_PATTERN)
     base_packet: DecompilerHunterPacket
     prior_assessment: DecompilerHunterAssessment
-    context_responses: tuple[BinaryCodeContextResponse, ...] = Field(min_length=1, max_length=6)
+    context_responses: tuple[BinaryCodeContextResponse, ...] = Field(min_length=1, max_length=7)
     total_evidence_bytes: int = Field(ge=1, le=288 * 1024)
     packet_sha256: str = Field(pattern=SHA256_PATTERN)
 
@@ -415,7 +415,7 @@ class DecompilerContextChainEntry(DomainModel):
     )
     work_id: str = Field(pattern=r"^work_[0-9a-f]{64}$")
     root_id: str = Field(pattern=r"^coderoot_[0-9a-f]{20}$")
-    ordinal: int = Field(ge=1, le=6)
+    ordinal: int = Field(ge=1, le=7)
     previous_chain_sha256: str = Field(pattern=SHA256_PATTERN)
     request_sha256: str = Field(pattern=SHA256_PATTERN)
     response: BinaryCodeContextResponse
@@ -450,7 +450,7 @@ class DecompilerContextRunResult(DomainModel):
     initial_assessment_sha256: str = Field(pattern=SHA256_PATTERN)
     terminal_status: DecompilerContextTerminalStatus
     terminal_assessment: DecompilerHunterAssessment
-    entries: tuple[DecompilerContextChainEntry, ...] = Field(max_length=6)
+    entries: tuple[DecompilerContextChainEntry, ...] = Field(max_length=7)
     total_evidence_bytes: int = Field(ge=1, le=288 * 1024)
     sessions: Literal[1] = 1
     model_calls: int = Field(ge=0)
@@ -483,6 +483,22 @@ class DecompilerContextRunResult(DomainModel):
             ):
                 raise ValueError("completed context run still requests context")
         return self
+
+
+def _terminal_result_can_resume(
+    result: DecompilerContextRunResult,
+    *,
+    policy: BinaryCodeContextPolicy,
+) -> bool:
+    last_assessment = result.entries[-1].assessment if result.entries else None
+    return (
+        result.terminal_status is DecompilerContextTerminalStatus.REVIEWER_INCONCLUSIVE
+        and len(result.entries) < policy.maximum_continuations_per_root
+        and last_assessment is not None
+        and last_assessment == result.terminal_assessment
+        and last_assessment.disposition is DecompilerHunterDisposition.NEEDS_CODE_CONTEXT
+        and len(last_assessment.context_requests) == 1
+    )
 
 
 class DecompilerContinuationModelClient(Protocol):
@@ -1001,7 +1017,7 @@ async def continue_decompiler_hunter_session(
     client: DecompilerContinuationModelClient,
     policy: BinaryCodeContextPolicy | None = None,
 ) -> DecompilerContextRunResult:
-    """Continue one persisted Hunter root at most six times and resume by chain digest."""
+    """Continue one persisted Hunter root within policy and resume by chain digest."""
 
     active = policy or BinaryCodeContextPolicy()
     _validate_frozen_bindings(ir, packet)
@@ -1010,8 +1026,16 @@ async def continue_decompiler_hunter_session(
     initial_sha = _digest(initial_assessment.model_dump(mode="json"))
     entries = list(_load_entries(directory, packet, initial_sha))
     terminal_path = directory / "result.json"
+    replace_terminal = False
     if terminal_path.exists():
-        return DecompilerContextRunResult.model_validate_json(_read_file(terminal_path))
+        persisted = DecompilerContextRunResult.model_validate_json(_read_file(terminal_path))
+        resumable = (
+            persisted.entries == tuple(entries)
+            and _terminal_result_can_resume(persisted, policy=active)
+        )
+        if not resumable:
+            return persisted
+        replace_terminal = True
     current = entries[-1].assessment if entries else initial_assessment
     if current is None:
         raise RuntimeError("resolved context chain lost its assessment")
@@ -1027,7 +1051,11 @@ async def continue_decompiler_hunter_session(
                 current,
                 DecompilerContextTerminalStatus.REVIEWER_INCONCLUSIVE,
             )
-            _write_private_json(terminal_path, result.model_dump(mode="json"))
+            _write_private_json(
+                terminal_path,
+                result.model_dump(mode="json"),
+                replace=replace_terminal,
+            )
             return result
         request = current.context_requests[0]
         response = resolve_binary_code_context(
@@ -1055,7 +1083,11 @@ async def continue_decompiler_hunter_session(
                 current,
                 DecompilerContextTerminalStatus.REVIEWER_INCONCLUSIVE,
             )
-            _write_private_json(terminal_path, result.model_dump(mode="json"))
+            _write_private_json(
+                terminal_path,
+                result.model_dump(mode="json"),
+                replace=replace_terminal,
+            )
             return result
         responses = tuple(item.response for item in entries) + (response,)
         continuation_packet = _make_continuation_packet(
@@ -1094,7 +1126,11 @@ async def continue_decompiler_hunter_session(
         current,
         terminal,
     )
-    _write_private_json(terminal_path, result.model_dump(mode="json"))
+    _write_private_json(
+        terminal_path,
+        result.model_dump(mode="json"),
+        replace=replace_terminal,
+    )
     return result
 
 
@@ -3151,19 +3187,26 @@ def _read_file(path: Path) -> bytes:
     return path.read_bytes()
 
 
-def _write_private_json(path: Path, payload: object) -> None:
-    _write_private_bytes(path, json.dumps(payload, indent=2, sort_keys=True).encode() + b"\n")
+def _write_private_json(path: Path, payload: object, *, replace: bool = False) -> None:
+    _write_private_bytes(
+        path,
+        json.dumps(payload, indent=2, sort_keys=True).encode() + b"\n",
+        replace=replace,
+    )
 
 
-def _write_private_bytes(path: Path, payload: bytes) -> None:
+def _write_private_bytes(path: Path, payload: bytes, *, replace: bool = False) -> None:
     if path.is_symlink():
         raise RuntimeError("context artifact may not be a symbolic link")
     path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
     os.chmod(path.parent, 0o700)
     if path.exists():
-        if not path.is_file() or path.read_bytes() != payload:
+        if not path.is_file():
+            raise FileExistsError("context artifact already exists and is not a file")
+        if path.read_bytes() == payload:
+            return
+        if not replace:
             raise FileExistsError("immutable context artifact already contains other data")
-        return
     descriptor, temporary = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}-")
     try:
         with os.fdopen(descriptor, "wb") as handle:
