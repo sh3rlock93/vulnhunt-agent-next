@@ -181,6 +181,7 @@ tools/macos/*
 !tools/macos/run_m14_imageio_pilot.py
 !tools/macos/run_m17_decompiler_hunt.py
 !tools/macos/run_m17_decompiler_hunter.py
+!tools/macos/run_m17_code_context.py
 docker/local/
 prompts/hunters/*/
 prompts/rankers/*/

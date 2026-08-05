@@ -657,6 +657,14 @@ def validate_decompiler_hunter_assessment(
     _validate_safe_output(assessment)
 
 
+def validate_decompiler_hunter_safe_output(
+    assessment: DecompilerHunterAssessment,
+) -> None:
+    """Apply M17's static-only output safety policy to a later-stage assessment."""
+
+    _validate_safe_output(assessment)
+
+
 async def run_decompiler_hunter_work_item(
     *,
     store_root: Path,
