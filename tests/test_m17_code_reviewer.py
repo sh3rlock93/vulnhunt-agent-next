@@ -10,6 +10,7 @@ from pydantic import ValidationError
 from vulnhunt_agent.core.llm import LLMResponse
 from vulnhunt_agent.scheduling.budget import BudgetExceededError
 from vulnhunt_agent.macos.binary_analysis import (
+    BinaryCodeContextStatus,
     BinaryEvidenceCapsulePolicy,
     BinaryEvidenceFactKind,
     CodeHuntAdmissionPolicy,
@@ -399,6 +400,8 @@ async def test_valid_fixture_requires_fresh_reviewer_and_becomes_reportable(tmp_
     assert result.usage.scope == "reviewer" and result.usage.sessions == 1
     assert client.calls[0]["system"] == CODE_REVIEWER_SYSTEM_PROMPT
     assert CODE_REVIEWER_SYSTEM_PROMPT != DECOMPILER_HUNTER_SYSTEM_PROMPT
+    assert "virtual_selector" in CODE_REVIEWER_SYSTEM_PROMPT
+    assert "dominating_guard_block_ids" in CODE_REVIEWER_SYSTEM_PROMPT
     assert "Hunter conversation" not in client.calls[0]["messages"][0]["content"][0]["text"]
     assert result.image_executions == result.fuzzer_invocations == result.vm_boots == 0
     assert result.report.dynamic_reproduction is False
@@ -463,6 +466,49 @@ def test_hallucinated_evidence_hard_fails_and_uncited_sink_cannot_be_reportable(
         BinaryCodeReviewerVerdict.model_validate(
             verdict.model_copy(update={"obligations": tuple(obligations)}).model_dump(mode="json")
         )
+
+
+def test_reviewer_packet_preloads_a_bounded_root_caller_route() -> None:
+    _, _, _, packet = _fixture(maximum_capsule_functions=1)
+
+    route = packet.route_context_response
+
+    assert route is not None and route.status is BinaryCodeContextStatus.RESOLVED
+    assert route.request.kind is BinaryCodeContextRequestKind.DIRECT_CALLER
+    assert route.request.function_id == packet.capsule.root_function_id
+    assert route.evidence_bytes <= 32 * 1024
+    assert any(
+        edge.callee_function_id == packet.capsule.root_function_id for edge in route.call_edges
+    )
+    assert {fact.fact_id for fact in route.facts}.issubset(packet.allowed_evidence_ids)
+
+
+def test_reviewer_definition_use_repair_rejects_a_foreign_supporting_address() -> None:
+    _, _, _, packet = _fixture(maximum_capsule_functions=1)
+    assert packet.route_context_response is not None
+    foreign_address = packet.route_context_response.call_edges[0].callsite_address
+    root = packet.capsule.functions[0]
+    variable = next(
+        instruction.result
+        for block in root.blocks
+        for instruction in block.instructions
+        if instruction.result == "bytes"
+    )
+    payload = _needs_context_verdict(packet).model_dump(mode="json")
+    payload["context_request"] = {
+        "request_id": "codectx-reviewer-invalid-foreign-address",
+        "kind": "definition_use_chain",
+        "rationale": "Recover a target-bound arithmetic chain.",
+        "function_id": root.function_id,
+        "variable": variable,
+        "supporting_addresses": [foreign_address],
+        "evidence_ids": [packet.hypothesis.source_evidence_ids[0]],
+        "maximum_bytes": 32768,
+    }
+    verdict = BinaryCodeReviewerVerdict.model_validate(payload)
+
+    with pytest.raises(ValueError, match="address selectors must belong to function_id"):
+        validate_binary_code_reviewer_verdict(packet, verdict)
 
 
 @pytest.mark.asyncio
@@ -531,7 +577,6 @@ async def test_one_reviewer_context_slice_uses_same_frozen_broker(tmp_path) -> N
     assert len(client.calls) == 2
 
 
-
 @pytest.mark.asyncio
 async def test_reviewer_repair_receives_the_exact_context_request_error(tmp_path) -> None:
     ir, hunter_packet, assessment, packet = _fixture()
@@ -557,6 +602,48 @@ async def test_reviewer_repair_receives_the_exact_context_request_error(tmp_path
     repair = client.calls[1]["messages"][-1]["content"][0]["text"]
     assert result.decision.status is StaticReportabilityStatus.REPORTABLE_STATIC
     assert "supporting proof anchors require a definition/use request" in repair
+
+
+@pytest.mark.asyncio
+async def test_reviewer_repairs_a_foreign_definition_use_address(tmp_path) -> None:
+    ir, hunter_packet, assessment, packet = _fixture(maximum_capsule_functions=1)
+    assert packet.route_context_response is not None
+    root = packet.capsule.functions[0]
+    foreign_address = packet.route_context_response.call_edges[0].callsite_address
+    invalid = _needs_context_verdict(packet).model_dump(mode="json")
+    invalid["context_request"] = {
+        "request_id": "codectx-reviewer-invalid-definition-use-owner",
+        "kind": "definition_use_chain",
+        "rationale": "Recover target arithmetic without foreign selectors.",
+        "function_id": root.function_id,
+        "variable": "bytes",
+        "supporting_addresses": [foreign_address],
+        "evidence_ids": [packet.hypothesis.source_evidence_ids[0]],
+        "maximum_bytes": 32768,
+    }
+    accepted = _verdict(packet)
+    client = _FakeClient(
+        [
+            json.dumps(invalid),
+            json.dumps(accepted.model_dump(mode="json")),
+        ]
+    )
+
+    result = await run_binary_code_review(
+        store_root=tmp_path,
+        ir=ir,
+        hunter_packet=hunter_packet,
+        hunter_assessment=assessment,
+        product_version="26.5.2",
+        build_version="25F84",
+        run_id="m17-review-owner-repair",
+        client=client,
+    )
+
+    repair = client.calls[1]["messages"][-1]["content"][0]["text"]
+    assert result.decision.status is StaticReportabilityStatus.REPORTABLE_STATIC
+    assert "address selectors must belong to function_id" in repair
+
 
 def test_unknown_attacker_control_and_alias_uncertainty_stay_inconclusive() -> None:
     _, _, _, packet = _fixture()

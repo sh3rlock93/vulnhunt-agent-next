@@ -38,8 +38,8 @@ from .decompiler_hunter import (
 )
 from .ir import IRBasicBlock, IRFunction, IRInstruction, IROperation, NormalizedBinaryIR
 
-DECOMPILER_CONTEXT_PROMPT_VERSION: Literal["decompiler-code-context-v3"] = (
-    "decompiler-code-context-v3"
+DECOMPILER_CONTEXT_PROMPT_VERSION: Literal["decompiler-code-context-v4"] = (
+    "decompiler-code-context-v4"
 )
 _MAX_RAW_RESPONSE_BYTES = 128 * 1024
 _MAX_PACKET_BYTES = 768 * 1024
@@ -79,7 +79,12 @@ the broker selection. When proof depends on decoder-state fields written or
 validated in other methods, put their numeric object offsets in
 supporting_field_offsets on that same request. The broker will recover only
 frozen normalized-IR accesses to those offsets; prose field names or offsets do
-not select evidence. Return only the DecompilerHunterAssessment JSON object."""
+not select evidence. A call edge marked virtual_selector proves a compatible
+selector dispatch site, not a unique runtime target; retain its candidate count
+and require format/owner evidence before claiming the exact implementation is
+reachable. Dominating guard block IDs are CFG-derived and may be used only with
+their supplied address-backed guard facts. Return only the
+DecompilerHunterAssessment JSON object."""
 )
 
 
@@ -87,6 +92,11 @@ class BinaryCodeContextStatus(StrEnum):
     RESOLVED = "resolved"
     REJECTED = "rejected"
     UNAVAILABLE = "unavailable"
+
+
+class BinaryCodeContextEdgeResolution(StrEnum):
+    DIRECT = "direct"
+    VIRTUAL_SELECTOR = "virtual_selector"
 
 
 class BinaryCodeContextRejection(StrEnum):
@@ -147,6 +157,21 @@ class BinaryCodeContextEdge(DomainModel):
     callsite_address: int = Field(ge=0)
     arguments: tuple[str, ...] = Field(default=(), max_length=32)
     return_result: str | None = Field(default=None, min_length=1, max_length=160)
+    resolution: BinaryCodeContextEdgeResolution = BinaryCodeContextEdgeResolution.DIRECT
+    selector: str | None = Field(default=None, pattern=r"^[~A-Za-z_][A-Za-z0-9_]{0,159}$")
+    dispatch_candidate_count: int = Field(default=1, ge=1, le=10000)
+    dominating_guard_block_ids: tuple[str, ...] = Field(default=(), max_length=16)
+
+    @model_validator(mode="after")
+    def validate_resolution(self) -> "BinaryCodeContextEdge":
+        if tuple(sorted(set(self.dominating_guard_block_ids))) != self.dominating_guard_block_ids:
+            raise ValueError("context-edge dominating guard blocks must be sorted and unique")
+        if self.resolution is BinaryCodeContextEdgeResolution.DIRECT:
+            if self.selector is not None or self.dispatch_candidate_count != 1:
+                raise ValueError("direct context edge cannot carry virtual-dispatch metadata")
+        elif self.selector is None:
+            raise ValueError("virtual-selector context edge requires a selector")
+        return self
 
 
 class BinaryCodeContextResponse(DomainModel):
@@ -196,6 +221,35 @@ class BinaryCodeContextResponse(DomainModel):
             for edge in self.call_edges
         ):
             raise ValueError("context edge lacks an included address-backed callsite")
+        included_blocks = {
+            (function.function_id, block.block_id)
+            for function in self.functions
+            for block in function.blocks
+        }
+        if any(
+            (edge.caller_function_id, block_id) not in included_blocks
+            for edge in self.call_edges
+            for block_id in edge.dominating_guard_block_ids
+            if edge.caller_function_id in function_ids
+        ):
+            raise ValueError("context edge lacks an included dominating guard block")
+        instructions_by_key = {
+            (function.function_id, instruction.address): instruction
+            for function in self.functions
+            for block in function.blocks
+            for instruction in block.instructions
+            if instruction.operation is IROperation.CALL
+        }
+        if any(
+            edge.resolution is BinaryCodeContextEdgeResolution.VIRTUAL_SELECTOR
+            and "CALLIND"
+            not in instructions_by_key[
+                (edge.caller_function_id, edge.callsite_address)
+            ].text.upper()
+            for edge in self.call_edges
+            if (edge.caller_function_id, edge.callsite_address) in instructions_by_key
+        ):
+            raise ValueError("virtual-selector edge lacks an included indirect callsite")
         fact_order = tuple(
             sorted(
                 self.facts,
@@ -229,9 +283,11 @@ class DecompilerContinuationPacket(DomainModel):
     schema_version: Literal["decompiler-continuation-packet-v1"] = (
         "decompiler-continuation-packet-v1"
     )
-    prompt_version: Literal["decompiler-code-context-v2", "decompiler-code-context-v3"] = (
-        DECOMPILER_CONTEXT_PROMPT_VERSION
-    )
+    prompt_version: Literal[
+        "decompiler-code-context-v2",
+        "decompiler-code-context-v3",
+        "decompiler-code-context-v4",
+    ] = DECOMPILER_CONTEXT_PROMPT_VERSION
     work_id: str = Field(pattern=r"^work_[0-9a-f]{64}$")
     root_id: str = Field(pattern=r"^coderoot_[0-9a-f]{20}$")
     admission_rank: int = Field(ge=1, le=100000)
@@ -378,6 +434,10 @@ class _RawEdge:
     caller: IRFunction
     callee: IRFunction
     instruction: IRInstruction
+    resolution: BinaryCodeContextEdgeResolution = BinaryCodeContextEdgeResolution.DIRECT
+    selector: str | None = None
+    dispatch_candidate_count: int = 1
+    dominating_guard_block_ids: tuple[str, ...] = ()
 
 
 @dataclass
@@ -624,6 +684,10 @@ def resolve_binary_code_context(
                     callsite_address=item.instruction.address,
                     arguments=item.instruction.operands,
                     return_result=item.instruction.result,
+                    resolution=item.resolution,
+                    selector=item.selector,
+                    dispatch_candidate_count=item.dispatch_candidate_count,
+                    dominating_guard_block_ids=item.dominating_guard_block_ids,
                 )
                 for item in selected_edges
                 if item.caller.function_id not in response_function_ids
@@ -643,7 +707,11 @@ def resolve_binary_code_context(
         facts,
         omissions,
         maximum=maximum,
-        protected_instruction_keys=_protected_request_instruction_keys(request, selected),
+        protected_instruction_keys=_protected_request_instruction_keys(
+            request,
+            selected,
+            selected_edges,
+        ),
     )
     if not slices or not facts:
         return _empty_response(
@@ -660,6 +728,7 @@ def resolve_binary_code_context(
         slices,
         selected,
         prior_entries,
+        response_edges,
     ):
         return _empty_response(
             packet,
@@ -971,17 +1040,36 @@ def _select_context(
                 item for item in matches if item.caller.function_id == request.related_function_id
             )
         if not matches:
+            callers = tuple(functions.values())
+            if request.related_function_id:
+                callers = tuple(
+                    item for item in callers if item.function_id == request.related_function_id
+                )
+            matches = _recover_virtual_callers(function, callers, tuple(functions.values()))
+        if not matches:
             return (), (), {}, "no matching direct caller was recovered in frozen IR"
         selected_edges = matches[:8]
         selected = _unique_functions(tuple(item.caller for item in selected_edges))
         for item in selected_edges:
             focus[item.caller.function_id].add(item.instruction.address)
+            focus[item.caller.function_id].update(
+                _guard_addresses_for_blocks(
+                    item.caller,
+                    item.dominating_guard_block_ids,
+                )
+            )
     elif request.kind is BinaryCodeContextRequestKind.DIRECT_CALLEE:
         matches = tuple(item for item in edges if item.caller.function_id == function.function_id)
         if request.related_function_id:
             matches = tuple(
                 item for item in matches if item.callee.function_id == request.related_function_id
             )
+            if not matches:
+                related = functions[request.related_function_id]
+                virtual = _recover_virtual_callers(related, (function,), tuple(functions.values()))
+                matches = tuple(
+                    item for item in virtual if item.caller.function_id == function.function_id
+                )
         if not matches:
             return (), (), {}, "no matching direct callee was recovered in frozen IR"
         selected_edges = matches[:8]
@@ -1638,6 +1726,7 @@ def _request_evidence_retained(
     slices: tuple[BinaryCodeContextFunctionSlice, ...],
     selected_functions: tuple[IRFunction, ...],
     prior_entries: Sequence[DecompilerContextChainEntry] = (),
+    edges: tuple[BinaryCodeContextEdge, ...] = (),
 ) -> bool:
     instructions = tuple(
         instruction
@@ -1758,12 +1847,31 @@ def _request_evidence_retained(
         and request.block_id not in packet.known_block_ids
     ):
         return False
+    if request.kind is BinaryCodeContextRequestKind.DIRECT_CALLER and not any(
+        item.callee_function_id == request.function_id
+        and (
+            request.related_function_id is None
+            or item.caller_function_id == request.related_function_id
+        )
+        for item in edges
+    ):
+        return False
+    if request.kind is BinaryCodeContextRequestKind.DIRECT_CALLEE and not any(
+        item.caller_function_id == request.function_id
+        and (
+            request.related_function_id is None
+            or item.callee_function_id == request.related_function_id
+        )
+        for item in edges
+    ):
+        return False
     return True
 
 
 def _protected_request_instruction_keys(
     request: BinaryCodeContextRequest,
     functions: tuple[IRFunction, ...],
+    edges: tuple[_RawEdge, ...] = (),
 ) -> set[tuple[str, int, int]]:
     protected: set[tuple[str, int, int]] = set()
     requested_variables = {
@@ -1849,7 +1957,50 @@ def _protected_request_instruction_keys(
                 (function_id, instruction.address, instruction.index)
                 for function_id, instruction in matches[:2]
             )
+    for edge in edges:
+        protected.add(
+            (
+                edge.caller.function_id,
+                edge.instruction.address,
+                edge.instruction.index,
+            )
+        )
+        protected.update(
+            (edge.caller.function_id, instruction.address, instruction.index)
+            for block in edge.caller.blocks
+            if block.block_id in edge.dominating_guard_block_ids
+            for instruction in block.instructions
+            if instruction.operation in {IROperation.COMPARE, IROperation.BRANCH}
+        )
+        if edge.resolution is BinaryCodeContextEdgeResolution.VIRTUAL_SELECTOR:
+            protected.update(_virtual_dispatch_support_keys(edge))
     return protected
+
+
+def _virtual_dispatch_support_keys(edge: _RawEdge) -> set[tuple[str, int, int]]:
+    block = next(
+        (
+            item
+            for item in edge.caller.blocks
+            if any(
+                instruction.address == edge.instruction.address
+                and instruction.index == edge.instruction.index
+                for instruction in item.instructions
+            )
+        ),
+        None,
+    )
+    if block is None:
+        return set()
+    preceding = sorted(
+        {item.address for item in block.instructions if item.address < edge.instruction.address}
+    )
+    support_address = preceding[-1] if preceding else edge.instruction.address
+    return {
+        (edge.caller.function_id, item.address, item.index)
+        for item in block.instructions
+        if item.address == support_address
+    }
 
 
 def _request_anchor_addresses(
@@ -1960,7 +2111,17 @@ def _recover_edges(ir: NormalizedBinaryIR) -> tuple[_RawEdge, ...]:
                     continue
                 callee = _resolve_callee(instruction.callee, by_name, by_address)
                 if callee is not None:
-                    edges.append(_RawEdge(caller, callee, instruction))
+                    edges.append(
+                        _RawEdge(
+                            caller,
+                            callee,
+                            instruction,
+                            dominating_guard_block_ids=_dominating_guard_block_ids(
+                                caller,
+                                instruction.address,
+                            ),
+                        )
+                    )
     return tuple(
         sorted(
             edges,
@@ -1971,6 +2132,191 @@ def _recover_edges(ir: NormalizedBinaryIR) -> tuple[_RawEdge, ...]:
             ),
         )
     )
+
+
+def _recover_virtual_callers(
+    callee: IRFunction,
+    callers: tuple[IRFunction, ...],
+    functions: tuple[IRFunction, ...],
+) -> tuple[_RawEdge, ...]:
+    """Recover a bounded selector-compatible dispatch edge from frozen IR.
+
+    Ghidra represents C++ virtual calls as ``CALLIND`` with a register-shaped
+    target such as ``0x4040``.  This fallback is intentionally narrower than a
+    speculative callgraph: the requested target must have an address-backed
+    class-qualified method declaration, the caller must name the selector, and
+    the indirect call must have the target method's receiver-plus-argument arity.
+    """
+
+    selector = callee.name
+    if not _is_declared_selector_method(callee, selector) or not callee.parameters:
+        return ()
+    candidate_count = sum(
+        1
+        for item in functions
+        if item.name == selector
+        and len(item.parameters) == len(callee.parameters)
+        and _is_declared_selector_method(item, selector)
+    )
+    if candidate_count == 0:
+        return ()
+    expected_arguments = len(callee.parameters) + 1
+    edges: list[_RawEdge] = []
+    for caller in callers:
+        if caller.function_id == callee.function_id or not _caller_names_selector(
+            caller,
+            selector,
+        ):
+            continue
+        for block in caller.blocks:
+            for instruction in block.instructions:
+                if not _is_indirect_call(instruction):
+                    continue
+                if len(instruction.operands) != expected_arguments:
+                    continue
+                if instruction.operands[0] not in caller.parameters:
+                    continue
+                edges.append(
+                    _RawEdge(
+                        caller=caller,
+                        callee=callee,
+                        instruction=instruction,
+                        resolution=BinaryCodeContextEdgeResolution.VIRTUAL_SELECTOR,
+                        selector=selector,
+                        dispatch_candidate_count=candidate_count,
+                        dominating_guard_block_ids=_dominating_guard_block_ids(
+                            caller,
+                            instruction.address,
+                        ),
+                    )
+                )
+    return tuple(
+        sorted(
+            edges,
+            key=lambda item: (
+                item.instruction.address,
+                item.caller.function_id,
+                item.callee.function_id,
+            ),
+        )[:8]
+    )
+
+
+def _is_declared_selector_method(function: IRFunction, selector: str) -> bool:
+    escaped = re.escape(selector)
+    return (
+        re.search(
+            rf"\b[A-Za-z_][A-Za-z0-9_]*::{escaped}\s*\(",
+            function.pseudocode[:1200],
+        )
+        is not None
+    )
+
+
+def _caller_names_selector(function: IRFunction, selector: str) -> bool:
+    if re.search(rf"(?<![A-Za-z0-9_]){re.escape(selector)}(?![A-Za-z0-9_])", function.pseudocode):
+        return True
+    caller_family = _selector_family(function.name)
+    selector_family = _selector_family(selector)
+    return bool(caller_family and caller_family == selector_family)
+
+
+def _selector_family(value: str) -> str:
+    normalized = re.sub(r"[^a-z0-9]", "", value.lower())
+    for prefix in ("call", "invoke", "dispatch"):
+        if normalized.startswith(prefix):
+            normalized = normalized[len(prefix) :]
+            break
+    if normalized.endswith("imp"):
+        normalized = normalized[:-3]
+    return normalized
+
+
+def _is_indirect_call(instruction: IRInstruction) -> bool:
+    return (
+        instruction.operation is IROperation.CALL
+        and instruction.callee is not None
+        and "CALLIND" in instruction.text.upper()
+        and instruction.callee.lower().startswith("0x")
+    )
+
+
+def _dominating_guard_block_ids(function: IRFunction, address: int) -> tuple[str, ...]:
+    target = next(
+        (
+            block
+            for block in function.blocks
+            if any(instruction.address == address for instruction in block.instructions)
+        ),
+        None,
+    )
+    if target is None:
+        return ()
+    by_id = {item.block_id: item for item in function.blocks}
+    entry = function.blocks[0].block_id
+    reachable = {entry}
+    pending = [entry]
+    while pending:
+        current = pending.pop()
+        for successor in by_id[current].successors:
+            if successor not in reachable:
+                reachable.add(successor)
+                pending.append(successor)
+    if target.block_id not in reachable:
+        return ()
+    predecessors: dict[str, set[str]] = {identifier: set() for identifier in reachable}
+    for block in function.blocks:
+        if block.block_id not in reachable:
+            continue
+        for successor in block.successors:
+            if successor in reachable:
+                predecessors[successor].add(block.block_id)
+    dominators = {
+        identifier: ({entry} if identifier == entry else set(reachable)) for identifier in reachable
+    }
+    changed = True
+    while changed:
+        changed = False
+        for identifier in sorted(reachable - {entry}):
+            incoming = predecessors[identifier]
+            shared = (
+                set.intersection(*(dominators[item] for item in incoming)) if incoming else set()
+            )
+            updated = {identifier, *shared}
+            if updated != dominators[identifier]:
+                dominators[identifier] = updated
+                changed = True
+    guards = [
+        identifier
+        for identifier in dominators[target.block_id] - {target.block_id}
+        if any(
+            instruction.operation in {IROperation.COMPARE, IROperation.BRANCH}
+            for instruction in by_id[identifier].instructions
+        )
+    ]
+    nearest = sorted(
+        guards,
+        key=lambda identifier: (
+            -len(dominators[identifier]),
+            -by_id[identifier].start_address,
+            identifier,
+        ),
+    )[:8]
+    return tuple(sorted(nearest))
+
+
+def _guard_addresses_for_blocks(
+    function: IRFunction,
+    block_ids: tuple[str, ...],
+) -> set[int]:
+    selected = set(block_ids)
+    return {
+        instruction.address
+        for block in function.blocks
+        if block.block_id in selected
+        for instruction in block.instructions
+        if instruction.operation in {IROperation.COMPARE, IROperation.BRANCH}
+    }
 
 
 def _resolve_callee(
