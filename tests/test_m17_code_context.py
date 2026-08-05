@@ -520,6 +520,7 @@ class _FakeClient:
     def __init__(self, responses: list[str]):
         self.responses = responses
         self.calls = 0
+        self.last_user_texts: list[str] = []
 
     async def chat(
         self,
@@ -532,6 +533,7 @@ class _FakeClient:
         cache_last_user: bool = False,
     ) -> LLMResponse:
         self.calls += 1
+        self.last_user_texts.append(messages[-1]["content"][0]["text"])
         value = self.responses.pop(0)
         return LLMResponse(
             text=value,
@@ -925,6 +927,44 @@ async def test_continuation_canonicalizes_unordered_evidence_ids(tmp_path) -> No
     assert result.terminal_assessment.disposition is DecompilerHunterDisposition.CODE_HYPOTHESIS
     assert result.model_calls == 2
     assert client.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_continuation_repair_includes_exact_request_shape_error(tmp_path) -> None:
+    ir, packet, _, worker, sink = _fixture(tmp_path)
+    request = _request(
+        packet,
+        BinaryCodeContextRequestKind.DIRECT_CALLEE,
+        function_id=worker.function_id,
+        related=sink.function_id,
+    )
+    response = resolve_binary_code_context(ir=ir, packet=packet, request=request)
+    invalid = _needs_next(packet, response, request)
+    invalid["context_requests"][0]["supporting_addresses"] = [
+        response.functions[0].start_address
+    ]
+    client = _FakeClient(
+        [json.dumps(invalid), json.dumps(_hypothesis(packet, response, sink))]
+    )
+
+    result = await continue_decompiler_hunter_session(
+        store_root=tmp_path,
+        ir=ir,
+        packet=packet,
+        initial_assessment=_needs(packet, request),
+        initial_usage=_initial_usage(packet),
+        client=client,
+    )
+
+    assert result.terminal_status is DecompilerContextTerminalStatus.COMPLETED
+    assert result.terminal_assessment.disposition is DecompilerHunterDisposition.CODE_HYPOTHESIS
+    assert result.model_calls == 3
+    assert client.calls == 2
+    assert "Validation error:" in client.last_user_texts[1]
+    assert (
+        "supporting proof anchors require a definition/use request"
+        in client.last_user_texts[1]
+    )
 
 
 @pytest.mark.asyncio

@@ -45,8 +45,8 @@ from .ir import (
     NormalizedBinaryIR,
 )
 
-DECOMPILER_CONTEXT_PROMPT_VERSION: Literal["decompiler-code-context-v7"] = (
-    "decompiler-code-context-v7"
+DECOMPILER_CONTEXT_PROMPT_VERSION: Literal["decompiler-code-context-v8"] = (
+    "decompiler-code-context-v8"
 )
 _MAX_RAW_RESPONSE_BYTES = 128 * 1024
 _MAX_PACKET_BYTES = 768 * 1024
@@ -352,6 +352,7 @@ class DecompilerContinuationPacket(DomainModel):
         "decompiler-code-context-v5",
         "decompiler-code-context-v6",
         "decompiler-code-context-v7",
+        "decompiler-code-context-v8",
     ] = DECOMPILER_CONTEXT_PROMPT_VERSION
     work_id: str = Field(pattern=r"^work_[0-9a-f]{64}$")
     root_id: str = Field(pattern=r"^coderoot_[0-9a-f]{20}$")
@@ -648,6 +649,7 @@ class DecompilerContinuationAgent:
                 validation_errors.append(str(exc)[:1000])
             if parsed is None:
                 validation_errors.append("response did not contain a JSON object")
+            validation_error = validation_errors[-1]
             messages.extend(
                 (
                     {"role": "assistant", "content": response.content_blocks},
@@ -656,7 +658,9 @@ class DecompilerContinuationAgent:
                         "content": [
                             {
                                 "text": (
-                                    "Return only schema-valid JSON for the same work_id/root/capsule/rank. "
+                                    "Validation error: "
+                                    + validation_error
+                                    + "\nReturn only schema-valid JSON for the same work_id/root/capsule/rank. "
                                     "Cite only facts, functions, blocks, variables, and addresses in the "
                                     "continuation packet. Sort evidence-ID, supporting-address, and "
                                     "supporting-variable, and supporting-field-offset arrays and remove "
