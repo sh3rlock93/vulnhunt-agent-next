@@ -979,6 +979,64 @@ the concrete write boundary, but it does not claim a vulnerability. The next
 milestone must recover the final PHI definition and then follow only the exact
 write helper required to decide the inequality.
 
+### M17-16 — One-shot final PHI proof closure
+
+#### Trigger
+
+The M17-15 terminal request identifies one exact reader function, one length
+PHI, five variables, and eight addresses. Resolving it offline against the same
+frozen IR and five immutable chain entries produces a deterministic 41,426-byte
+response. That response recovers the PHI at `0x18d76fb44` and fits under the
+existing 288 KiB total evidence ceiling by 411 bytes. The broker can answer the
+question without changing ranking, token limits, or evidence budgets, but the
+five-entry schema prevents the Hunter from judging it.
+
+#### Implementation scope
+
+- Permit one explicitly configured root to receive a sixth same-session
+  continuation. Retain the default of three and the existing single extended
+  root lease; all remaining roots still fall back to two continuations and 192
+  KiB.
+- Extend only continuation packet, chain-entry, run-result, and policy
+  cardinalities from five to six. Reject a seventh continuation.
+- Keep the per-response ceiling at 96 KiB and total evidence ceiling at 288
+  KiB. Do not change frontier selection, ranking, prompt content, model retry
+  count, evidence validation, or reportability thresholds.
+- Reuse the existing frozen IR and immutable five-entry chain. Do not invoke an
+  image, generated input, dynamic experiment, fuzzer, VM, or decompiler.
+
+#### Exit criteria
+
+A synthetic root must complete a six-response proof in one Hunter session with
+six digest-linked entries and seven total model calls including the initial
+assessment. A seventh continuation must fail schema validation, while existing
+three-, four-, and five-response behavior remains unchanged. The real sixth
+response must retain the deterministic
+`sha256:6332affc62f8c54982a424813026d678515b871f2667b6a08ff741ebf32fd0c3`
+digest, total no more than 288 KiB, and present the final length PHI to one
+Hunter judgment. Full, type, lint, M14/M16/M17, and unchanged M15 blind gates
+must pass before that judgment is accepted.
+
+#### Current-ImageIO observation
+
+The sixth response retained the expected
+`sha256:6332affc62f8c54982a424813026d678515b871f2667b6a08ff741ebf32fd0c3`
+digest and 41,426-byte size. The complete chain used one Hunter session, seven
+model calls, 902,477 input tokens, 16,362 output tokens, and 294,501 evidence
+bytes, leaving 411 bytes below the unchanged 288 KiB ceiling. It recovered
+`lVar3-param_2`, the two PHI inputs, their selection, and the positive-length
+dispatch guard. No image, generated input, dynamic experiment, fuzzer, VM, or
+decompiler was invoked.
+
+The Hunter correctly remained `needs_code_context` and made no vulnerability
+claim. All three destination-transfer call instructions carry exact
+`callee_address` tags, but their target functions were omitted from the frozen
+1,200-function census by the evidence-neighborhood cap. The failure has moved
+from proof depth to export coverage: adding further continuations against this
+IR cannot expose bodies that are absent. The next milestone must preserve a
+small direct-callee closure for mandatory range-reader boundaries and rerun the
+static export before any additional Hunter judgment.
+
 ## Per-PR validation and merge procedure
 
 For each M17 PR:

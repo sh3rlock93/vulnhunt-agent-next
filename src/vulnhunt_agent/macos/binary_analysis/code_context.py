@@ -130,7 +130,7 @@ class DecompilerContextTerminalStatus(StrEnum):
 
 class BinaryCodeContextPolicy(DomainModel):
     maximum_roots_per_run: int = Field(default=6, ge=1, le=6)
-    maximum_continuations_per_root: int = Field(default=3, ge=1, le=5)
+    maximum_continuations_per_root: int = Field(default=3, ge=1, le=6)
     maximum_total_evidence_bytes: int = Field(
         default=288 * 1024,
         ge=16 * 1024,
@@ -358,11 +358,11 @@ class DecompilerContinuationPacket(DomainModel):
     admission_rank: int = Field(ge=1, le=100000)
     capsule_sha256: str = Field(pattern=SHA256_PATTERN)
     ir_sha256: str = Field(pattern=SHA256_PATTERN)
-    continuation_ordinal: int = Field(ge=1, le=5)
+    continuation_ordinal: int = Field(ge=1, le=6)
     previous_chain_sha256: str = Field(pattern=SHA256_PATTERN)
     base_packet: DecompilerHunterPacket
     prior_assessment: DecompilerHunterAssessment
-    context_responses: tuple[BinaryCodeContextResponse, ...] = Field(min_length=1, max_length=5)
+    context_responses: tuple[BinaryCodeContextResponse, ...] = Field(min_length=1, max_length=6)
     total_evidence_bytes: int = Field(ge=1, le=288 * 1024)
     packet_sha256: str = Field(pattern=SHA256_PATTERN)
 
@@ -409,7 +409,7 @@ class DecompilerContextChainEntry(DomainModel):
     )
     work_id: str = Field(pattern=r"^work_[0-9a-f]{64}$")
     root_id: str = Field(pattern=r"^coderoot_[0-9a-f]{20}$")
-    ordinal: int = Field(ge=1, le=5)
+    ordinal: int = Field(ge=1, le=6)
     previous_chain_sha256: str = Field(pattern=SHA256_PATTERN)
     request_sha256: str = Field(pattern=SHA256_PATTERN)
     response: BinaryCodeContextResponse
@@ -444,7 +444,7 @@ class DecompilerContextRunResult(DomainModel):
     initial_assessment_sha256: str = Field(pattern=SHA256_PATTERN)
     terminal_status: DecompilerContextTerminalStatus
     terminal_assessment: DecompilerHunterAssessment
-    entries: tuple[DecompilerContextChainEntry, ...] = Field(max_length=5)
+    entries: tuple[DecompilerContextChainEntry, ...] = Field(max_length=6)
     total_evidence_bytes: int = Field(ge=1, le=288 * 1024)
     sessions: Literal[1] = 1
     model_calls: int = Field(ge=0)
@@ -980,7 +980,7 @@ async def continue_decompiler_hunter_session(
     client: DecompilerContinuationModelClient,
     policy: BinaryCodeContextPolicy | None = None,
 ) -> DecompilerContextRunResult:
-    """Continue one persisted Hunter root at most five times and resume by chain digest."""
+    """Continue one persisted Hunter root at most six times and resume by chain digest."""
 
     active = policy or BinaryCodeContextPolicy()
     _validate_frozen_bindings(ir, packet)
