@@ -16,6 +16,7 @@ from vulnhunt_agent.domain.schemas import (
 )
 from vulnhunt_agent.macos.binary_analysis import (
     BinaryCodeContextPolicy,
+    BinaryCodeContextEdgeResolution,
     BinaryCodeContextRejection,
     BinaryCodeContextRequest,
     BinaryCodeContextRequestKind,
@@ -234,6 +235,92 @@ def _fixture(tmp_path, *, extra_functions: list[dict[str, Any]] | None = None):
     return ir, packet, caller_function, worker_function, sink_function
 
 
+def _virtual_dispatch_functions(*, selector_hint: bool = True) -> list[dict[str, Any]]:
+    caller_address = 0x100004000
+    target_address = 0x100005000
+    sibling_address = 0x100006000
+    indirect = _instruction(
+        caller_address + 0x24,
+        "call",
+        result="status",
+        inputs=["this", "arg1", "arg2", "arg3", "arg4", "arg5"],
+        target="0x4040",
+    )
+    indirect["text"] = "CALLIND (register, 0x4040, 8)"
+    caller = {
+        "entry": hex(caller_address),
+        "size": 0x80,
+        "name": "callDecodeImage" if selector_hint else "routePlugin",
+        "parameters": ["this", "arg1", "arg2", "arg3", "arg4", "arg5"],
+        "pseudocode": (
+            "decodeImageImp dispatch with a checked mode"
+            if selector_hint
+            else "generic plugin dispatch"
+        ),
+        "blocks": [
+            {
+                "name": "entry",
+                "start": hex(caller_address),
+                "size": 0x20,
+                "successors": ["dispatch", "reject"],
+                "instructions": [
+                    _instruction(
+                        caller_address,
+                        "cmp",
+                        result="allowed",
+                        inputs=["mode", "const_1"],
+                        constants=[1],
+                    ),
+                    _instruction(caller_address + 4, "branch", inputs=["allowed"]),
+                ],
+            },
+            {
+                "name": "dispatch",
+                "start": hex(caller_address + 0x20),
+                "size": 0x20,
+                "successors": [],
+                "instructions": [
+                    _instruction(
+                        caller_address + 0x20,
+                        "add",
+                        result="slot",
+                        inputs=["vtable", "const_d8"],
+                        constants=[0xD8],
+                    ),
+                    indirect,
+                    _instruction(caller_address + 0x28, "return", inputs=["status"]),
+                ],
+            },
+            {
+                "name": "reject",
+                "start": hex(caller_address + 0x40),
+                "size": 0x20,
+                "successors": [],
+                "instructions": [_instruction(caller_address + 0x40, "return")],
+            },
+        ],
+    }
+    target = _function(
+        target_address,
+        "decodeImageImp",
+        [_instruction(target_address, "store", inputs=["destination", "bytes"])],
+    )
+    target["parameters"] = ["arg1", "arg2", "arg3", "arg4", "arg5"]
+    target["pseudocode"] = (
+        "/* virtual OSStatus KTXReadPlugin::decodeImageImp(arg1, arg2, arg3, arg4, arg5) */"
+    )
+    sibling = _function(
+        sibling_address,
+        "decodeImageImp",
+        [_instruction(sibling_address, "return")],
+    )
+    sibling["parameters"] = ["arg1", "arg2", "arg3", "arg4", "arg5"]
+    sibling["pseudocode"] = (
+        "/* virtual OSStatus PNGReadPlugin::decodeImageImp(arg1, arg2, arg3, arg4, arg5) */"
+    )
+    return [caller, target, sibling]
+
+
 def _needs(packet, request: BinaryCodeContextRequest) -> DecompilerHunterAssessment:
     return DecompilerHunterAssessment(
         work_id=packet.work_id,
@@ -421,6 +508,85 @@ def _initial_usage(packet) -> BudgetUsage:
         input_tokens=100,
         output_tokens=20,
     )
+
+
+def test_virtual_selector_caller_recovers_dispatch_and_dominating_guard(tmp_path) -> None:
+    ir, packet, _, _, _ = _fixture(
+        tmp_path,
+        extra_functions=_virtual_dispatch_functions(),
+    )
+    target = next(item for item in ir.functions if item.start_address == 0x100005000)
+    caller = next(item for item in ir.functions if item.start_address == 0x100004000)
+    request = _request(
+        packet,
+        BinaryCodeContextRequestKind.DIRECT_CALLER,
+        function_id=target.function_id,
+        related=caller.function_id,
+        maximum_bytes=32 * 1024,
+    )
+
+    response = resolve_binary_code_context(ir=ir, packet=packet, request=request)
+
+    assert response.status is BinaryCodeContextStatus.RESOLVED
+    assert tuple(item.function_id for item in response.functions) == (caller.function_id,)
+    assert len(response.call_edges) == 1
+    edge = response.call_edges[0]
+    assert edge.resolution is BinaryCodeContextEdgeResolution.VIRTUAL_SELECTOR
+    assert edge.selector == "decodeImageImp"
+    assert edge.dispatch_candidate_count == 2
+    assert edge.callsite_address == 0x100004024
+    assert edge.dominating_guard_block_ids
+    included_blocks = {
+        block.block_id for function in response.functions for block in function.blocks
+    }
+    assert set(edge.dominating_guard_block_ids).issubset(included_blocks)
+    assert any(
+        item.kind is BinaryEvidenceFactKind.GUARD and item.address == 0x100004000
+        for item in response.facts
+    )
+    assert any(
+        0xD8 in instruction.constants
+        for function in response.functions
+        for block in function.blocks
+        for instruction in block.instructions
+    )
+    assert response.evidence_bytes <= 32 * 1024
+
+
+def test_virtual_selector_caller_requires_a_frozen_selector_hint(tmp_path) -> None:
+    ir, packet, _, _, _ = _fixture(
+        tmp_path,
+        extra_functions=_virtual_dispatch_functions(selector_hint=False),
+    )
+    target = next(item for item in ir.functions if item.start_address == 0x100005000)
+    caller = next(item for item in ir.functions if item.start_address == 0x100004000)
+    request = _request(
+        packet,
+        BinaryCodeContextRequestKind.DIRECT_CALLER,
+        function_id=target.function_id,
+        related=caller.function_id,
+    )
+
+    response = resolve_binary_code_context(ir=ir, packet=packet, request=request)
+
+    assert response.status is BinaryCodeContextStatus.UNAVAILABLE
+    assert response.rejection is BinaryCodeContextRejection.PROOF_UNAVAILABLE
+
+
+def test_direct_caller_remains_an_exact_edge(tmp_path) -> None:
+    ir, packet, caller, worker, _ = _fixture(tmp_path)
+    request = _request(
+        packet,
+        BinaryCodeContextRequestKind.DIRECT_CALLER,
+        function_id=worker.function_id,
+        related=caller.function_id,
+    )
+
+    response = resolve_binary_code_context(ir=ir, packet=packet, request=request)
+
+    assert response.call_edges[0].resolution is BinaryCodeContextEdgeResolution.DIRECT
+    assert response.call_edges[0].selector is None
+    assert response.call_edges[0].dispatch_candidate_count == 1
 
 
 @pytest.mark.asyncio

@@ -26,8 +26,14 @@ from ...core.llm import LLMResponse
 from ...domain.schemas import BudgetUsage, DomainModel, SHA256_PATTERN
 from ...scheduling.budget import BudgetExceededError
 from ...scheduling.metrics import with_estimated_cost
-from .capsules import BinaryEvidenceCapsule, BinaryEvidenceFact, BinaryEvidenceFactKind
+from .capsules import (
+    BinaryEvidenceCapsule,
+    BinaryEvidenceFact,
+    BinaryEvidenceFactKind,
+    BinaryEvidenceFunction,
+)
 from .code_context import (
+    BinaryCodeContextFunctionSlice,
     BinaryCodeContextPolicy,
     BinaryCodeContextResponse,
     BinaryCodeContextStatus,
@@ -36,6 +42,7 @@ from .code_context import (
 )
 from .decompiler_hunter import (
     BinaryCodeContextRequest,
+    BinaryCodeContextRequestKind,
     DecompilerHunterAssessment,
     DecompilerHunterDisposition,
     DecompilerHunterHypothesis,
@@ -44,8 +51,8 @@ from .decompiler_hunter import (
 from .ir import NormalizedBinaryIR
 
 CODE_REVIEWER_QUEUE_SCOPE: Literal["decompiler-code-reviewer"] = "decompiler-code-reviewer"
-CODE_REVIEWER_PROMPT_VERSION: Literal["decompiler-code-reviewer-v2"] = (
-    "decompiler-code-reviewer-v2"
+CODE_REVIEWER_PROMPT_VERSION: Literal["decompiler-code-reviewer-v3"] = (
+    "decompiler-code-reviewer-v3"
 )
 _MAX_PACKET_BYTES = 1024 * 1024
 _MAX_RAW_RESPONSE_BYTES = 128 * 1024
@@ -65,6 +72,16 @@ only if every obligation is proven. Reject when cited code disproves the path
 or invariant. Use unknown when evidence is incomplete. You may request exactly
 one typed frozen-IR context slice; never request execution, an input, fuzzing,
 a VM, a file, a command, a network lookup, exploit material, or disclosure.
+Treat a virtual_selector edge as a compatible selector dispatch site, not a
+unique runtime target. The exact parser route still requires supplied
+format/type or owner evidence. A dominating_guard_block_ids entry is a
+CFG-derived dominance relation only for the address-backed guard facts in that
+included block; evaluate whether its predicate constrains the claimed values.
+The route_context_response is a deterministic baseline slice and does not
+consume your one optional request. On a definition_use_chain request, address,
+block, variable, and supporting-address selectors must belong to function_id;
+use supporting_field_offsets, not a foreign address, to select matching
+cross-method state provenance.
 For direct_caller, direct_callee, exact_function, and basic_block_neighborhood
 requests, leave every definition/use-only selector empty. In particular,
 supporting_addresses, supporting_variables, and supporting_field_offsets are
@@ -213,6 +230,7 @@ class BinaryCodeReviewerPacket(DomainModel):
     prompt_version: Literal[
         "decompiler-code-reviewer-v1",
         "decompiler-code-reviewer-v2",
+        "decompiler-code-reviewer-v3",
     ] = CODE_REVIEWER_PROMPT_VERSION
     queue_scope: Literal["decompiler-code-reviewer"] = CODE_REVIEWER_QUEUE_SCOPE
     reviewer_session_id: str = Field(pattern=r"^review_[0-9a-f]{64}$")
@@ -228,6 +246,7 @@ class BinaryCodeReviewerPacket(DomainModel):
     hunter_context_responses: tuple[BinaryCodeContextResponse, ...] = Field(
         default=(), max_length=2
     )
+    route_context_response: BinaryCodeContextResponse | None = None
     reviewer_context_response: BinaryCodeContextResponse | None = None
     allowed_evidence_ids: tuple[str, ...] = Field(min_length=1, max_length=20000)
     known_function_ids: tuple[str, ...] = Field(min_length=1, max_length=100000)
@@ -250,6 +269,18 @@ class BinaryCodeReviewerPacket(DomainModel):
             raise ValueError("Reviewer target snapshot differs from the capsule")
         if self.target.ir_sha256 != capsule.ir_sha256:
             raise ValueError("Reviewer target IR differs from the capsule")
+        route = self.route_context_response
+        if route is not None:
+            if (
+                route.status is not BinaryCodeContextStatus.RESOLVED
+                or route.work_id != self.work_id
+                or route.root_id != self.root_id
+                or route.capsule_sha256 != self.capsule_sha256
+                or route.ir_sha256 != self.target.ir_sha256
+                or route.request.kind is not BinaryCodeContextRequestKind.DIRECT_CALLER
+                or route.request.function_id != capsule.root_function_id
+            ):
+                raise ValueError("Reviewer route context is not a resolved root-caller slice")
         if self.hypothesis_sha256 != _digest(self.hypothesis.model_dump(mode="json")):
             raise ValueError("Reviewer hypothesis digest mismatch")
         facts, functions, addresses = _packet_evidence(self)
@@ -473,6 +504,38 @@ class BinaryCodeReviewerAgent:
         )
 
 
+def _resolve_reviewer_route_context(
+    *,
+    ir: NormalizedBinaryIR,
+    hunter_packet: DecompilerHunterPacket,
+    hypothesis: DecompilerHunterHypothesis,
+    context_entries: tuple[DecompilerContextChainEntry, ...],
+) -> BinaryCodeContextResponse | None:
+    if any(
+        edge.callee_function_id == hunter_packet.capsule.root_function_id
+        for entry in context_entries
+        for edge in entry.response.call_edges
+    ):
+        return None
+    request = BinaryCodeContextRequest(
+        request_id="codectx-reviewer-root-route",
+        kind=BinaryCodeContextRequestKind.DIRECT_CALLER,
+        rationale=(
+            "Recover one deterministic frozen caller/parser-dispatch slice for the admitted root."
+        ),
+        function_id=hunter_packet.capsule.root_function_id,
+        evidence_ids=(hypothesis.source_evidence_ids[0],),
+        maximum_bytes=32 * 1024,
+    )
+    response = resolve_binary_code_context(
+        ir=ir,
+        packet=hunter_packet,
+        request=request,
+        prior_entries=context_entries,
+    )
+    return response if response.status is BinaryCodeContextStatus.RESOLVED else None
+
+
 def build_binary_code_reviewer_packet(
     *,
     ir: NormalizedBinaryIR,
@@ -483,6 +546,7 @@ def build_binary_code_reviewer_packet(
     hypothesis_id: str | None = None,
     product_version: str,
     build_version: str,
+    route_context_response: BinaryCodeContextResponse | None = None,
     reviewer_context_response: BinaryCodeContextResponse | None = None,
 ) -> BinaryCodeReviewerPacket:
     """Build one immutable packet without carrying Hunter conversation history."""
@@ -509,6 +573,13 @@ def build_binary_code_reviewer_packet(
         raise ValueError("Reviewer context-chain digest differs from supplied entries")
     if any(item.status is not BinaryCodeContextStatus.RESOLVED for item in responses):
         raise ValueError("Reviewer packet cannot include unresolved Hunter context")
+    if route_context_response is None:
+        route_context_response = _resolve_reviewer_route_context(
+            ir=ir,
+            hunter_packet=hunter_packet,
+            hypothesis=hypothesis,
+            context_entries=context_entries,
+        )
     session_payload = {
         "role": CODE_REVIEWER_QUEUE_SCOPE,
         "work_id": hunter_packet.work_id,
@@ -541,6 +612,11 @@ def build_binary_code_reviewer_packet(
         "target": target.model_dump(mode="json"),
         "capsule": hunter_packet.capsule.model_dump(mode="json"),
         "hunter_context_responses": tuple(item.model_dump(mode="json") for item in responses),
+        "route_context_response": (
+            route_context_response.model_dump(mode="json")
+            if route_context_response is not None
+            else None
+        ),
         "reviewer_context_response": (
             reviewer_context_response.model_dump(mode="json")
             if reviewer_context_response is not None else None
@@ -556,6 +632,7 @@ def build_binary_code_reviewer_packet(
             "target": target,
             "capsule": hunter_packet.capsule,
             "hunter_context_responses": responses,
+            "route_context_response": route_context_response,
             "reviewer_context_response": reviewer_context_response,
         },
         allowed_evidence_ids=(),
@@ -621,6 +698,49 @@ def validate_binary_code_reviewer_verdict(
             raise ValueError("Reviewer context request cites unknown related function")
         if request.address is not None and request.address not in packet.known_addresses:
             raise ValueError("Reviewer context request cites unknown address")
+        if request.kind is BinaryCodeContextRequestKind.DEFINITION_USE_CHAIN:
+            target_slices = tuple(
+                item
+                for item in _packet_function_slices(packet)
+                if item.function_id == request.function_id
+            )
+            target_addresses = {
+                instruction.address
+                for function in target_slices
+                for block in function.blocks
+                for instruction in block.instructions
+            }
+            selected_addresses = {
+                address
+                for address in (request.address, *request.supporting_addresses)
+                if address is not None
+            }
+            if not selected_addresses.issubset(target_addresses):
+                raise ValueError(
+                    "definition/use request address selectors must belong to function_id"
+                )
+            target_blocks = {
+                block.block_id for function in target_slices for block in function.blocks
+            }
+            if request.block_id is not None and request.block_id not in target_blocks:
+                raise ValueError("definition/use request block must belong to function_id")
+            target_variables = {
+                value
+                for function in target_slices
+                for block in function.blocks
+                for instruction in block.instructions
+                for value in (instruction.result, *instruction.operands)
+                if value is not None
+            }
+            selected_variables = {
+                value
+                for value in (request.variable, *request.supporting_variables)
+                if value is not None
+            }
+            if not selected_variables.issubset(target_variables):
+                raise ValueError(
+                    "definition/use request variable selectors must belong to function_id"
+                )
 
 
 def decide_static_reportability(
@@ -803,6 +923,11 @@ async def run_binary_code_review(
             raise RuntimeError("persisted Reviewer result belongs to another evidence packet")
         return result
     _write_private_json(directory / "packet.json", packet.model_dump(mode="json"))
+    if packet.route_context_response is not None:
+        _write_private_json(
+            directory / "route-context-response.json",
+            packet.route_context_response.model_dump(mode="json"),
+        )
     agent = BinaryCodeReviewerAgent(client, active)
     raw: list[str] = []
     totals = _zero_totals()
@@ -836,6 +961,7 @@ async def run_binary_code_review(
                     hypothesis_id=packet.hypothesis.hypothesis_id,
                     product_version=product_version,
                     build_version=build_version,
+                    route_context_response=packet.route_context_response,
                     reviewer_context_response=reviewer_context,
                 )
                 verdict, next_raw, next_totals = await agent.analyze(continued)
@@ -976,29 +1102,42 @@ def _reportability_checks(
     return reasons
 
 
+def _packet_function_slices(
+    packet: BinaryCodeReviewerPacket,
+) -> tuple[BinaryEvidenceFunction | BinaryCodeContextFunctionSlice, ...]:
+    functions: list[BinaryEvidenceFunction | BinaryCodeContextFunctionSlice] = list(
+        packet.capsule.functions
+    )
+    for response in (
+        *packet.hunter_context_responses,
+        packet.route_context_response,
+        packet.reviewer_context_response,
+    ):
+        if response is not None:
+            functions.extend(response.functions)
+    return tuple(functions)
+
+
 def _packet_evidence(
     packet: BinaryCodeReviewerPacket,
 ) -> tuple[dict[str, BinaryEvidenceFact], set[str], set[int]]:
     capsule = packet.capsule
     facts = {item.fact_id: item for item in capsule.facts}
-    functions = {item.function_id for item in capsule.functions}
+    functions = {item.function_id for item in _packet_function_slices(packet)}
     addresses = {
         instruction.address
-        for function in capsule.functions
+        for function in _packet_function_slices(packet)
         for block in function.blocks
         for instruction in block.instructions
     }
-    for response in (*packet.hunter_context_responses, packet.reviewer_context_response):
+    for response in (
+        *packet.hunter_context_responses,
+        packet.route_context_response,
+        packet.reviewer_context_response,
+    ):
         if response is None:
             continue
         facts.update((item.fact_id, item) for item in response.facts)
-        for function in response.functions:
-            functions.add(function.function_id)
-            addresses.update(
-                instruction.address
-                for block in function.blocks
-                for instruction in block.instructions
-            )
     return facts, functions, addresses
 
 

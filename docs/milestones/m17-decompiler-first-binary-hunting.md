@@ -602,6 +602,73 @@ edge. The deterministic gate therefore returned `reviewer_inconclusive`, with
 is caller/parser-route recovery and dominance linkage, not field-provenance
 selection. This observation is not a vulnerability claim.
 
+### M17-10 — Virtual caller route and CFG-dominance recovery
+
+#### Trigger
+
+The M17-9 Reviewer asked for a direct caller of KTX `decodeImageImp`, but the
+normalized IR represents the relevant C++ virtual call as a register-targeted
+`CALLIND`. Exact function-name and address resolution therefore returned no
+edge even though the frozen IR retained `IIOReadPlugin::callDecodeImage`, its
+`0xd8` vtable-slot calculation, the indirect callsite, and the surrounding
+CFG. A later Reviewer request also mixed one `willDecode` address into a
+`decodeImageImp` definition/use request, so the broker rejected the entire
+slice instead of giving the model its existing schema-repair opportunity.
+
+#### Implementation scope
+
+- Recover a caller edge only when the requested target has a class-qualified
+  selector declaration, the frozen caller names the same selector, the call is
+  explicitly represented as `CALLIND`, and receiver-plus-argument arity
+  matches. Do not treat arbitrary indirect calls as resolved targets.
+- Mark recovered edges as `virtual_selector`, preserve the selector and total
+  compatible implementation count, and forbid the Hunter or Reviewer from
+  treating that edge alone as a unique runtime receiver binding.
+- Compute strict CFG dominators for the indirect call block and retain at most
+  eight address-backed guard blocks. Protect the call instruction and its
+  immediately preceding vtable-slot derivation from response compaction.
+- Preload one bounded root-caller route response into the independent Reviewer
+  packet without consuming the Reviewer's single optional context request.
+- Require every address, block, variable, and supporting-address selector on a
+  `definition_use_chain` Reviewer request to belong to `function_id`. Return
+  the exact ownership error through the existing one-repair model path;
+  cross-method state selection remains offset-based.
+- Keep all route and provenance evidence bound to the existing snapshot, IR,
+  capsule, work, root, and context-chain digests. Do not execute an image,
+  decompiler, fuzzer, VM, generated input, shell experiment, or network search.
+
+#### Exit criteria
+
+A deterministic replay over the frozen KTX root must resolve
+`callDecodeImage` at callsite `0x18d6f6968`, retain the `0xd8` slot derivation,
+label the edge as non-unique virtual dispatch, and include its CFG-derived
+dominating guard blocks within 32 KiB. A synthetic negative must reject an
+indirect caller that lacks a frozen selector hint, while ordinary direct calls
+must retain exact-edge semantics. The independent Reviewer must receive this
+route before its optional request, repair a foreign-address definition/use
+request, and finish with all dynamic counters at zero.
+
+#### Current-ImageIO observation
+
+The packet-bound route baseline resolved to 32,675 bytes. It retained
+`callDecodeImage`, the `0xd8` vtable-slot calculation, the indirect call at
+`0x18d6f6968`, five dominating guard blocks, and a visible candidate count of
+25 `decodeImageImp` implementations. The Reviewer then repaired its first
+cross-function address error and received a 65,157-byte provenance response
+covering `willDecode`, `prepareGeometry`, `createImageBlock`,
+`extractDecodeOptions`, and `initialize`.
+
+The final independent review used one subscription session, three model calls,
+517,326 input tokens, and 8,823 output tokens. It remained
+`reviewer_inconclusive`, with `reportable_static=0` and
+`apple_submission_ready=false`; every image, fuzzer, VM, generated-input, and
+dynamic-experiment counter stayed zero. The caller-recovery defect is closed,
+but the virtual edge intentionally does not prove which of 25 compatible
+implementations owns the runtime receiver. Exact KTX receiver/vtable binding,
+file-byte-to-geometry provenance, and the complete allocation-to-row-base
+invariant remain separate proof gaps. This observation is not a vulnerability
+claim.
+
 ## Per-PR validation and merge procedure
 
 For each M17 PR:
