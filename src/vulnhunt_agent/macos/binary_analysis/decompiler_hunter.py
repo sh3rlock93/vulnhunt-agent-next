@@ -155,12 +155,25 @@ class BinaryCodeContextRequest(DomainModel):
     block_id: str | None = Field(default=None, pattern=r"^bb_[0-9a-f]{16}$")
     address: int | None = Field(default=None, ge=0)
     variable: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_.:$@-]{1,160}$")
+    supporting_addresses: tuple[int, ...] = Field(default=(), max_length=8)
+    supporting_variables: tuple[str, ...] = Field(default=(), max_length=4)
     evidence_ids: tuple[str, ...] = Field(min_length=1, max_length=16)
     maximum_bytes: int = Field(default=32 * 1024, ge=1024, le=96 * 1024)
 
     @model_validator(mode="after")
     def validate_shape(self) -> "BinaryCodeContextRequest":
         _require_sorted_unique(self.evidence_ids, "context-request evidence IDs")
+        if tuple(sorted(set(self.supporting_addresses))) != self.supporting_addresses:
+            raise ValueError("supporting addresses must be sorted and unique")
+        if any(address < 0 for address in self.supporting_addresses):
+            raise ValueError("supporting addresses cannot be negative")
+        if tuple(sorted(set(self.supporting_variables))) != self.supporting_variables:
+            raise ValueError("supporting variables must be sorted and unique")
+        if any(
+            re.fullmatch(r"[A-Za-z0-9_.:$@-]{1,160}", variable) is None
+            for variable in self.supporting_variables
+        ):
+            raise ValueError("supporting variables must be normalized IR identifiers")
         if self.kind is BinaryCodeContextRequestKind.EXACT_FUNCTION:
             if self.function_id is None:
                 raise ValueError("exact-function request requires a function ID")
@@ -179,6 +192,10 @@ class BinaryCodeContextRequest(DomainModel):
         elif self.kind is BinaryCodeContextRequestKind.CALLSITE_RETURN_USE:
             if self.function_id is None or self.address is None:
                 raise ValueError("callsite return-use request requires function ID and address")
+        if self.kind is not BinaryCodeContextRequestKind.DEFINITION_USE_CHAIN and (
+            self.supporting_addresses or self.supporting_variables
+        ):
+            raise ValueError("supporting proof anchors require a definition/use request")
         return self
 
 
@@ -223,9 +240,7 @@ class DecompilerHunterHypothesis(DomainModel):
 
 
 class DecompilerHunterAssessment(DomainModel):
-    schema_version: Literal["decompiler-hunter-assessment-v1"] = (
-        "decompiler-hunter-assessment-v1"
-    )
+    schema_version: Literal["decompiler-hunter-assessment-v1"] = "decompiler-hunter-assessment-v1"
     work_id: str = Field(pattern=r"^work_[0-9a-f]{64}$")
     root_id: str = Field(pattern=r"^coderoot_[0-9a-f]{20}$")
     capsule_sha256: str = Field(pattern=SHA256_PATTERN)
@@ -271,9 +286,7 @@ class DecompilerHunterPolicy(DomainModel):
 
 class DecompilerHunterPacket(DomainModel):
     schema_version: Literal["decompiler-hunter-packet-v1"] = "decompiler-hunter-packet-v1"
-    prompt_version: Literal["decompiler-imageio-hunter-v1"] = (
-        DECOMPILER_HUNTER_PROMPT_VERSION
-    )
+    prompt_version: Literal["decompiler-imageio-hunter-v1"] = DECOMPILER_HUNTER_PROMPT_VERSION
     work_id: str = Field(pattern=r"^work_[0-9a-f]{64}$")
     root_id: str = Field(pattern=r"^coderoot_[0-9a-f]{20}$")
     admission_rank: int = Field(ge=1, le=100000)
@@ -305,17 +318,23 @@ class DecompilerHunterPacket(DomainModel):
             raise ValueError("Hunter scope and capsule snapshots differ")
         if self.known_function_ids != tuple(item.function_id for item in self.capsule.functions):
             raise ValueError("known function IDs differ from the capsule")
-        expected_blocks = tuple(sorted({
-            block.block_id for function in self.capsule.functions for block in function.blocks
-        }))
+        expected_blocks = tuple(
+            sorted(
+                {block.block_id for function in self.capsule.functions for block in function.blocks}
+            )
+        )
         if self.known_block_ids != expected_blocks:
             raise ValueError("known block IDs differ from the capsule")
-        expected_addresses = tuple(sorted({
-            instruction.address
-            for function in self.capsule.functions
-            for block in function.blocks
-            for instruction in block.instructions
-        }))
+        expected_addresses = tuple(
+            sorted(
+                {
+                    instruction.address
+                    for function in self.capsule.functions
+                    for block in function.blocks
+                    for instruction in block.instructions
+                }
+            )
+        )
         if self.known_addresses != expected_addresses:
             raise ValueError("known addresses differ from the capsule")
         expected_facts = tuple(sorted(item.fact_id for item in self.capsule.facts))
@@ -425,17 +444,21 @@ class DecompilerHunterAgent:
         packet: DecompilerHunterPacket,
     ) -> tuple[DecompilerHunterAssessment, BudgetUsage, tuple[str, ...]]:
         _validate_work_item_packet(work_item, packet)
-        messages: list[dict] = [{
-            "role": "user",
-            "content": [{
-                "text": (
-                    "# Decompiler evidence packet\n"
-                    + json.dumps(packet.model_dump(mode="json"), indent=2)
-                    + "\n\n# Required response JSON Schema\n"
-                    + json.dumps(DecompilerHunterAssessment.model_json_schema(), indent=2)
-                )
-            }],
-        }]
+        messages: list[dict] = [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "text": (
+                            "# Decompiler evidence packet\n"
+                            + json.dumps(packet.model_dump(mode="json"), indent=2)
+                            + "\n\n# Required response JSON Schema\n"
+                            + json.dumps(DecompilerHunterAssessment.model_json_schema(), indent=2)
+                        )
+                    }
+                ],
+            }
+        ]
         totals = {
             "input_tokens": 0,
             "output_tokens": 0,
@@ -475,22 +498,26 @@ class DecompilerHunterAgent:
                     )
             except ValueError:
                 pass
-            messages.extend((
-                {"role": "assistant", "content": response.content_blocks},
-                {
-                    "role": "user",
-                    "content": [{
-                        "text": (
-                            "Return only schema-valid JSON. Preserve work_id, root_id, "
-                            "capsule_sha256, and admission_rank. Cite only packet fact IDs, "
-                            "functions, blocks, and addresses. Sort every evidence-ID array "
-                            "lexicographically and remove duplicates; preserve call-path and "
-                            "CFG-path execution order. Do not request execution, fuzzing, a VM, "
-                            "files, URLs, commands, generated inputs, or exploits."
-                        )
-                    }],
-                },
-            ))
+            messages.extend(
+                (
+                    {"role": "assistant", "content": response.content_blocks},
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "text": (
+                                    "Return only schema-valid JSON. Preserve work_id, root_id, "
+                                    "capsule_sha256, and admission_rank. Cite only packet fact IDs, "
+                                    "functions, blocks, and addresses. Sort every evidence-ID array "
+                                    "lexicographically and remove duplicates; preserve call-path and "
+                                    "CFG-path execution order. Do not request execution, fuzzing, a VM, "
+                                    "files, URLs, commands, generated inputs, or exploits."
+                                )
+                            }
+                        ],
+                    },
+                )
+            )
         raise DecompilerHunterDeferred(
             "invalid_model_response",
             raw_responses=raw_responses,
@@ -522,8 +549,10 @@ def build_decompiler_hunter_plan(
     if not provider_preflight.ready or provider_preflight.billable_model_calls:
         raise ValueError("planning requires a ready, non-billable provider preflight")
     store = _private_store_root(store_root)
-    packet_root = store / "decompiler-hunter-context" / (
-        capsule_set.capsule_set_sha256.removeprefix("sha256:")[:24]
+    packet_root = (
+        store
+        / "decompiler-hunter-context"
+        / (capsule_set.capsule_set_sha256.removeprefix("sha256:")[:24])
     )
     frozen_function_ids = tuple(sorted(item.function_id for item in ir.functions))
     work_items: list[HunterWorkItem] = []
@@ -547,30 +576,36 @@ def build_decompiler_hunter_plan(
         )
         _write_private_json(store / relative, packet.model_dump(mode="json"))
         fact_kinds = {item.kind for item in capsule.facts}
-        risk = 4 if {
-            BinaryEvidenceFactKind.INPUT_SOURCE,
-            BinaryEvidenceFactKind.SECURITY_SINK,
-        }.issubset(fact_kinds) else 2
-        work_items.append(HunterWorkItem(
-            work_id=work_id,
-            run_id=run_id,
-            source_snapshot=capsule_set.snapshot_sha256,
-            scan_scope_digest=capsule_set.capsule_set_sha256,
-            planning_policy=DECOMPILER_HUNTER_PLANNING_POLICY,
-            slice_ids=(capsule.root_id, capsule.capsule_sha256),
-            target_node_ids=(capsule.root_function_id,),
-            target_signal_ids=tuple(sorted(item.fact_id for item in capsule.facts))[:6],
-            seed_file=relative,
-            files=files,
-            hunter=DECOMPILER_HUNTER,
-            risk=risk,
-            required=risk >= 4,
-            routing_reasons=(
-                "static:decompiler-evidence-capsule",
-                f"admission_rank:{capsule.admission_rank}",
-                f"proof_status:{capsule.proof_status.value}",
-            ),
-        ))
+        risk = (
+            4
+            if {
+                BinaryEvidenceFactKind.INPUT_SOURCE,
+                BinaryEvidenceFactKind.SECURITY_SINK,
+            }.issubset(fact_kinds)
+            else 2
+        )
+        work_items.append(
+            HunterWorkItem(
+                work_id=work_id,
+                run_id=run_id,
+                source_snapshot=capsule_set.snapshot_sha256,
+                scan_scope_digest=capsule_set.capsule_set_sha256,
+                planning_policy=DECOMPILER_HUNTER_PLANNING_POLICY,
+                slice_ids=(capsule.root_id, capsule.capsule_sha256),
+                target_node_ids=(capsule.root_function_id,),
+                target_signal_ids=tuple(sorted(item.fact_id for item in capsule.facts))[:6],
+                seed_file=relative,
+                files=files,
+                hunter=DECOMPILER_HUNTER,
+                risk=risk,
+                required=risk >= 4,
+                routing_reasons=(
+                    "static:decompiler-evidence-capsule",
+                    f"admission_rank:{capsule.admission_rank}",
+                    f"proof_status:{capsule.proof_status.value}",
+                ),
+            )
+        )
     routing = HunterRoutingPlan(
         policy_version=DECOMPILER_HUNTER_PLANNING_POLICY,
         mode="signal",
@@ -598,8 +633,9 @@ def build_decompiler_hunter_plan(
     }
     plan = DecompilerHunterPlan(**payload, plan_sha256=_digest(payload))
     _write_private_json(
-        store / "decompiler-hunter-plans" /
-        f"plan-{plan.plan_sha256.removeprefix('sha256:')[:24]}.json",
+        store
+        / "decompiler-hunter-plans"
+        / f"plan-{plan.plan_sha256.removeprefix('sha256:')[:24]}.json",
         plan.model_dump(mode="json"),
     )
     return plan
@@ -612,9 +648,7 @@ def load_decompiler_hunter_packet(
 ) -> DecompilerHunterPacket:
     store = _private_store_root(store_root)
     path = _contained_file(store, work_item.seed_file)
-    packet = DecompilerHunterPacket.model_validate_json(
-        _read_file(path, maximum=_MAX_PACKET_BYTES)
-    )
+    packet = DecompilerHunterPacket.model_validate_json(_read_file(path, maximum=_MAX_PACKET_BYTES))
     _validate_work_item_packet(work_item, packet)
     return packet
 
@@ -649,10 +683,12 @@ def validate_decompiler_hunter_assessment(
         raise ValueError("Decompiler Hunter cited evidence outside its packet")
     if assessment.disposition is DecompilerHunterDisposition.NOT_VULNERABLE:
         safe_kinds = {facts[item].kind for item in assessment.safe_path_evidence_ids}
-        if not safe_kinds.intersection({
-            BinaryEvidenceFactKind.GUARD,
-            BinaryEvidenceFactKind.RETURN_USE,
-        }):
+        if not safe_kinds.intersection(
+            {
+                BinaryEvidenceFactKind.GUARD,
+                BinaryEvidenceFactKind.RETURN_USE,
+            }
+        ):
             raise ValueError("not_vulnerable requires guard or failure/return-use evidence")
     _validate_safe_output(assessment)
 
@@ -708,7 +744,9 @@ async def execute_decompiler_hunter_plan(
     tasks = {item.work_id: item for item in queue.load().tasks}
     with SqliteRepository(database, read_only=True) as repository:
         prior_usage = repository.list_budget_usage(plan.run_id, scope="hunter")
-    controller = BudgetController(budget, prior_usage, soft_input_token_stop=budget.max_input_tokens)
+    controller = BudgetController(
+        budget, prior_usage, soft_input_token_stop=budget.max_input_tokens
+    )
     completed: set[str] = set()
     for item in items:
         if tasks[item.work_id].status == "done":
@@ -741,7 +779,9 @@ async def execute_decompiler_hunter_plan(
             )
             with SqliteRepository(database) as repository:
                 repository.save_budget_usage(result.usage)
-            queue.mark_hunt_done(task, item.hunter, findings_count=len(result.assessment.hypotheses))
+            queue.mark_hunt_done(
+                task, item.hunter, findings_count=len(result.assessment.hypotheses)
+            )
             queue.mark_file_done(task)
             queue.finish(lease, status="done")
             completed.add(item.work_id)
@@ -785,15 +825,19 @@ def _make_packet(
         "capsule": capsule.model_dump(mode="json"),
         "frozen_function_ids": frozen_function_ids,
         "known_function_ids": tuple(item.function_id for item in capsule.functions),
-        "known_block_ids": tuple(sorted({
-            block.block_id for function in capsule.functions for block in function.blocks
-        })),
-        "known_addresses": tuple(sorted({
-            instruction.address
-            for function in capsule.functions
-            for block in function.blocks
-            for instruction in block.instructions
-        })),
+        "known_block_ids": tuple(
+            sorted({block.block_id for function in capsule.functions for block in function.blocks})
+        ),
+        "known_addresses": tuple(
+            sorted(
+                {
+                    instruction.address
+                    for function in capsule.functions
+                    for block in function.blocks
+                    for instruction in block.instructions
+                }
+            )
+        ),
         "allowed_evidence_ids": tuple(sorted(item.fact_id for item in capsule.facts)),
         "allowed_context_kinds": tuple(item.value for item in BinaryCodeContextRequestKind),
         "image_execution_allowed": False,
@@ -814,24 +858,29 @@ def _validate_hypothesis(
 ) -> None:
     if packet.capsule.proof_status is not CapsuleProofStatus.PROOF_CAPABLE:
         raise ValueError("proof-incomplete capsule cannot support a terminal code hypothesis")
-    if any(identifier not in facts for identifier in (
-        hypothesis.source_evidence_ids
-        + hypothesis.path_evidence_ids
-        + hypothesis.guard_evidence_ids
-        + hypothesis.sink_evidence_ids
-        + hypothesis.contradicting_evidence_ids
-    )):
+    if any(
+        identifier not in facts
+        for identifier in (
+            hypothesis.source_evidence_ids
+            + hypothesis.path_evidence_ids
+            + hypothesis.guard_evidence_ids
+            + hypothesis.sink_evidence_ids
+            + hypothesis.contradicting_evidence_ids
+        )
+    ):
         raise ValueError("hypothesis cites evidence outside the packet")
     fact_map = {item.fact_id: item for item in packet.capsule.facts}
     if {fact_map[item].kind for item in hypothesis.source_evidence_ids} != {
         BinaryEvidenceFactKind.INPUT_SOURCE
     }:
         raise ValueError("hypothesis source citations must be input-source facts")
-    if not {fact_map[item].kind for item in hypothesis.path_evidence_ids}.intersection({
-        BinaryEvidenceFactKind.DATAFLOW,
-        BinaryEvidenceFactKind.CALLSITE,
-        BinaryEvidenceFactKind.RETURN_USE,
-    }):
+    if not {fact_map[item].kind for item in hypothesis.path_evidence_ids}.intersection(
+        {
+            BinaryEvidenceFactKind.DATAFLOW,
+            BinaryEvidenceFactKind.CALLSITE,
+            BinaryEvidenceFactKind.RETURN_USE,
+        }
+    ):
         raise ValueError("hypothesis requires an address-backed data or call path")
     if {fact_map[item].kind for item in hypothesis.sink_evidence_ids} != {
         BinaryEvidenceFactKind.SECURITY_SINK
@@ -850,8 +899,7 @@ def _validate_hypothesis(
     if not set(hypothesis.cfg_path_addresses).issubset(packet.known_addresses):
         raise ValueError("hypothesis cites an invented address")
     capsule_guard_ids = {
-        item.fact_id for item in packet.capsule.facts
-        if item.kind is BinaryEvidenceFactKind.GUARD
+        item.fact_id for item in packet.capsule.facts if item.kind is BinaryEvidenceFactKind.GUARD
     }
     if hypothesis.no_applicable_guard and capsule_guard_ids:
         raise ValueError("hypothesis ignored guard facts present in the capsule")
@@ -876,17 +924,20 @@ def _validate_context_request(
         raise ValueError("context request cites an unknown block")
     if request.address is not None and request.address not in packet.known_addresses:
         raise ValueError("context request cites an unknown address")
-    if request.variable is not None:
-        variables = {
-            value
-            for function in packet.capsule.functions
-            for block in function.blocks
-            for instruction in block.instructions
-            for value in ((instruction.result,) + instruction.operands)
-            if value is not None
-        }
-        if request.variable not in variables:
-            raise ValueError("context request cites an unknown IR variable")
+    if any(address not in packet.known_addresses for address in request.supporting_addresses):
+        raise ValueError("context request cites an unknown supporting address")
+    variables = {
+        value
+        for function in packet.capsule.functions
+        for block in function.blocks
+        for instruction in block.instructions
+        for value in ((instruction.result,) + instruction.operands)
+        if value is not None
+    }
+    if request.variable is not None and request.variable not in variables:
+        raise ValueError("context request cites an unknown IR variable")
+    if any(variable not in variables for variable in request.supporting_variables):
+        raise ValueError("context request cites an unknown supporting IR variable")
 
 
 def _validate_work_item_packet(item: HunterWorkItem, packet: DecompilerHunterPacket) -> None:
@@ -913,18 +964,20 @@ def _validate_safe_output(assessment: DecompilerHunterAssessment) -> None:
         *assessment.unresolved_questions,
     ]
     for hypothesis in assessment.hypotheses:
-        values.extend((
-            hypothesis.title,
-            hypothesis.parser_reachability,
-            hypothesis.attacker_control,
-            hypothesis.width_signedness,
-            hypothesis.guard_analysis,
-            hypothesis.security_relation,
-            hypothesis.impact,
-            hypothesis.contradicting_evidence,
-            hypothesis.decompiler_uncertainty,
-            hypothesis.falsification_condition,
-        ))
+        values.extend(
+            (
+                hypothesis.title,
+                hypothesis.parser_reachability,
+                hypothesis.attacker_control,
+                hypothesis.width_signedness,
+                hypothesis.guard_analysis,
+                hypothesis.security_relation,
+                hypothesis.impact,
+                hypothesis.contradicting_evidence,
+                hypothesis.decompiler_uncertainty,
+                hypothesis.falsification_condition,
+            )
+        )
     for request in assessment.context_requests:
         values.append(request.rationale)
     for value in values:
@@ -959,8 +1012,12 @@ def _write_deferral(
         "response_digests": tuple(_digest(value) for value in deferred.raw_responses),
     }
     directory = (
-        store / "hunters" / item.work_id / "decompiler-analysis" / "deferrals" /
-        f"attempt-{hashlib.sha256(_canonical_json(identity)).hexdigest()[:24]}"
+        store
+        / "hunters"
+        / item.work_id
+        / "decompiler-analysis"
+        / "deferrals"
+        / f"attempt-{hashlib.sha256(_canonical_json(identity)).hexdigest()[:24]}"
     )
     _write_private_json(directory / "packet.json", packet.model_dump(mode="json"))
     _write_private_json(directory / "deferral.json", identity)
@@ -993,20 +1050,22 @@ def _budget_usage(
     calls: int,
     totals: dict[str, int],
 ) -> BudgetUsage:
-    return with_estimated_cost(BudgetUsage(
-        run_id=work_item.run_id,
-        work_id=work_item.work_id,
-        scope="hunter",
-        model_id=str(client.model_id),
-        transport=str(getattr(client, "transport", "test_or_legacy")),
-        sessions=1,
-        calls=calls,
-        iterations=calls,
-        input_tokens=totals["input_tokens"],
-        output_tokens=totals["output_tokens"],
-        cache_read_tokens=totals["cache_read_tokens"],
-        cache_write_tokens=totals["cache_write_tokens"],
-    ))
+    return with_estimated_cost(
+        BudgetUsage(
+            run_id=work_item.run_id,
+            work_id=work_item.work_id,
+            scope="hunter",
+            model_id=str(client.model_id),
+            transport=str(getattr(client, "transport", "test_or_legacy")),
+            sessions=1,
+            calls=calls,
+            iterations=calls,
+            input_tokens=totals["input_tokens"],
+            output_tokens=totals["output_tokens"],
+            cache_read_tokens=totals["cache_read_tokens"],
+            cache_write_tokens=totals["cache_write_tokens"],
+        )
+    )
 
 
 def _private_store_root(path: Path) -> Path:
@@ -1051,7 +1110,9 @@ def _write_private_bytes(path: Path, payload: bytes) -> None:
     os.chmod(path.parent, 0o700)
     if path.exists():
         if not path.is_file() or path.read_bytes() != payload:
-            raise FileExistsError("immutable Decompiler Hunter artifact already contains other data")
+            raise FileExistsError(
+                "immutable Decompiler Hunter artifact already contains other data"
+            )
         return
     descriptor, temporary_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}-")
     try:

@@ -8,7 +8,12 @@ import pytest
 from pydantic import ValidationError
 
 from vulnhunt_agent.core.llm import LLMResponse
-from vulnhunt_agent.domain.schemas import BudgetPolicy, BudgetUsage, ProviderPreflightCode, ProviderPreflightResult
+from vulnhunt_agent.domain.schemas import (
+    BudgetPolicy,
+    BudgetUsage,
+    ProviderPreflightCode,
+    ProviderPreflightResult,
+)
 from vulnhunt_agent.macos.binary_analysis import (
     BinaryCodeContextPolicy,
     BinaryCodeContextRejection,
@@ -70,13 +75,15 @@ def _function(address: int, name: str, instructions: list[dict[str, Any]]) -> di
         "name": name,
         "parameters": [],
         "pseudocode": "\n".join(item["text"] for item in instructions),
-        "blocks": [{
-            "name": "entry",
-            "start": hex(address),
-            "size": 0x100,
-            "successors": [],
-            "instructions": instructions,
-        }],
+        "blocks": [
+            {
+                "name": "entry",
+                "start": hex(address),
+                "size": 0x100,
+                "successors": [],
+                "instructions": instructions,
+            }
+        ],
     }
 
 
@@ -97,39 +104,63 @@ def _fixture(tmp_path):
         "imports": [],
         "strings": [],
         "functions": [
-            _function(caller, "decode_png_entry", [
-                _instruction(caller, "param", result="length", tags=["input_length"]),
-                _instruction(caller + 4, "cmp", inputs=["length", "limit"]),
-                _instruction(caller + 8, "branch", inputs=["length"]),
-                _instruction(caller + 12, "call", result="ok", inputs=["length"], target="decode_png_rows"),
-                _instruction(caller + 16, "return", inputs=["ok"]),
-            ]),
-            _function(worker, "decode_png_rows", [
-                _instruction(worker, "param", result="length", tags=["input_length"]),
-                _instruction(worker + 4, "load", result="header", inputs=["input"]),
-                *(
+            _function(
+                caller,
+                "decode_png_entry",
+                [
+                    _instruction(caller, "param", result="length", tags=["input_length"]),
+                    _instruction(caller + 4, "cmp", inputs=["length", "limit"]),
+                    _instruction(caller + 8, "branch", inputs=["length"]),
                     _instruction(
-                        worker + 8 + index * 4,
-                        "assign",
-                        result=f"tmp{index}",
-                        inputs=["header"],
-                    )
-                    for index in range(14)
-                ),
-                _instruction(
-                    worker + 64,
-                    "store",
-                    inputs=["destination", *(f"tmp{index}" for index in range(14))],
-                ),
-                _instruction(worker + 68, "mul", result="bytes", inputs=["length", "stride"]),
-                _instruction(worker + 72, "call", result="written", inputs=["bytes"], target="write_png_rows"),
-                _instruction(worker + 76, "return", inputs=["written"]),
-            ]),
-            _function(sink, "write_png_rows", [
-                _instruction(sink, "param", result="bytes"),
-                _instruction(sink + 4, "store", inputs=["destination", "bytes"]),
-                _instruction(sink + 8, "return"),
-            ]),
+                        caller + 12,
+                        "call",
+                        result="ok",
+                        inputs=["length"],
+                        target="decode_png_rows",
+                    ),
+                    _instruction(caller + 16, "return", inputs=["ok"]),
+                ],
+            ),
+            _function(
+                worker,
+                "decode_png_rows",
+                [
+                    _instruction(worker, "param", result="length", tags=["input_length"]),
+                    _instruction(worker + 4, "load", result="header", inputs=["input"]),
+                    *(
+                        _instruction(
+                            worker + 8 + index * 4,
+                            "assign",
+                            result=f"tmp{index}",
+                            inputs=["header"],
+                        )
+                        for index in range(14)
+                    ),
+                    _instruction(
+                        worker + 64,
+                        "store",
+                        inputs=["destination", *(f"tmp{index}" for index in range(14))],
+                    ),
+                    _instruction(worker + 68, "mul", result="bytes", inputs=["length", "stride"]),
+                    _instruction(
+                        worker + 72,
+                        "call",
+                        result="written",
+                        inputs=["bytes"],
+                        target="write_png_rows",
+                    ),
+                    _instruction(worker + 76, "return", inputs=["written"]),
+                ],
+            ),
+            _function(
+                sink,
+                "write_png_rows",
+                [
+                    _instruction(sink, "param", result="bytes"),
+                    _instruction(sink + 4, "store", inputs=["destination", "bytes"]),
+                    _instruction(sink + 8, "return"),
+                ],
+            ),
         ],
     }
     worker_instructions = payload["functions"][1]["blocks"][0]["instructions"]
@@ -191,7 +222,8 @@ def _fixture(tmp_path):
     caller_function = next(item for item in ir.functions if item.name == "decode_png_entry")
     sink_function = next(item for item in ir.functions if item.name == "write_png_rows")
     work_item = next(
-        item for item in plan.routing.work_items
+        item
+        for item in plan.routing.work_items
         if item.target_node_ids == (worker_function.function_id,)
     )
     packet = load_decompiler_hunter_packet(store_root=tmp_path, work_item=work_item)
@@ -244,10 +276,12 @@ def _not_vulnerable(packet, response) -> dict[str, Any]:
 
 def _needs_again(packet, response, request) -> dict[str, Any]:
     evidence = response.facts[0].fact_id
-    updated = request.model_copy(update={
-        "request_id": request.request_id + "-again",
-        "evidence_ids": (evidence,),
-    })
+    updated = request.model_copy(
+        update={
+            "request_id": request.request_id + "-again",
+            "evidence_ids": (evidence,),
+        }
+    )
     return {
         "schema_version": "decompiler-hunter-assessment-v1",
         "work_id": packet.work_id,
@@ -265,10 +299,36 @@ def _needs_again(packet, response, request) -> dict[str, Any]:
     }
 
 
+def _needs_next(packet, response, request) -> dict[str, Any]:
+    evidence = response.facts[0].fact_id
+    updated = request.model_copy(update={"evidence_ids": (evidence,)})
+    return {
+        "schema_version": "decompiler-hunter-assessment-v1",
+        "work_id": packet.work_id,
+        "root_id": packet.root_id,
+        "capsule_sha256": packet.capsule.capsule_sha256,
+        "admission_rank": packet.admission_rank,
+        "disposition": "needs_code_context",
+        "summary": "One final bounded proof relationship remains.",
+        "hypotheses": [],
+        "context_requests": [updated.model_dump(mode="json")],
+        "safe_path_analysis": "",
+        "safe_path_evidence_ids": [],
+        "evidence_ids": [evidence],
+        "unresolved_questions": [],
+    }
+
+
 def _hypothesis(packet, response, sink_function) -> dict[str, Any]:
-    source = next(item for item in packet.capsule.facts if item.kind is BinaryEvidenceFactKind.INPUT_SOURCE)
-    path = next(item for item in packet.capsule.facts if item.kind is BinaryEvidenceFactKind.CALLSITE)
-    sink = next(item for item in response.facts if item.kind is BinaryEvidenceFactKind.SECURITY_SINK)
+    source = next(
+        item for item in packet.capsule.facts if item.kind is BinaryEvidenceFactKind.INPUT_SOURCE
+    )
+    path = next(
+        item for item in packet.capsule.facts if item.kind is BinaryEvidenceFactKind.CALLSITE
+    )
+    sink = next(
+        item for item in response.facts if item.kind is BinaryEvidenceFactKind.SECURITY_SINK
+    )
     return {
         "schema_version": "decompiler-hunter-assessment-v1",
         "work_id": packet.work_id,
@@ -277,29 +337,34 @@ def _hypothesis(packet, response, sink_function) -> dict[str, Any]:
         "admission_rank": packet.admission_rank,
         "disposition": "code_hypothesis",
         "summary": "Input-derived bytes reach the recovered callee store.",
-        "hypotheses": [{
-            "hypothesis_id": "codehypothesis-callee-store",
-            "title": "Unchecked byte count reaches row store",
-            "vulnerability_class": "out_of_bounds_write",
-            "parser_reachability": "The admitted decoder calls the recovered row writer.",
-            "attacker_control": "The cited length parameter is input-derived.",
-            "width_signedness": "The multiplication width remains decompiler-derived.",
-            "call_path_function_ids": [packet.capsule.root_function_id, sink_function.function_id],
-            "cfg_path_addresses": [source.address, path.address, sink.address],
-            "guard_analysis": "No guard fact exists in the supplied worker/callee path.",
-            "no_applicable_guard": True,
-            "security_relation": "The byte count must not exceed destination capacity.",
-            "impact": "The recovered store may address beyond the row destination.",
-            "contradicting_evidence": "A caller precondition may still constrain the root.",
-            "decompiler_uncertainty": "Recovered types may not match machine widths.",
-            "confidence": 0.7,
-            "falsification_condition": "A dominating byte-capacity guard falsifies the claim.",
-            "source_evidence_ids": [source.fact_id],
-            "path_evidence_ids": [path.fact_id],
-            "guard_evidence_ids": [],
-            "sink_evidence_ids": [sink.fact_id],
-            "contradicting_evidence_ids": [],
-        }],
+        "hypotheses": [
+            {
+                "hypothesis_id": "codehypothesis-callee-store",
+                "title": "Unchecked byte count reaches row store",
+                "vulnerability_class": "out_of_bounds_write",
+                "parser_reachability": "The admitted decoder calls the recovered row writer.",
+                "attacker_control": "The cited length parameter is input-derived.",
+                "width_signedness": "The multiplication width remains decompiler-derived.",
+                "call_path_function_ids": [
+                    packet.capsule.root_function_id,
+                    sink_function.function_id,
+                ],
+                "cfg_path_addresses": [source.address, path.address, sink.address],
+                "guard_analysis": "No guard fact exists in the supplied worker/callee path.",
+                "no_applicable_guard": True,
+                "security_relation": "The byte count must not exceed destination capacity.",
+                "impact": "The recovered store may address beyond the row destination.",
+                "contradicting_evidence": "A caller precondition may still constrain the root.",
+                "decompiler_uncertainty": "Recovered types may not match machine widths.",
+                "confidence": 0.7,
+                "falsification_condition": "A dominating byte-capacity guard falsifies the claim.",
+                "source_evidence_ids": [source.fact_id],
+                "path_evidence_ids": [path.fact_id],
+                "guard_evidence_ids": [],
+                "sink_evidence_ids": [sink.fact_id],
+                "contradicting_evidence_ids": [],
+            }
+        ],
         "context_requests": [],
         "safe_path_analysis": "",
         "safe_path_evidence_ids": [],
@@ -421,6 +486,58 @@ async def test_missing_callee_sink_completes_code_hypothesis(tmp_path) -> None:
     assert result.entries[0].usage.sessions == 0
 
 
+@pytest.mark.asyncio
+async def test_one_root_can_close_a_proof_on_third_continuation(tmp_path) -> None:
+    ir, packet, _caller, worker, sink = _fixture(tmp_path)
+    first = _request(
+        packet,
+        BinaryCodeContextRequestKind.EXACT_FUNCTION,
+        function_id=worker.function_id,
+    ).model_copy(update={"request_id": "codectx-worker-proof"})
+    first_response = resolve_binary_code_context(ir=ir, packet=packet, request=first)
+    second = _request(
+        packet,
+        BinaryCodeContextRequestKind.DEFINITION_USE_CHAIN,
+        function_id=worker.function_id,
+        variable="tmp13",
+    ).model_copy(update={"request_id": "codectx-late-definition"})
+    second_response = resolve_binary_code_context(ir=ir, packet=packet, request=second)
+    third = _request(
+        packet,
+        BinaryCodeContextRequestKind.DIRECT_CALLEE,
+        function_id=worker.function_id,
+        related=sink.function_id,
+    ).model_copy(update={"request_id": "codectx-final-callee"})
+    third_response = resolve_binary_code_context(ir=ir, packet=packet, request=third)
+    client = _FakeClient(
+        [
+            json.dumps(_needs_next(packet, first_response, second)),
+            json.dumps(_needs_next(packet, second_response, third)),
+            json.dumps(_hypothesis(packet, third_response, sink)),
+        ]
+    )
+
+    result = await continue_decompiler_hunter_session(
+        store_root=tmp_path,
+        ir=ir,
+        packet=packet,
+        initial_assessment=_needs(packet, first),
+        initial_usage=_initial_usage(packet),
+        client=client,
+        policy=BinaryCodeContextPolicy(
+            maximum_continuations_per_root=3,
+            maximum_total_evidence_bytes=288 * 1024,
+        ),
+    )
+
+    assert len(result.entries) == 3
+    assert result.terminal_status is DecompilerContextTerminalStatus.COMPLETED
+    assert result.terminal_assessment.disposition is DecompilerHunterDisposition.CODE_HYPOTHESIS
+    assert result.sessions == 1
+    assert result.model_calls == 4
+    assert client.calls == 3
+
+
 def test_typed_broker_resolves_block_defuse_and_return_use(tmp_path) -> None:
     ir, packet, _, worker, sink = _fixture(tmp_path)
     worker_block = worker.blocks[0]
@@ -446,8 +563,7 @@ def test_typed_broker_resolves_block_defuse_and_return_use(tmp_path) -> None:
         ),
     )
     statuses = tuple(
-        resolve_binary_code_context(ir=ir, packet=packet, request=item).status
-        for item in requests
+        resolve_binary_code_context(ir=ir, packet=packet, request=item).status for item in requests
     )
     assert statuses == (
         BinaryCodeContextStatus.RESOLVED,
@@ -476,6 +592,56 @@ def test_typed_broker_resolves_block_defuse_and_return_use(tmp_path) -> None:
     assert late_definition.address == worker.start_address + 60
 
 
+def test_definition_use_request_binds_multiple_independent_proof_anchors(tmp_path) -> None:
+    ir, packet, _, worker, _ = _fixture(tmp_path)
+    request = BinaryCodeContextRequest(
+        request_id="codectx-multi-anchor-proof",
+        kind=BinaryCodeContextRequestKind.DEFINITION_USE_CHAIN,
+        rationale="Resolve both independent values and their shared sink.",
+        function_id=worker.function_id,
+        address=worker.start_address + 28,
+        variable="tmp12",
+        supporting_addresses=tuple(
+            worker.start_address + offset for offset in (32, 36, 40, 44, 48, 52, 56, 60)
+        ),
+        supporting_variables=("tmp12", "tmp13"),
+        evidence_ids=(packet.allowed_evidence_ids[0],),
+        maximum_bytes=12 * 1024,
+    )
+
+    response = resolve_binary_code_context(ir=ir, packet=packet, request=request)
+    instructions = tuple(
+        instruction
+        for function in response.functions
+        for block in function.blocks
+        for instruction in block.instructions
+    )
+
+    assert response.status is BinaryCodeContextStatus.RESOLVED
+    assert any(item.result == "tmp12" for item in instructions)
+    assert any(item.result == "tmp13" for item in instructions)
+    combined_addresses = {
+        instruction.address
+        for function in packet.capsule.functions
+        for block in function.blocks
+        for instruction in block.instructions
+    } | {item.address for item in instructions}
+    assert set((request.address, *request.supporting_addresses)).issubset(combined_addresses)
+
+
+def test_supporting_anchors_are_rejected_for_non_definition_use_request(tmp_path) -> None:
+    _, packet, _, worker, _ = _fixture(tmp_path)
+    with pytest.raises(ValidationError, match="require a definition/use request"):
+        BinaryCodeContextRequest(
+            request_id="codectx-invalid-supporting-anchor",
+            kind=BinaryCodeContextRequestKind.EXACT_FUNCTION,
+            rationale="Invalid mixed request.",
+            function_id=worker.function_id,
+            supporting_variables=("tmp13",),
+            evidence_ids=(packet.allowed_evidence_ids[0],),
+        )
+
+
 def test_invalid_duplicate_out_of_image_file_and_budget_requests_are_rejected(tmp_path) -> None:
     ir, packet, caller, worker, _ = _fixture(tmp_path)
     request = _request(
@@ -488,15 +654,19 @@ def test_invalid_duplicate_out_of_image_file_and_budget_requests_are_rejected(tm
     assert response.status is BinaryCodeContextStatus.RESOLVED
 
     with pytest.raises(ValidationError, match="extra"):
-        BinaryCodeContextRequest.model_validate({
-            **request.model_dump(mode="json"),
-            "path": "/tmp/arbitrary-file",
-        })
+        BinaryCodeContextRequest.model_validate(
+            {
+                **request.model_dump(mode="json"),
+                "path": "/tmp/arbitrary-file",
+            }
+        )
 
-    outside = request.model_copy(update={
-        "request_id": "codectx-outside-image",
-        "function_id": "fn_ffffffffffffffffffff",
-    })
+    outside = request.model_copy(
+        update={
+            "request_id": "codectx-outside-image",
+            "function_id": "fn_ffffffffffffffffffff",
+        }
+    )
     outside_response = resolve_binary_code_context(ir=ir, packet=packet, request=outside)
     assert outside_response.rejection is BinaryCodeContextRejection.OUTSIDE_FROZEN_IMAGE
 

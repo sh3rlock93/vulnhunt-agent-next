@@ -483,6 +483,64 @@ merged, but M17 cannot be marked effectiveness-complete.
 These are hard ceilings, not targets. A lower-ranked root is not admitted after
 the budget prefix is exhausted.
 
+### M17-8 — Bounded third proof-closure continuation
+
+#### Trigger
+
+The first current-ImageIO SGI run recovered the 32-bit row-byte multiplication
+and its later 64-bit allocation use, but exhausted the 192 KiB per-root evidence
+cap before resolving the already typed destination-pointer request. The frozen
+capsule and first two responses consumed 196,294 bytes; the final deterministic
+pointer/stride slice requires another 98,040 bytes. This is an evidence-closure
+failure, not a ranking or Hunter-session failure.
+
+An initial third-continuation trial remained inconclusive after 195,564 bytes:
+the model named allocation variables and destination addresses together in its
+rationale, while the v1 broker structurally selected only the single primary
+variable. Repeating one-dimensional slices is therefore not an acceptable
+recovery mechanism.
+
+#### Implementation scope
+
+- Permit one proof-bearing root per run to receive a third continuation from
+  the same frozen IR and hash chain.
+- Extend a definition/use request with sorted, bounded
+  `supporting_variables` and `supporting_addresses`. The broker must select and
+  retain every structured anchor; prose in `rationale` never changes evidence
+  selection.
+- Raise that root's total evidence ceiling to 288 KiB while retaining the
+  existing 96 KiB response ceiling.
+- Keep all remaining roots at two continuations and 192 KiB after the single
+  third-continuation allowance is consumed.
+- Do not add Hunter sessions, decompiler invocations, image executions,
+  generated inputs, fuzzing, VM boots, network search, or shell access.
+- Preserve the M17-7 aggregate ceiling of 12 Hunter continuation calls, 34
+  successful model calls, 1,000,000 input tokens, 100,000 output tokens, and 90
+  wall-clock minutes.
+
+#### Exit criteria
+
+The SGI root either reaches a schema-valid code hypothesis supported by the
+allocation and destination-pointer chains, or terminates with a more specific
+evidence-backed safe/inconclusive result. A third continuation cannot be spent
+on a second root in the same run, and a multi-anchor request cannot silently
+omit one of its declared variables or addresses.
+
+#### Current-ImageIO observation
+
+The bounded real run against macOS 26.5.2 build 25F84 completed after two
+continuations and produced the first schema-valid code hypothesis for the SGI
+root. It retained 195,897 evidence bytes, used one Hunter session and four model
+calls, and performed zero image executions, fuzzing invocations, VM boots, or
+decompiler reruns. The independent Reviewer admitted exactly that hypothesis
+but returned `reviewer_inconclusive` after two calls: the frozen single-function
+chain did not prove metadata provenance, the exact format dispatch, or the
+allocation-to-store alias. Manual inspection of the already frozen IR found a
+KTX `initialize` function with an explicit checked-width sequence, so this
+hypothesis must not be reported until cross-function field provenance proves or
+falsifies the apparent guard. M17-8 therefore validates bounded proof closure;
+it does not claim a vulnerability.
+
 ## Per-PR validation and merge procedure
 
 For each M17 PR:

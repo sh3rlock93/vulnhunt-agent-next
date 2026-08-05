@@ -37,18 +37,20 @@ from .decompiler_hunter import (
 )
 from .ir import IRBasicBlock, IRFunction, IRInstruction, IROperation, NormalizedBinaryIR
 
-DECOMPILER_CONTEXT_PROMPT_VERSION: Literal["decompiler-code-context-v1"] = (
-    "decompiler-code-context-v1"
+DECOMPILER_CONTEXT_PROMPT_VERSION: Literal["decompiler-code-context-v2"] = (
+    "decompiler-code-context-v2"
 )
 _MAX_RAW_RESPONSE_BYTES = 128 * 1024
 _MAX_PACKET_BYTES = 768 * 1024
-_MEMORY_SINKS = frozenset({
-    IROperation.ALLOCATE,
-    IROperation.COPY,
-    IROperation.FREE,
-    IROperation.LOAD,
-    IROperation.STORE,
-})
+_MEMORY_SINKS = frozenset(
+    {
+        IROperation.ALLOCATE,
+        IROperation.COPY,
+        IROperation.FREE,
+        IROperation.LOAD,
+        IROperation.STORE,
+    }
+)
 _INPUT_CALLEE_MARKERS = (
     "copybytes",
     "dataprovider",
@@ -57,7 +59,9 @@ _INPUT_CALLEE_MARKERS = (
     "read_data",
 )
 
-DECOMPILER_CONTEXT_SYSTEM_PROMPT = DECOMPILER_HUNTER_SYSTEM_PROMPT + """
+DECOMPILER_CONTEXT_SYSTEM_PROMPT = (
+    DECOMPILER_HUNTER_SYSTEM_PROMPT
+    + """
 
 This is a continuation of the same root session, not a new hunt. The packet
 contains the original evidence and one or more deterministic responses from
@@ -66,7 +70,12 @@ facts. A newly supplied caller guard may require not_vulnerable; a newly
 supplied callee sink may complete a code_hypothesis. If one more slice is
 strictly required, return needs_code_context with exactly one typed request.
 Never treat a rejected or unavailable response as evidence that a guard is
-absent. Return only the DecompilerHunterAssessment JSON object."""
+absent. When one proof obligation spans independent allocation and destination
+expressions in the same function, encode every required secondary variable in
+supporting_variables and every sink/guard address in supporting_addresses of a
+single definition_use_chain request. Natural-language rationale does not expand
+the broker selection. Return only the DecompilerHunterAssessment JSON object."""
+)
 
 
 class BinaryCodeContextStatus(StrEnum):
@@ -92,11 +101,11 @@ class DecompilerContextTerminalStatus(StrEnum):
 
 class BinaryCodeContextPolicy(DomainModel):
     maximum_roots_per_run: int = Field(default=6, ge=1, le=6)
-    maximum_continuations_per_root: int = Field(default=2, ge=1, le=2)
+    maximum_continuations_per_root: int = Field(default=3, ge=1, le=3)
     maximum_total_evidence_bytes: int = Field(
-        default=192 * 1024,
+        default=288 * 1024,
         ge=16 * 1024,
-        le=192 * 1024,
+        le=288 * 1024,
     )
     maximum_blocks_per_response: int = Field(default=12, ge=1, le=32)
     maximum_instructions_per_response: int = Field(default=256, ge=8, le=512)
@@ -136,9 +145,7 @@ class BinaryCodeContextEdge(DomainModel):
 
 
 class BinaryCodeContextResponse(DomainModel):
-    schema_version: Literal["binary-code-context-response-v1"] = (
-        "binary-code-context-response-v1"
-    )
+    schema_version: Literal["binary-code-context-response-v1"] = "binary-code-context-response-v1"
     work_id: str = Field(pattern=r"^work_[0-9a-f]{64}$")
     root_id: str = Field(pattern=r"^coderoot_[0-9a-f]{20}$")
     capsule_sha256: str = Field(pattern=SHA256_PATTERN)
@@ -184,11 +191,20 @@ class BinaryCodeContextResponse(DomainModel):
             for edge in self.call_edges
         ):
             raise ValueError("context edge lacks an included address-backed callsite")
-        fact_order = tuple(sorted(
-            self.facts,
-            key=lambda item: (item.address, item.instruction_index, item.function_id, item.kind.value),
-        ))
-        if fact_order != self.facts or len({item.fact_id for item in self.facts}) != len(self.facts):
+        fact_order = tuple(
+            sorted(
+                self.facts,
+                key=lambda item: (
+                    item.address,
+                    item.instruction_index,
+                    item.function_id,
+                    item.kind.value,
+                ),
+            )
+        )
+        if fact_order != self.facts or len({item.fact_id for item in self.facts}) != len(
+            self.facts
+        ):
             raise ValueError("context facts must be canonically ordered and unique")
         expected_bytes = _context_evidence_bytes(
             self.functions,
@@ -208,18 +224,18 @@ class DecompilerContinuationPacket(DomainModel):
     schema_version: Literal["decompiler-continuation-packet-v1"] = (
         "decompiler-continuation-packet-v1"
     )
-    prompt_version: Literal["decompiler-code-context-v1"] = DECOMPILER_CONTEXT_PROMPT_VERSION
+    prompt_version: Literal["decompiler-code-context-v2"] = DECOMPILER_CONTEXT_PROMPT_VERSION
     work_id: str = Field(pattern=r"^work_[0-9a-f]{64}$")
     root_id: str = Field(pattern=r"^coderoot_[0-9a-f]{20}$")
     admission_rank: int = Field(ge=1, le=100000)
     capsule_sha256: str = Field(pattern=SHA256_PATTERN)
     ir_sha256: str = Field(pattern=SHA256_PATTERN)
-    continuation_ordinal: int = Field(ge=1, le=2)
+    continuation_ordinal: int = Field(ge=1, le=3)
     previous_chain_sha256: str = Field(pattern=SHA256_PATTERN)
     base_packet: DecompilerHunterPacket
     prior_assessment: DecompilerHunterAssessment
-    context_responses: tuple[BinaryCodeContextResponse, ...] = Field(min_length=1, max_length=2)
-    total_evidence_bytes: int = Field(ge=1, le=192 * 1024)
+    context_responses: tuple[BinaryCodeContextResponse, ...] = Field(min_length=1, max_length=3)
+    total_evidence_bytes: int = Field(ge=1, le=288 * 1024)
     packet_sha256: str = Field(pattern=SHA256_PATTERN)
 
     @model_validator(mode="after")
@@ -242,7 +258,9 @@ class DecompilerContinuationPacket(DomainModel):
             raise ValueError("continuation packet changed the root-session identity")
         if self.continuation_ordinal != len(self.context_responses):
             raise ValueError("continuation ordinal differs from its response chain")
-        if any(item.status is not BinaryCodeContextStatus.RESOLVED for item in self.context_responses):
+        if any(
+            item.status is not BinaryCodeContextStatus.RESOLVED for item in self.context_responses
+        ):
             raise ValueError("model continuation may contain only resolved context")
         evidence = self.base_packet.capsule.evidence_bytes + sum(
             item.evidence_bytes for item in self.context_responses
@@ -263,7 +281,7 @@ class DecompilerContextChainEntry(DomainModel):
     )
     work_id: str = Field(pattern=r"^work_[0-9a-f]{64}$")
     root_id: str = Field(pattern=r"^coderoot_[0-9a-f]{20}$")
-    ordinal: int = Field(ge=1, le=2)
+    ordinal: int = Field(ge=1, le=3)
     previous_chain_sha256: str = Field(pattern=SHA256_PATTERN)
     request_sha256: str = Field(pattern=SHA256_PATTERN)
     response: BinaryCodeContextResponse
@@ -276,7 +294,9 @@ class DecompilerContextChainEntry(DomainModel):
     def validate_entry(self) -> "DecompilerContextChainEntry":
         if self.request_sha256 != self.response.request_sha256:
             raise ValueError("chain request and response digests differ")
-        if (self.assessment is None) != (self.response.status is not BinaryCodeContextStatus.RESOLVED):
+        if (self.assessment is None) != (
+            self.response.status is not BinaryCodeContextStatus.RESOLVED
+        ):
             raise ValueError("only resolved context may carry a continuation assessment")
         if (self.usage is None) != (self.assessment is None):
             raise ValueError("continuation usage and assessment must be persisted together")
@@ -290,16 +310,14 @@ class DecompilerContextChainEntry(DomainModel):
 
 
 class DecompilerContextRunResult(DomainModel):
-    schema_version: Literal["decompiler-context-run-result-v1"] = (
-        "decompiler-context-run-result-v1"
-    )
+    schema_version: Literal["decompiler-context-run-result-v1"] = "decompiler-context-run-result-v1"
     work_id: str = Field(pattern=r"^work_[0-9a-f]{64}$")
     root_id: str = Field(pattern=r"^coderoot_[0-9a-f]{20}$")
     initial_assessment_sha256: str = Field(pattern=SHA256_PATTERN)
     terminal_status: DecompilerContextTerminalStatus
     terminal_assessment: DecompilerHunterAssessment
-    entries: tuple[DecompilerContextChainEntry, ...] = Field(max_length=2)
-    total_evidence_bytes: int = Field(ge=1, le=192 * 1024)
+    entries: tuple[DecompilerContextChainEntry, ...] = Field(max_length=3)
+    total_evidence_bytes: int = Field(ge=1, le=288 * 1024)
     sessions: Literal[1] = 1
     model_calls: int = Field(ge=0)
     input_tokens: int = Field(ge=0)
@@ -313,7 +331,9 @@ class DecompilerContextRunResult(DomainModel):
                 if entry.ordinal != index:
                     raise ValueError("context chain entries are not contiguous")
                 previous = (
-                    self.initial_assessment_sha256 if index == 1 else self.entries[index - 2].chain_sha256
+                    self.initial_assessment_sha256
+                    if index == 1
+                    else self.entries[index - 2].chain_sha256
                 )
                 if entry.previous_chain_sha256 != previous:
                     raise ValueError("context chain predecessor digest mismatch")
@@ -323,7 +343,10 @@ class DecompilerContextRunResult(DomainModel):
         if self.chain_sha256 != expected_chain:
             raise ValueError("context result head digest mismatch")
         if self.terminal_status is DecompilerContextTerminalStatus.COMPLETED:
-            if self.terminal_assessment.disposition is DecompilerHunterDisposition.NEEDS_CODE_CONTEXT:
+            if (
+                self.terminal_assessment.disposition
+                is DecompilerHunterDisposition.NEEDS_CODE_CONTEXT
+            ):
                 raise ValueError("completed context run still requests context")
         return self
 
@@ -361,21 +384,27 @@ class DecompilerContinuationAgent:
         *,
         run_id: str,
     ) -> tuple[DecompilerHunterAssessment, BudgetUsage, tuple[str, ...]]:
-        messages: list[dict] = [{
-            "role": "user",
-            "content": [{
-                "text": (
-                    "# Same-session frozen-IR continuation packet\n"
-                    + json.dumps(packet.model_dump(mode="json"), indent=2)
-                    + "\n\n# Required response JSON Schema\n"
-                    + json.dumps(DecompilerHunterAssessment.model_json_schema(), indent=2)
-                )
-            }],
-        }]
-        totals = {name: 0 for name in (
-            "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens"
-        )}
+        messages: list[dict] = [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "text": (
+                            "# Same-session frozen-IR continuation packet\n"
+                            + json.dumps(packet.model_dump(mode="json"), indent=2)
+                            + "\n\n# Required response JSON Schema\n"
+                            + json.dumps(DecompilerHunterAssessment.model_json_schema(), indent=2)
+                        )
+                    }
+                ],
+            }
+        ]
+        totals = {
+            name: 0
+            for name in ("input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens")
+        }
         raw: list[str] = []
+        validation_errors: list[str] = []
         for _ in range(self.policy.maximum_attempts_per_continuation):
             response = await self.client.chat(
                 messages=messages,
@@ -391,30 +420,45 @@ class DecompilerContinuationAgent:
                 if parsed is not None:
                     assessment = DecompilerHunterAssessment.model_validate(parsed)
                     validate_continuation_assessment(packet, assessment)
-                    usage = with_estimated_cost(BudgetUsage(
-                        run_id=run_id,
-                        work_id=packet.work_id,
-                        scope="hunter",
-                        model_id=str(self.client.model_id),
-                        transport=str(getattr(self.client, "transport", "test_or_legacy")),
-                        sessions=0,
-                        calls=len(raw),
-                        iterations=len(raw),
-                        **totals,
-                    ))
+                    usage = with_estimated_cost(
+                        BudgetUsage(
+                            run_id=run_id,
+                            work_id=packet.work_id,
+                            scope="hunter",
+                            model_id=str(self.client.model_id),
+                            transport=str(getattr(self.client, "transport", "test_or_legacy")),
+                            sessions=0,
+                            calls=len(raw),
+                            iterations=len(raw),
+                            **totals,
+                        )
+                    )
                     return assessment, usage, tuple(raw)
-            except ValueError:
-                pass
-            messages.extend((
-                {"role": "assistant", "content": response.content_blocks},
-                {"role": "user", "content": [{"text": (
-                    "Return only schema-valid JSON for the same work_id/root/capsule/rank. "
-                    "Cite only facts, functions, blocks, variables, and addresses in the "
-                    "continuation packet. Sort evidence-ID arrays. If more context is needed, "
-                    "request exactly one permitted frozen-IR slice."
-                )}]},
-            ))
-        raise ValueError("continuation model response remained invalid after one repair")
+            except ValueError as exc:
+                validation_errors.append(str(exc)[:1000])
+            if parsed is None:
+                validation_errors.append("response did not contain a JSON object")
+            messages.extend(
+                (
+                    {"role": "assistant", "content": response.content_blocks},
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "text": (
+                                    "Return only schema-valid JSON for the same work_id/root/capsule/rank. "
+                                    "Cite only facts, functions, blocks, variables, and addresses in the "
+                                    "continuation packet. Sort evidence-ID, supporting-address, and "
+                                    "supporting-variable arrays and remove duplicates. If more context is "
+                                    "needed, request exactly one permitted frozen-IR slice."
+                                )
+                            }
+                        ],
+                    },
+                )
+            )
+        detail = validation_errors[-1] if validation_errors else "unknown validation error"
+        raise ValueError("continuation model response remained invalid after one repair: " + detail)
 
 
 def resolve_binary_code_context(
@@ -436,13 +480,19 @@ def resolve_binary_code_context(
     fingerprint = _request_fingerprint(request)
     if fingerprint in previous_fingerprints:
         return _empty_response(
-            packet, ir, request, BinaryCodeContextStatus.REJECTED,
+            packet,
+            ir,
+            request,
+            BinaryCodeContextStatus.REJECTED,
             BinaryCodeContextRejection.DUPLICATE_REQUEST,
             "the same frozen-IR slice was already requested",
         )
     if _is_circular(request, prior_entries):
         return _empty_response(
-            packet, ir, request, BinaryCodeContextStatus.REJECTED,
+            packet,
+            ir,
+            request,
+            BinaryCodeContextStatus.REJECTED,
             BinaryCodeContextRejection.CIRCULAR_REQUEST,
             "the request reverses an already resolved caller/callee edge",
         )
@@ -451,7 +501,10 @@ def resolve_binary_code_context(
     )
     if any(identifier not in functions for identifier in target_ids):
         return _empty_response(
-            packet, ir, request, BinaryCodeContextStatus.REJECTED,
+            packet,
+            ir,
+            request,
+            BinaryCodeContextStatus.REJECTED,
             BinaryCodeContextRejection.OUTSIDE_FROZEN_IMAGE,
             "the request cites a function outside the frozen normalized IR",
         )
@@ -460,30 +513,44 @@ def resolve_binary_code_context(
         target is None or request.block_id not in {item.block_id for item in target.blocks}
     ):
         return _empty_response(
-            packet, ir, request, BinaryCodeContextStatus.REJECTED,
+            packet,
+            ir,
+            request,
+            BinaryCodeContextStatus.REJECTED,
             BinaryCodeContextRejection.UNKNOWN_TARGET,
             "the request cites a block outside its target function",
         )
-    if request.address is not None and (
-        target is None
-        or not any(
-            instruction.address == request.address
-            for block in target.blocks
-            for instruction in block.instructions
-        )
-    ):
+    requested_addresses = tuple(
+        address
+        for address in (request.address, *request.supporting_addresses)
+        if address is not None
+    )
+    known_target_addresses = (
+        {instruction.address for block in target.blocks for instruction in block.instructions}
+        if target is not None
+        else set()
+    )
+    if any(address not in known_target_addresses for address in requested_addresses):
         return _empty_response(
-            packet, ir, request, BinaryCodeContextStatus.REJECTED,
+            packet,
+            ir,
+            request,
+            BinaryCodeContextStatus.REJECTED,
             BinaryCodeContextRejection.UNKNOWN_TARGET,
             "the request cites an address outside its target function",
         )
-    remaining = active.maximum_total_evidence_bytes - packet.capsule.evidence_bytes - sum(
-        item.response.evidence_bytes for item in prior_entries
+    remaining = (
+        active.maximum_total_evidence_bytes
+        - packet.capsule.evidence_bytes
+        - sum(item.response.evidence_bytes for item in prior_entries)
     )
     maximum = min(request.maximum_bytes, remaining, 96 * 1024)
     if maximum < 1024:
         return _empty_response(
-            packet, ir, request, BinaryCodeContextStatus.REJECTED,
+            packet,
+            ir,
+            request,
+            BinaryCodeContextStatus.REJECTED,
             BinaryCodeContextRejection.EVIDENCE_BUDGET_EXCEEDED,
             "the root has no remaining frozen-evidence budget",
         )
@@ -495,7 +562,10 @@ def resolve_binary_code_context(
     )
     if unavailable is not None:
         return _empty_response(
-            packet, ir, request, BinaryCodeContextStatus.UNAVAILABLE,
+            packet,
+            ir,
+            request,
+            BinaryCodeContextStatus.UNAVAILABLE,
             BinaryCodeContextRejection.PROOF_UNAVAILABLE,
             unavailable,
         )
@@ -503,6 +573,7 @@ def resolve_binary_code_context(
         selected,
         focus=focus,
         anchors=_request_anchor_addresses(request, selected),
+        variable_anchors=_request_variable_anchor_addresses(request, selected),
         policy=active,
     )
     slices, deduplication_omissions = _remove_base_evidence(slices, packet)
@@ -510,7 +581,10 @@ def resolve_binary_code_context(
     facts = _facts_for_slices(slices, excluded=base_facts)
     if not facts:
         return _empty_response(
-            packet, ir, request, BinaryCodeContextStatus.UNAVAILABLE,
+            packet,
+            ir,
+            request,
+            BinaryCodeContextStatus.UNAVAILABLE,
             BinaryCodeContextRejection.PROOF_UNAVAILABLE,
             "the requested slice contains no new address-backed facts",
         )
@@ -521,22 +595,28 @@ def resolve_binary_code_context(
         for block in function.blocks
         for instruction in block.instructions
     }
-    response_edges = tuple(sorted(
-        (
-            BinaryCodeContextEdge(
-                caller_function_id=item.caller.function_id,
-                callee_function_id=item.callee.function_id,
-                callsite_address=item.instruction.address,
-                arguments=item.instruction.operands,
-                return_result=item.instruction.result,
-            )
-            for item in selected_edges
-            if item.caller.function_id not in response_function_ids
-            or (item.caller.function_id, item.instruction.address)
-            in response_instruction_addresses
-        ),
-        key=lambda item: (item.callsite_address, item.caller_function_id, item.callee_function_id),
-    ))
+    response_edges = tuple(
+        sorted(
+            (
+                BinaryCodeContextEdge(
+                    caller_function_id=item.caller.function_id,
+                    callee_function_id=item.callee.function_id,
+                    callsite_address=item.instruction.address,
+                    arguments=item.instruction.operands,
+                    return_result=item.instruction.result,
+                )
+                for item in selected_edges
+                if item.caller.function_id not in response_function_ids
+                or (item.caller.function_id, item.instruction.address)
+                in response_instruction_addresses
+            ),
+            key=lambda item: (
+                item.callsite_address,
+                item.caller_function_id,
+                item.callee_function_id,
+            ),
+        )
+    )
     slices, response_edges, facts, omissions = _fit_response_budget(
         slices,
         response_edges,
@@ -547,13 +627,19 @@ def resolve_binary_code_context(
     )
     if not slices or not facts:
         return _empty_response(
-            packet, ir, request, BinaryCodeContextStatus.REJECTED,
+            packet,
+            ir,
+            request,
+            BinaryCodeContextStatus.REJECTED,
             BinaryCodeContextRejection.EVIDENCE_BUDGET_EXCEEDED,
             "the requested address-backed definition/use evidence cannot fit its budget",
         )
     if not _request_evidence_retained(packet, request, slices):
         return _empty_response(
-            packet, ir, request, BinaryCodeContextStatus.UNAVAILABLE,
+            packet,
+            ir,
+            request,
+            BinaryCodeContextStatus.UNAVAILABLE,
             BinaryCodeContextRejection.PROOF_UNAVAILABLE,
             "the bounded response contains no new evidence for the exact requested target",
         )
@@ -587,7 +673,7 @@ async def continue_decompiler_hunter_session(
     client: DecompilerContinuationModelClient,
     policy: BinaryCodeContextPolicy | None = None,
 ) -> DecompilerContextRunResult:
-    """Continue one persisted Hunter root at most twice and resume by chain digest."""
+    """Continue one persisted Hunter root at most three times and resume by chain digest."""
 
     active = policy or BinaryCodeContextPolicy()
     _validate_frozen_bindings(ir, packet)
@@ -606,7 +692,11 @@ async def continue_decompiler_hunter_session(
             break
         if len(current.context_requests) != 1:
             result = _make_result(
-                packet, initial_assessment, initial_usage, tuple(entries), current,
+                packet,
+                initial_assessment,
+                initial_usage,
+                tuple(entries),
+                current,
                 DecompilerContextTerminalStatus.REVIEWER_INCONCLUSIVE,
             )
             _write_private_json(terminal_path, result.model_dump(mode="json"))
@@ -630,7 +720,11 @@ async def continue_decompiler_hunter_session(
             _persist_entry(directory, entry, ())
             entries.append(entry)
             result = _make_result(
-                packet, initial_assessment, initial_usage, tuple(entries), current,
+                packet,
+                initial_assessment,
+                initial_usage,
+                tuple(entries),
+                current,
                 DecompilerContextTerminalStatus.REVIEWER_INCONCLUSIVE,
             )
             _write_private_json(terminal_path, result.model_dump(mode="json"))
@@ -685,10 +779,11 @@ def select_context_continuation_roots(
 
     active = policy or BinaryCodeContextPolicy()
     candidates = tuple(
-        item.work_id for item in assessments
+        item.work_id
+        for item in assessments
         if item.disposition is DecompilerHunterDisposition.NEEDS_CODE_CONTEXT
     )
-    return candidates[:active.maximum_roots_per_run], candidates[active.maximum_roots_per_run:]
+    return candidates[: active.maximum_roots_per_run], candidates[active.maximum_roots_per_run :]
 
 
 def validate_continuation_assessment(
@@ -716,7 +811,9 @@ def validate_continuation_assessment(
                 blocks.add(block.block_id)
                 for instruction in block.instructions:
                     addresses.add(instruction.address)
-                    variables.update(value for value in (instruction.result, *instruction.operands) if value)
+                    variables.update(
+                        value for value in (instruction.result, *instruction.operands) if value
+                    )
     cited = set(assessment.evidence_ids) | set(assessment.safe_path_evidence_ids)
     for hypothesis in assessment.hypotheses:
         citations = (
@@ -734,14 +831,28 @@ def validate_continuation_assessment(
             raise ValueError("continuation requested an unsupported context kind")
         if request.function_id is not None and request.function_id not in base.frozen_function_ids:
             raise ValueError("continuation requested a function outside frozen IR")
-        if request.related_function_id is not None and request.related_function_id not in base.frozen_function_ids:
+        if (
+            request.related_function_id is not None
+            and request.related_function_id not in base.frozen_function_ids
+        ):
             raise ValueError("continuation requested a related function outside frozen IR")
         if request.block_id is not None and request.block_id not in blocks:
             raise ValueError("continuation requested an unknown block")
         if request.address is not None and request.address not in addresses:
             raise ValueError("continuation requested an unknown address")
-        if request.variable is not None and request.variable not in variables and not _base_has_variable(base, request.variable):
+        if any(address not in addresses for address in request.supporting_addresses):
+            raise ValueError("continuation requested an unknown supporting address")
+        if (
+            request.variable is not None
+            and request.variable not in variables
+            and not _base_has_variable(base, request.variable)
+        ):
             raise ValueError("continuation requested an unknown variable")
+        if any(
+            variable not in variables and not _base_has_variable(base, variable)
+            for variable in request.supporting_variables
+        ):
+            raise ValueError("continuation requested an unknown supporting variable")
     if not cited.issubset(facts):
         raise ValueError("continuation cited evidence outside supplied frozen context")
     if assessment.disposition is DecompilerHunterDisposition.NEEDS_CODE_CONTEXT:
@@ -749,7 +860,9 @@ def validate_continuation_assessment(
             raise ValueError("continuation must request exactly one context slice")
     if assessment.disposition is DecompilerHunterDisposition.NOT_VULNERABLE:
         kinds = {facts[item].kind for item in assessment.safe_path_evidence_ids}
-        if not kinds.intersection({BinaryEvidenceFactKind.GUARD, BinaryEvidenceFactKind.RETURN_USE}):
+        if not kinds.intersection(
+            {BinaryEvidenceFactKind.GUARD, BinaryEvidenceFactKind.RETURN_USE}
+        ):
             raise ValueError("not_vulnerable requires cited guard or return-use evidence")
     validate_decompiler_hunter_safe_output(assessment)
 
@@ -771,19 +884,30 @@ def _validate_combined_hypothesis(
     if any(identifier not in facts for identifier in all_ids):
         raise ValueError("continuation hypothesis cites unknown evidence")
     base_fact_ids = set(base.allowed_evidence_ids)
-    if base.capsule.proof_status.value == "proof_incomplete" and set(all_ids).issubset(base_fact_ids):
+    if base.capsule.proof_status.value == "proof_incomplete" and set(all_ids).issubset(
+        base_fact_ids
+    ):
         raise ValueError("proof-incomplete continuation must cite newly supplied context")
-    if {facts[item].kind for item in hypothesis.source_evidence_ids} != {BinaryEvidenceFactKind.INPUT_SOURCE}:
+    if {facts[item].kind for item in hypothesis.source_evidence_ids} != {
+        BinaryEvidenceFactKind.INPUT_SOURCE
+    }:
         raise ValueError("continuation source citations must be input-source facts")
-    if not {facts[item].kind for item in hypothesis.path_evidence_ids}.intersection({
-        BinaryEvidenceFactKind.DATAFLOW,
-        BinaryEvidenceFactKind.CALLSITE,
-        BinaryEvidenceFactKind.RETURN_USE,
-    }):
+    if not {facts[item].kind for item in hypothesis.path_evidence_ids}.intersection(
+        {
+            BinaryEvidenceFactKind.DATAFLOW,
+            BinaryEvidenceFactKind.CALLSITE,
+            BinaryEvidenceFactKind.RETURN_USE,
+        }
+    ):
         raise ValueError("continuation hypothesis lacks an address-backed path")
-    if {facts[item].kind for item in hypothesis.sink_evidence_ids} != {BinaryEvidenceFactKind.SECURITY_SINK}:
+    if {facts[item].kind for item in hypothesis.sink_evidence_ids} != {
+        BinaryEvidenceFactKind.SECURITY_SINK
+    }:
         raise ValueError("continuation sink citations must be security-sink facts")
-    if any(facts[item].kind is not BinaryEvidenceFactKind.GUARD for item in hypothesis.guard_evidence_ids):
+    if any(
+        facts[item].kind is not BinaryEvidenceFactKind.GUARD
+        for item in hypothesis.guard_evidence_ids
+    ):
         raise ValueError("continuation guard citations must be guard facts")
     if not set(hypothesis.call_path_function_ids).issubset(functions):
         raise ValueError("continuation hypothesis cites an unknown function")
@@ -791,7 +915,11 @@ def _validate_combined_hypothesis(
         raise ValueError("continuation hypothesis omits the admitted root")
     if not set(hypothesis.cfg_path_addresses).issubset(addresses):
         raise ValueError("continuation hypothesis cites an unknown address")
-    guard_ids = {identifier for identifier, fact in facts.items() if fact.kind is BinaryEvidenceFactKind.GUARD}
+    guard_ids = {
+        identifier
+        for identifier, fact in facts.items()
+        if fact.kind is BinaryEvidenceFactKind.GUARD
+    }
     if hypothesis.no_applicable_guard and guard_ids:
         raise ValueError("continuation hypothesis ignored supplied guard evidence")
 
@@ -813,7 +941,9 @@ def _select_context(
     elif request.kind is BinaryCodeContextRequestKind.DIRECT_CALLER:
         matches = tuple(item for item in edges if item.callee.function_id == function.function_id)
         if request.related_function_id:
-            matches = tuple(item for item in matches if item.caller.function_id == request.related_function_id)
+            matches = tuple(
+                item for item in matches if item.caller.function_id == request.related_function_id
+            )
         if not matches:
             return (), (), {}, "no matching direct caller was recovered in frozen IR"
         selected_edges = matches[:8]
@@ -823,7 +953,9 @@ def _select_context(
     elif request.kind is BinaryCodeContextRequestKind.DIRECT_CALLEE:
         matches = tuple(item for item in edges if item.caller.function_id == function.function_id)
         if request.related_function_id:
-            matches = tuple(item for item in matches if item.callee.function_id == request.related_function_id)
+            matches = tuple(
+                item for item in matches if item.callee.function_id == request.related_function_id
+            )
         if not matches:
             return (), (), {}, "no matching direct callee was recovered in frozen IR"
         selected_edges = matches[:8]
@@ -837,12 +969,16 @@ def _select_context(
         focus[function.function_id].add(block.start_address)
         selected = (function,)
     elif request.kind is BinaryCodeContextRequestKind.DEFINITION_USE_CHAIN:
-        variable_addresses = _definition_use_addresses(function, request.variable or "")
+        variables = (request.variable or "", *request.supporting_variables)
+        variable_addresses = set().union(
+            *(_definition_use_addresses(function, variable) for variable in variables)
+        )
         if not variable_addresses:
             return (), (), {}, "the requested variable has no definition/use in frozen IR"
         focus[function.function_id].update(variable_addresses)
         if request.address is not None:
             focus[function.function_id].add(request.address)
+        focus[function.function_id].update(request.supporting_addresses)
         if request.block_id is not None:
             requested_block = next(
                 item for item in function.blocks if item.block_id == request.block_id
@@ -855,7 +991,8 @@ def _select_context(
                 instruction
                 for block in function.blocks
                 for instruction in block.instructions
-                if instruction.address == request.address and instruction.operation is IROperation.CALL
+                if instruction.address == request.address
+                and instruction.operation is IROperation.CALL
             ),
             None,
         )
@@ -867,7 +1004,12 @@ def _select_context(
                 if call.result in instruction.operands or instruction.result == call.result:
                     focus[function.function_id].add(instruction.address)
         selected = (function,)
-        selected_edges = tuple(item for item in edges if item.caller.function_id == function.function_id and item.instruction.address == call.address)
+        selected_edges = tuple(
+            item
+            for item in edges
+            if item.caller.function_id == function.function_id
+            and item.instruction.address == call.address
+        )
     else:
         return (), (), {}, "unsupported context request kind"
     return selected, selected_edges, focus, None
@@ -878,6 +1020,7 @@ def _build_slices(
     *,
     focus: Mapping[str, set[int]],
     anchors: Mapping[str, set[int]],
+    variable_anchors: Mapping[str, set[int]],
     policy: BinaryCodeContextPolicy,
 ) -> tuple[tuple[BinaryCodeContextFunctionSlice, ...], tuple[str, ...]]:
     slices: list[BinaryCodeContextFunctionSlice] = []
@@ -885,15 +1028,28 @@ def _build_slices(
     for function in functions[:8]:
         target_addresses = focus.get(function.function_id, set())
         anchor_addresses = anchors.get(function.function_id, set())
+        variable_anchor_addresses = variable_anchors.get(function.function_id, set())
         anchor_indices = {
             index
             for index, block in enumerate(function.blocks)
-            if any(block.start_address <= address < block.end_address for address in anchor_addresses)
+            if any(
+                block.start_address <= address < block.end_address for address in anchor_addresses
+            )
+        }
+        variable_anchor_indices = {
+            index
+            for index, block in enumerate(function.blocks)
+            if any(
+                block.start_address <= address < block.end_address
+                for address in variable_anchor_addresses
+            )
         }
         direct_indices = {
             index
             for index, block in enumerate(function.blocks)
-            if any(block.start_address <= address < block.end_address for address in target_addresses)
+            if any(
+                block.start_address <= address < block.end_address for address in target_addresses
+            )
         }
         neighbor_indices: set[int] = set()
         if direct_indices:
@@ -903,25 +1059,28 @@ def _build_slices(
                 if index + 1 < len(function.blocks):
                     neighbor_indices.add(index + 1)
         signal_indices = {
-            index for index, block in enumerate(function.blocks)
+            index
+            for index, block in enumerate(function.blocks)
             if any(_is_signal(item) for item in block.instructions)
         }
 
         def block_priority(index: int) -> tuple[int, int]:
             if index in anchor_indices:
                 priority = 0
-            elif index in direct_indices:
+            elif index in variable_anchor_indices:
                 priority = 1
-            elif index in neighbor_indices or index in signal_indices:
+            elif index in direct_indices:
                 priority = 2
-            else:
+            elif index in neighbor_indices or index in signal_indices:
                 priority = 3
+            else:
+                priority = 4
             return priority, function.blocks[index].start_address
 
         selected_indices = sorted(
             range(len(function.blocks)),
             key=block_priority,
-        )[:policy.maximum_blocks_per_response]
+        )[: policy.maximum_blocks_per_response]
         remaining_instructions = policy.maximum_instructions_per_response
         bounded_blocks: list[IRBasicBlock] = []
         for index in selected_indices:
@@ -935,13 +1094,15 @@ def _build_slices(
             )
             if not instructions:
                 continue
-            bounded_blocks.append(IRBasicBlock(
-                block_id=block.block_id,
-                start_address=block.start_address,
-                end_address=block.end_address,
-                instructions=instructions,
-                successors=block.successors,
-            ))
+            bounded_blocks.append(
+                IRBasicBlock(
+                    block_id=block.block_id,
+                    start_address=block.start_address,
+                    end_address=block.end_address,
+                    instructions=instructions,
+                    successors=block.successors,
+                )
+            )
             remaining_instructions -= len(instructions)
         if not bounded_blocks:
             continue
@@ -951,22 +1112,28 @@ def _build_slices(
             policy.maximum_pseudocode_bytes_per_function,
         )
         included = {item.block_id for item in bounded_blocks}
-        omitted = tuple(sorted(item.block_id for item in function.blocks if item.block_id not in included))
+        omitted = tuple(
+            sorted(item.block_id for item in function.blocks if item.block_id not in included)
+        )
         if omitted:
             omissions.append(f"{function.function_id}: omitted {len(omitted)} non-selected blocks")
         if truncated:
-            omissions.append(f"{function.function_id}: pseudocode truncated; normalized IR retained")
-        slices.append(BinaryCodeContextFunctionSlice(
-            function_id=function.function_id,
-            function_name=function.name,
-            start_address=function.start_address,
-            end_address=function.end_address,
-            pseudocode_excerpt=pseudocode,
-            pseudocode_sha256=function.pseudocode_sha256,
-            pseudocode_truncated=truncated,
-            blocks=tuple(bounded_blocks),
-            omitted_block_ids=omitted,
-        ))
+            omissions.append(
+                f"{function.function_id}: pseudocode truncated; normalized IR retained"
+            )
+        slices.append(
+            BinaryCodeContextFunctionSlice(
+                function_id=function.function_id,
+                function_name=function.name,
+                start_address=function.start_address,
+                end_address=function.end_address,
+                pseudocode_excerpt=pseudocode,
+                pseudocode_sha256=function.pseudocode_sha256,
+                pseudocode_truncated=truncated,
+                blocks=tuple(bounded_blocks),
+                omitted_block_ids=omitted,
+            )
+        )
     return tuple(slices), tuple(sorted(set(omissions)))
 
 
@@ -977,7 +1144,11 @@ def _bounded_instructions(
 ) -> tuple[IRInstruction, ...]:
     if len(instructions) <= maximum:
         return instructions
-    indices = {index for index, item in enumerate(instructions) if item.address in targets or _is_signal(item)}
+    indices = {
+        index
+        for index, item in enumerate(instructions)
+        if item.address in targets or _is_signal(item)
+    }
     expanded = set(indices)
     for index in tuple(indices):
         expanded.update(range(max(0, index - 3), min(len(instructions), index + 4)))
@@ -991,9 +1162,7 @@ def _definition_use_addresses(function: IRFunction, variable: str) -> set[int]:
     """Recover a bounded intra-function definition/use closure for one IR variable."""
 
     instructions = tuple(
-        instruction
-        for block in function.blocks
-        for instruction in block.instructions
+        instruction for block in function.blocks for instruction in block.instructions
     )
     variables = {variable}
     selected: set[tuple[int, int]] = set()
@@ -1031,10 +1200,17 @@ def _facts_for_slices(
                 fact = _fact(function.function_id, block.block_id, instruction)
                 if fact.fact_id not in excluded:
                     facts.append(fact)
-    return tuple(sorted(
-        {item.fact_id: item for item in facts}.values(),
-        key=lambda item: (item.address, item.instruction_index, item.function_id, item.kind.value),
-    ))
+    return tuple(
+        sorted(
+            {item.fact_id: item for item in facts}.values(),
+            key=lambda item: (
+                item.address,
+                item.instruction_index,
+                item.function_id,
+                item.kind.value,
+            ),
+        )
+    )
 
 
 def _remove_base_evidence(
@@ -1065,14 +1241,17 @@ def _remove_base_evidence(
             continue
         updates: dict[str, object] = {"blocks": tuple(blocks)}
         if function.function_id in base_function_ids:
-            updates.update({
-                "pseudocode_excerpt": "",
-                "pseudocode_truncated": True,
-            })
+            updates.update(
+                {
+                    "pseudocode_excerpt": "",
+                    "pseudocode_truncated": True,
+                }
+            )
         result.append(function.model_copy(update=updates))
     omissions = (
         (f"deduplicated {deduplicated} instructions already present in the initial capsule",)
-        if deduplicated else ()
+        if deduplicated
+        else ()
     )
     return tuple(result), omissions
 
@@ -1097,15 +1276,24 @@ def _fit_response_budget(
         return current, edges, facts, tuple(current_omissions)
     stripped = []
     for item in current:
-        stripped.append(item.model_copy(update={
-            "pseudocode_excerpt": "",
-            "pseudocode_truncated": True,
-        }))
+        stripped.append(
+            item.model_copy(
+                update={
+                    "pseudocode_excerpt": "",
+                    "pseudocode_truncated": True,
+                }
+            )
+        )
     current = tuple(stripped)
     current_omissions.append("response byte budget omitted pseudocode; normalized IR retained")
-    while facts and _context_evidence_bytes(current, edges, facts, tuple(sorted(set(current_omissions)))) > maximum:
+    while (
+        facts
+        and _context_evidence_bytes(current, edges, facts, tuple(sorted(set(current_omissions))))
+        > maximum
+    ):
         candidates = tuple(
-            item for item in facts
+            item
+            for item in facts
             if (item.function_id, item.address, item.instruction_index)
             not in protected_instruction_keys
         )
@@ -1118,7 +1306,8 @@ def _fit_response_budget(
             blocks = []
             for block in function.blocks:
                 instructions = tuple(
-                    item for item in block.instructions
+                    item
+                    for item in block.instructions
                     if not (
                         function.function_id == drop.function_id
                         and item.address == drop.address
@@ -1165,24 +1354,33 @@ def _request_evidence_retained(
         for instruction in block.instructions
     )
     combined = base_instructions + instructions
-    if request.address is not None and not any(
-        item.address == request.address for item in combined
+    requested_addresses = tuple(
+        address
+        for address in (request.address, *request.supporting_addresses)
+        if address is not None
+    )
+    if any(
+        not any(item.address == address for item in combined) for address in requested_addresses
     ):
         return False
-    if request.variable is not None:
-        definitions = tuple(item for item in combined if item.result == request.variable)
-        uses = tuple(item for item in combined if request.variable in item.operands)
+    requested_variables = tuple(
+        variable
+        for variable in (request.variable, *request.supporting_variables)
+        if variable is not None
+    )
+    for variable in requested_variables:
+        definitions = tuple(item for item in combined if item.result == variable)
+        uses = tuple(item for item in combined if variable in item.operands)
         new_target_evidence = tuple(
-            item
-            for item in instructions
-            if item.result == request.variable or request.variable in item.operands
+            item for item in instructions if item.result == variable or variable in item.operands
         )
         if not definitions or not uses or not new_target_evidence:
             return False
     if request.kind is BinaryCodeContextRequestKind.CALLSITE_RETURN_USE:
         call = next(
             (
-                item for item in combined
+                item
+                for item in combined
                 if item.address == request.address
                 and item.operation is IROperation.CALL
                 and item.result is not None
@@ -1191,11 +1389,7 @@ def _request_evidence_retained(
         )
         if call is None or not any(call.result in item.operands for item in instructions):
             return False
-    response_block_ids = {
-        block.block_id
-        for function in slices
-        for block in function.blocks
-    }
+    response_block_ids = {block.block_id for function in slices for block in function.blocks}
     if request.kind is BinaryCodeContextRequestKind.BASIC_BLOCK_NEIGHBORHOOD:
         if request.block_id not in response_block_ids:
             return False
@@ -1213,27 +1407,46 @@ def _protected_request_instruction_keys(
     functions: tuple[IRFunction, ...],
 ) -> set[tuple[str, int, int]]:
     protected: set[tuple[str, int, int]] = set()
-    if request.variable is not None:
+    requested_variables = {
+        variable
+        for variable in (request.variable, *request.supporting_variables)
+        if variable is not None
+    }
+    if requested_variables:
         protected.update(
             (function.function_id, instruction.address, instruction.index)
             for function in functions
             for block in function.blocks
             for instruction in block.instructions
-            if instruction.result == request.variable or request.variable in instruction.operands
+            if instruction.result in requested_variables
+            or bool(set(instruction.operands).intersection(requested_variables))
         )
-    elif request.address is not None:
-        matches = tuple(
-            (function.function_id, instruction)
-            for function in functions
-            for block in function.blocks
-            for instruction in block.instructions
-            if instruction.address == request.address
-            and instruction.operation is not IROperation.UNKNOWN
-        )
-        protected.update(
-            (function_id, instruction.address, instruction.index)
-            for function_id, instruction in matches[:8]
-        )
+    requested_addresses = {
+        address
+        for address in (request.address, *request.supporting_addresses)
+        if address is not None
+    }
+    if requested_addresses:
+        for address in sorted(requested_addresses):
+            matches = sorted(
+                (
+                    (function.function_id, instruction)
+                    for function in functions
+                    for block in function.blocks
+                    for instruction in block.instructions
+                    if instruction.address == address
+                ),
+                key=lambda item: (
+                    not _is_signal(item[1]),
+                    item[1].operation is IROperation.UNKNOWN,
+                    item[1].index,
+                    item[0],
+                ),
+            )
+            protected.update(
+                (function_id, instruction.address, instruction.index)
+                for function_id, instruction in matches[:2]
+            )
     return protected
 
 
@@ -1245,6 +1458,7 @@ def _request_anchor_addresses(
     for function in functions:
         if request.address is not None:
             anchors[function.function_id].add(request.address)
+        anchors[function.function_id].update(request.supporting_addresses)
         if request.block_id is not None:
             block = next(
                 (item for item in function.blocks if item.block_id == request.block_id),
@@ -1252,14 +1466,29 @@ def _request_anchor_addresses(
             )
             if block is not None:
                 anchors[function.function_id].add(block.start_address)
-        if request.variable is not None:
-            anchors[function.function_id].update(
-                instruction.address
-                for block in function.blocks
-                for instruction in block.instructions
-                if instruction.result == request.variable
-                or request.variable in instruction.operands
-            )
+    return anchors
+
+
+def _request_variable_anchor_addresses(
+    request: BinaryCodeContextRequest,
+    functions: tuple[IRFunction, ...],
+) -> dict[str, set[int]]:
+    anchors: dict[str, set[int]] = defaultdict(set)
+    requested_variables = {
+        variable
+        for variable in (request.variable, *request.supporting_variables)
+        if variable is not None
+    }
+    if not requested_variables:
+        return anchors
+    for function in functions:
+        anchors[function.function_id].update(
+            instruction.address
+            for block in function.blocks
+            for instruction in block.instructions
+            if instruction.result in requested_variables
+            or bool(set(instruction.operands).intersection(requested_variables))
+        )
     return anchors
 
 
@@ -1278,10 +1507,16 @@ def _recover_edges(ir: NormalizedBinaryIR) -> tuple[_RawEdge, ...]:
                 callee = _resolve_callee(instruction.callee, by_name, by_address)
                 if callee is not None:
                     edges.append(_RawEdge(caller, callee, instruction))
-    return tuple(sorted(
-        edges,
-        key=lambda item: (item.instruction.address, item.caller.function_id, item.callee.function_id),
-    ))
+    return tuple(
+        sorted(
+            edges,
+            key=lambda item: (
+                item.instruction.address,
+                item.caller.function_id,
+                item.callee.function_id,
+            ),
+        )
+    )
 
 
 def _resolve_callee(
@@ -1290,9 +1525,7 @@ def _resolve_callee(
     by_address: Mapping[int, IRFunction],
 ) -> IRFunction | None:
     candidates = {
-        item.function_id: item
-        for key in {name, name.lstrip("_")}
-        for item in by_name.get(key, [])
+        item.function_id: item for key in {name, name.lstrip("_")} for item in by_name.get(key, [])
     }
     if len(candidates) == 1:
         return next(iter(candidates.values()))
@@ -1308,9 +1541,12 @@ def _resolve_callee(
 
 def _fact(function_id: str, block_id: str, instruction: IRInstruction) -> BinaryEvidenceFact:
     kind = _fact_kind(instruction)
-    fact_id = "codefact_" + hashlib.sha256(
-        f"{function_id}:{instruction.address:x}:{instruction.index}:{kind.value}".encode()
-    ).hexdigest()[:20]
+    fact_id = (
+        "codefact_"
+        + hashlib.sha256(
+            f"{function_id}:{instruction.address:x}:{instruction.index}:{kind.value}".encode()
+        ).hexdigest()[:20]
+    )
     return BinaryEvidenceFact(
         fact_id=fact_id,
         kind=kind,
@@ -1416,9 +1652,8 @@ def _make_continuation_packet(
         "base_packet": packet.model_dump(mode="json"),
         "prior_assessment": prior_assessment.model_dump(mode="json"),
         "context_responses": tuple(item.model_dump(mode="json") for item in responses),
-        "total_evidence_bytes": packet.capsule.evidence_bytes + sum(
-            item.evidence_bytes for item in responses
-        ),
+        "total_evidence_bytes": packet.capsule.evidence_bytes
+        + sum(item.evidence_bytes for item in responses),
     }
     return DecompilerContinuationPacket(**payload, packet_sha256=_digest(payload))
 
@@ -1464,22 +1699,25 @@ def _make_result(
         terminal_status=status,
         terminal_assessment=terminal,
         entries=entries,
-        total_evidence_bytes=packet.capsule.evidence_bytes + sum(
-            item.response.evidence_bytes for item in entries
-        ),
+        total_evidence_bytes=packet.capsule.evidence_bytes
+        + sum(item.response.evidence_bytes for item in entries),
         sessions=1,
         model_calls=initial_usage.calls + sum(item.calls for item in continuation_usage),
-        input_tokens=initial_usage.input_tokens + sum(item.input_tokens for item in continuation_usage),
-        output_tokens=initial_usage.output_tokens + sum(item.output_tokens for item in continuation_usage),
+        input_tokens=initial_usage.input_tokens
+        + sum(item.input_tokens for item in continuation_usage),
+        output_tokens=initial_usage.output_tokens
+        + sum(item.output_tokens for item in continuation_usage),
         chain_sha256=(
-            entries[-1].chain_sha256
-            if entries else _digest(initial.model_dump(mode="json"))
+            entries[-1].chain_sha256 if entries else _digest(initial.model_dump(mode="json"))
         ),
     )
 
 
 def _validate_frozen_bindings(ir: NormalizedBinaryIR, packet: DecompilerHunterPacket) -> None:
-    if ir.ir_sha256 != packet.capsule.ir_sha256 or ir.snapshot_sha256 != packet.capsule.snapshot_sha256:
+    if (
+        ir.ir_sha256 != packet.capsule.ir_sha256
+        or ir.snapshot_sha256 != packet.capsule.snapshot_sha256
+    ):
         raise ValueError("context broker IR differs from the packet-bound frozen image")
     if tuple(sorted(item.function_id for item in ir.functions)) != packet.frozen_function_ids:
         raise ValueError("context broker function census differs from the Hunter packet")
@@ -1558,12 +1796,16 @@ def _context_evidence_bytes(
 ) -> int:
     if not functions and not edges and not facts and not omissions:
         return 0
-    return len(_canonical_json({
-        "functions": [item.model_dump(mode="json") for item in functions],
-        "call_edges": [item.model_dump(mode="json") for item in edges],
-        "facts": [item.model_dump(mode="json") for item in facts],
-        "omissions": list(omissions),
-    }))
+    return len(
+        _canonical_json(
+            {
+                "functions": [item.model_dump(mode="json") for item in functions],
+                "call_edges": [item.model_dump(mode="json") for item in edges],
+                "facts": [item.model_dump(mode="json") for item in facts],
+                "omissions": list(omissions),
+            }
+        )
+    )
 
 
 def _context_directory(store_root: Path, work_id: str) -> Path:
@@ -1597,7 +1839,9 @@ def _persist_entry(
     entry: DecompilerContextChainEntry,
     raw: tuple[str, ...],
 ) -> None:
-    _write_private_json(directory / f"entry-{entry.ordinal:02d}.json", entry.model_dump(mode="json"))
+    _write_private_json(
+        directory / f"entry-{entry.ordinal:02d}.json", entry.model_dump(mode="json")
+    )
     for index, response in enumerate(raw, start=1):
         _write_private_bytes(
             directory / f"entry-{entry.ordinal:02d}-raw-{index:02d}.txt",
