@@ -19,6 +19,7 @@ from .ir import (
     IRInstruction,
     IROperation,
     IRStringReference,
+    IRVirtualMethodReference,
     NormalizedBinaryIR,
     block_id,
     function_id,
@@ -110,6 +111,7 @@ class GhidraJSONAdapter:
         if schema_version not in {
             "ghidra-imageio-export-v1",
             "ghidra-imageio-export-v2",
+            "ghidra-imageio-export-v3",
         }:
             raise ValueError("unsupported Ghidra export schema")
         if payload.get("snapshot_sha256") != expected_snapshot_sha256:
@@ -117,7 +119,7 @@ class GhidraJSONAdapter:
         image = _mapping(payload.get("image"), label="Ghidra image")
         image_uuid = _canonical_uuid(image.get("uuid"))
         coverage = None
-        if schema_version == "ghidra-imageio-export-v2":
+        if schema_version in {"ghidra-imageio-export-v2", "ghidra-imageio-export-v3"}:
             coverage = _normalize_ghidra_coverage(
                 payload.get("function_coverage"),
                 image_uuid=image_uuid,
@@ -137,6 +139,14 @@ class GhidraJSONAdapter:
                 address_key="address",
                 value_key="value",
                 references_key="references",
+            ),
+            virtual_methods=(
+                _normalize_ghidra_virtual_methods(
+                    payload.get("virtual_methods", ()),
+                    image_uuid=image_uuid,
+                )
+                if schema_version == "ghidra-imageio-export-v3"
+                else ()
             ),
             functions=_normalize_functions(
                 payload.get("functions"),
@@ -191,6 +201,7 @@ class BinaryNinjaJSONAdapter:
                 value_key="text",
                 references_key="code_refs",
             ),
+            virtual_methods=(),
             functions=_normalize_functions(
                 payload.get("routines"),
                 image_uuid=image_uuid,
@@ -247,12 +258,25 @@ def _normalize_export(
     base_address: int,
     imports: tuple[str, ...],
     strings: tuple[IRStringReference, ...],
+    virtual_methods: tuple[IRVirtualMethodReference, ...],
     functions: tuple[IRFunction, ...],
     function_coverage: IRFunctionCoverageManifest | None,
     created_at: datetime | None,
 ) -> NormalizedBinaryIR:
     ordered_imports = tuple(sorted(set(imports)))
     ordered_strings = tuple(sorted(strings, key=lambda item: (item.address, item.value)))
+    ordered_virtual_methods = tuple(
+        sorted(
+            virtual_methods,
+            key=lambda item: (
+                item.target_address,
+                item.slot_offset,
+                item.vtable_address,
+                item.reference_address,
+                item.owner,
+            ),
+        )
+    )
     ordered_functions = tuple(sorted(functions, key=lambda item: item.start_address))
     if function_coverage is not None:
         selected = {
@@ -281,6 +305,7 @@ def _normalize_export(
         decompiler_version=decompiler_version,
         imports=ordered_imports,
         strings=ordered_strings,
+        virtual_methods=ordered_virtual_methods,
         functions=ordered_functions,
         function_coverage=function_coverage,
     )
@@ -295,6 +320,7 @@ def _normalize_export(
         decompiler_version=decompiler_version,
         imports=ordered_imports,
         strings=ordered_strings,
+        virtual_methods=ordered_virtual_methods,
         functions=ordered_functions,
         function_coverage=function_coverage,
         ir_sha256=digest,
@@ -410,6 +436,34 @@ def _normalize_strings(
             )
         )
     return tuple(strings)
+
+
+def _normalize_ghidra_virtual_methods(
+    raw: object,
+    *,
+    image_uuid: str,
+) -> tuple[IRVirtualMethodReference, ...]:
+    references: list[IRVirtualMethodReference] = []
+    for raw_reference in _sequence(raw, label="virtual methods"):
+        item = _mapping(raw_reference, label="virtual method")
+        target_address = _address(item.get("target_entry"))
+        references.append(
+            IRVirtualMethodReference(
+                owner=_text(item.get("owner"), label="vtable owner"),
+                vtable_symbol=_text(
+                    item.get("vtable_symbol"), label="vtable symbol"
+                ),
+                vtable_address=_address(item.get("vtable_address")),
+                address_point=_address(item.get("address_point")),
+                slot_offset=_non_negative_int(
+                    item.get("slot_offset"), label="vtable slot offset"
+                ),
+                reference_address=_address(item.get("reference_address")),
+                target_function_id=function_id(image_uuid, target_address),
+                target_address=target_address,
+            )
+        )
+    return tuple(references)
 
 
 def _normalize_functions(

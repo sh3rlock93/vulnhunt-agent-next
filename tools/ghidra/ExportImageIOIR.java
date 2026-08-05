@@ -41,6 +41,8 @@ import ghidra.program.model.pcode.PcodeBlockBasic;
 import ghidra.program.model.pcode.PcodeOp;
 import ghidra.program.model.pcode.Varnode;
 import ghidra.program.model.symbol.Reference;
+import ghidra.program.model.symbol.Symbol;
+import ghidra.program.model.symbol.SymbolIterator;
 
 public class ExportImageIOIR extends GhidraScript {
 	private static final int MAX_PSEUDOCODE_CHARS = 240000;
@@ -92,7 +94,7 @@ public class ExportImageIOIR extends GhidraScript {
 		}
 
 		JsonObject root = new JsonObject();
-		root.addProperty("schema_version", "ghidra-imageio-export-v2");
+		root.addProperty("schema_version", "ghidra-imageio-export-v3");
 		root.addProperty("decompiler_version", Application.getApplicationVersion());
 		root.addProperty("snapshot_sha256", snapshot);
 		JsonObject image = new JsonObject();
@@ -109,6 +111,7 @@ public class ExportImageIOIR extends GhidraScript {
 		root.add("function_coverage", coverageManifest(
 			census.rows, selected, snapshot, maxFunctions, coverageDepth,
 			maxEvidenceFunctions));
+		root.add("virtual_methods", virtualMethodReferences(selected));
 
 		DecompInterface decompiler = new DecompInterface();
 		DecompileOptions options = new DecompileOptions();
@@ -591,6 +594,68 @@ public class ExportImageIOIR extends GhidraScript {
 		return manifest;
 	}
 
+	private JsonArray virtualMethodReferences(List<CoverageRow> selected) {
+		TreeMap<Long, VtableSymbol> tables = new TreeMap<>();
+		SymbolIterator symbols = currentProgram.getSymbolTable().getAllSymbols(true);
+		while (symbols.hasNext()) {
+			Symbol symbol = symbols.next();
+			String qualified = symbol.getName(true);
+			String owner = vtableOwner(qualified);
+			if (owner != null && symbol.getAddress() != null && symbol.getAddress().isMemoryAddress()) {
+				tables.putIfAbsent(
+					symbol.getAddress().getOffset(),
+					new VtableSymbol(owner, qualified, symbol.getAddress().getOffset()));
+			}
+		}
+		int pointerSize = currentProgram.getDefaultPointerSize();
+		if (pointerSize != 8) return new JsonArray();
+		TreeMap<String, JsonObject> ordered = new TreeMap<>();
+		for (CoverageRow row : selected) {
+			Function function = row.function;
+			String owner = functionOwner(function.getName(true));
+			if (owner == null) continue;
+			for (Reference reference :
+					currentProgram.getReferenceManager().getReferencesTo(function.getEntryPoint())) {
+				if (!reference.getReferenceType().isData()) continue;
+				Address fromAddress = reference.getFromAddress();
+				if (fromAddress == null || !fromAddress.isMemoryAddress()) continue;
+				long from = fromAddress.getOffset();
+				Map.Entry<Long, VtableSymbol> candidate = tables.floorEntry(from);
+				if (candidate == null || !candidate.getValue().owner.equals(owner)) continue;
+				VtableSymbol table = candidate.getValue();
+				long addressPoint = table.address + 2L * pointerSize;
+				long slotOffset = from - addressPoint;
+				if (slotOffset < 0 || slotOffset > 64L * 1024L ||
+						slotOffset % pointerSize != 0) continue;
+				JsonObject json = new JsonObject();
+				json.addProperty("owner", owner);
+				json.addProperty("vtable_symbol", table.symbol);
+				json.addProperty("vtable_address", hex(table.address));
+				json.addProperty("address_point", hex(addressPoint));
+				json.addProperty("slot_offset", slotOffset);
+				json.addProperty("reference_address", hex(from));
+				json.addProperty("target_entry", address(function.getEntryPoint()));
+				String key = hex(function.getEntryPoint().getOffset()) + ":" +
+					hex(slotOffset) + ":" + hex(table.address) + ":" + hex(from);
+				ordered.putIfAbsent(key, json);
+			}
+		}
+		JsonArray references = new JsonArray();
+		for (JsonObject reference : ordered.values()) references.add(reference);
+		return references;
+	}
+
+	private String vtableOwner(String qualified) {
+		String suffix = "::vtable";
+		return qualified.endsWith(suffix) && qualified.length() > suffix.length() ?
+			qualified.substring(0, qualified.length() - suffix.length()) : null;
+	}
+
+	private String functionOwner(String qualified) {
+		int separator = qualified.lastIndexOf("::");
+		return separator > 0 ? qualified.substring(0, separator) : null;
+	}
+
 	private int parserScore(String name) {
 		String lowered = name.toLowerCase(Locale.ROOT);
 		int score = 0;
@@ -803,6 +868,18 @@ public class ExportImageIOIR extends GhidraScript {
 			json.add("selection_reasons", reasons);
 			if (omissionReason != null) json.addProperty("omission_reason", omissionReason);
 			return json;
+		}
+	}
+
+	private static class VtableSymbol {
+		final String owner;
+		final String symbol;
+		final long address;
+
+		VtableSymbol(String owner, String symbol, long address) {
+			this.owner = owner;
+			this.symbol = symbol;
+			this.address = address;
 		}
 	}
 }

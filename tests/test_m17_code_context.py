@@ -91,12 +91,21 @@ def _function(address: int, name: str, instructions: list[dict[str, Any]]) -> di
     }
 
 
-def _fixture(tmp_path, *, extra_functions: list[dict[str, Any]] | None = None):
+def _fixture(
+    tmp_path,
+    *,
+    extra_functions: list[dict[str, Any]] | None = None,
+    virtual_methods: list[dict[str, Any]] | None = None,
+):
     caller = 0x100001000
     worker = 0x100002000
     sink = 0x100003000
     payload: dict[str, Any] = {
-        "schema_version": "ghidra-imageio-export-v1",
+        "schema_version": (
+            "ghidra-imageio-export-v3"
+            if virtual_methods is not None
+            else "ghidra-imageio-export-v1"
+        ),
         "decompiler_version": "11.4",
         "snapshot_sha256": _SNAPSHOT,
         "image": {
@@ -168,6 +177,31 @@ def _fixture(tmp_path, *, extra_functions: list[dict[str, Any]] | None = None):
             *(extra_functions or []),
         ],
     }
+    if virtual_methods is not None:
+        payload["virtual_methods"] = virtual_methods
+        selected_functions = payload["functions"]
+        payload["function_coverage"] = {
+            "schema_version": "ghidra-function-coverage-v1",
+            "snapshot_sha256": _SNAPSHOT,
+            "maximum_functions": len(selected_functions),
+            "maximum_evidence_functions": len(selected_functions),
+            "callgraph_depth": 0,
+            "warnings": [],
+            "functions": [
+                {
+                    "entry": function["entry"],
+                    "size": function["size"],
+                    "name": function["name"],
+                    "direct_strings": [],
+                    "callers": [],
+                    "callees": [],
+                    "selected": True,
+                    "selection_tier": "fallback",
+                    "selection_reasons": ["parser_score_fallback:0"],
+                }
+                for function in selected_functions
+            ],
+        }
     worker_instructions = payload["functions"][1]["blocks"][0]["instructions"]
     payload["functions"][1]["blocks"] = [
         {
@@ -319,6 +353,19 @@ def _virtual_dispatch_functions(*, selector_hint: bool = True) -> list[dict[str,
         "/* virtual OSStatus PNGReadPlugin::decodeImageImp(arg1, arg2, arg3, arg4, arg5) */"
     )
     return [caller, target, sibling]
+
+
+def _virtual_method_reference(*, slot_offset: int = 0xD8) -> dict[str, Any]:
+    address_point = 0x200000010
+    return {
+        "owner": "KTXReadPlugin",
+        "vtable_symbol": "KTXReadPlugin::vtable",
+        "vtable_address": "0x200000000",
+        "address_point": hex(address_point),
+        "slot_offset": slot_offset,
+        "reference_address": hex(address_point + slot_offset),
+        "target_entry": "0x100005000",
+    }
 
 
 def _needs(packet, request: BinaryCodeContextRequest) -> DecompilerHunterAssessment:
@@ -551,6 +598,63 @@ def test_virtual_selector_caller_recovers_dispatch_and_dominating_guard(tmp_path
         for instruction in block.instructions
     )
     assert response.evidence_bytes <= 32 * 1024
+
+
+def test_virtual_vtable_caller_binds_exact_owner_and_slot(tmp_path) -> None:
+    ir, packet, _, _, _ = _fixture(
+        tmp_path,
+        extra_functions=_virtual_dispatch_functions(),
+        virtual_methods=[_virtual_method_reference()],
+    )
+    target = next(item for item in ir.functions if item.start_address == 0x100005000)
+    caller = next(item for item in ir.functions if item.start_address == 0x100004000)
+    request = _request(
+        packet,
+        BinaryCodeContextRequestKind.DIRECT_CALLER,
+        function_id=target.function_id,
+        related=caller.function_id,
+        maximum_bytes=32 * 1024,
+    )
+
+    first = resolve_binary_code_context(ir=ir, packet=packet, request=request)
+    second = resolve_binary_code_context(ir=ir, packet=packet, request=request)
+
+    assert first == second
+    assert len(first.call_edges) == 1
+    edge = first.call_edges[0]
+    assert edge.resolution is BinaryCodeContextEdgeResolution.VIRTUAL_VTABLE
+    assert edge.selector == "decodeImageImp"
+    assert edge.dispatch_candidate_count == 1
+    assert edge.receiver_owner == "KTXReadPlugin"
+    assert edge.vtable_symbol == "KTXReadPlugin::vtable"
+    assert edge.vtable_address == 0x200000000
+    assert edge.vtable_address_point == 0x200000010
+    assert edge.vtable_slot_offset == 0xD8
+    assert edge.vtable_reference_address == 0x2000000E8
+
+
+def test_virtual_vtable_mismatched_slot_remains_selector_only(tmp_path) -> None:
+    ir, packet, _, _, _ = _fixture(
+        tmp_path,
+        extra_functions=_virtual_dispatch_functions(),
+        virtual_methods=[_virtual_method_reference(slot_offset=0xE0)],
+    )
+    target = next(item for item in ir.functions if item.start_address == 0x100005000)
+    caller = next(item for item in ir.functions if item.start_address == 0x100004000)
+    request = _request(
+        packet,
+        BinaryCodeContextRequestKind.DIRECT_CALLER,
+        function_id=target.function_id,
+        related=caller.function_id,
+    )
+
+    response = resolve_binary_code_context(ir=ir, packet=packet, request=request)
+
+    edge = response.call_edges[0]
+    assert edge.resolution is BinaryCodeContextEdgeResolution.VIRTUAL_SELECTOR
+    assert edge.dispatch_candidate_count == 2
+    assert edge.receiver_owner is None
+    assert edge.vtable_slot_offset is None
 
 
 def test_virtual_selector_caller_requires_a_frozen_selector_hint(tmp_path) -> None:

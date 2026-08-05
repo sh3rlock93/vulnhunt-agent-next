@@ -36,10 +36,17 @@ from .decompiler_hunter import (
     DecompilerHunterPacket,
     validate_decompiler_hunter_safe_output,
 )
-from .ir import IRBasicBlock, IRFunction, IRInstruction, IROperation, NormalizedBinaryIR
+from .ir import (
+    IRBasicBlock,
+    IRFunction,
+    IRInstruction,
+    IROperation,
+    IRVirtualMethodReference,
+    NormalizedBinaryIR,
+)
 
-DECOMPILER_CONTEXT_PROMPT_VERSION: Literal["decompiler-code-context-v4"] = (
-    "decompiler-code-context-v4"
+DECOMPILER_CONTEXT_PROMPT_VERSION: Literal["decompiler-code-context-v5"] = (
+    "decompiler-code-context-v5"
 )
 _MAX_RAW_RESPONSE_BYTES = 128 * 1024
 _MAX_PACKET_BYTES = 768 * 1024
@@ -82,8 +89,11 @@ frozen normalized-IR accesses to those offsets; prose field names or offsets do
 not select evidence. A call edge marked virtual_selector proves a compatible
 selector dispatch site, not a unique runtime target; retain its candidate count
 and require format/owner evidence before claiming the exact implementation is
-reachable. Dominating guard block IDs are CFG-derived and may be used only with
-their supplied address-backed guard facts. Return only the
+reachable. A virtual_vtable edge additionally proves that the target owner's
+address-backed Itanium vtable contains the selected function at the recovered
+slot. It does not by itself prove that attacker-controlled input selects that
+owner at runtime. Dominating guard block IDs are CFG-derived and may be used
+only with their supplied address-backed guard facts. Return only the
 DecompilerHunterAssessment JSON object."""
 )
 
@@ -97,6 +107,7 @@ class BinaryCodeContextStatus(StrEnum):
 class BinaryCodeContextEdgeResolution(StrEnum):
     DIRECT = "direct"
     VIRTUAL_SELECTOR = "virtual_selector"
+    VIRTUAL_VTABLE = "virtual_vtable"
 
 
 class BinaryCodeContextRejection(StrEnum):
@@ -160,17 +171,52 @@ class BinaryCodeContextEdge(DomainModel):
     resolution: BinaryCodeContextEdgeResolution = BinaryCodeContextEdgeResolution.DIRECT
     selector: str | None = Field(default=None, pattern=r"^[~A-Za-z_][A-Za-z0-9_]{0,159}$")
     dispatch_candidate_count: int = Field(default=1, ge=1, le=10000)
+    receiver_owner: str | None = Field(default=None, min_length=1, max_length=500)
+    vtable_symbol: str | None = Field(default=None, min_length=1, max_length=1000)
+    vtable_address: int | None = Field(default=None, ge=0)
+    vtable_address_point: int | None = Field(default=None, ge=0)
+    vtable_slot_offset: int | None = Field(default=None, ge=0, le=64 * 1024)
+    vtable_reference_address: int | None = Field(default=None, ge=0)
     dominating_guard_block_ids: tuple[str, ...] = Field(default=(), max_length=16)
 
     @model_validator(mode="after")
     def validate_resolution(self) -> "BinaryCodeContextEdge":
         if tuple(sorted(set(self.dominating_guard_block_ids))) != self.dominating_guard_block_ids:
             raise ValueError("context-edge dominating guard blocks must be sorted and unique")
+        vtable_metadata = (
+            self.receiver_owner,
+            self.vtable_symbol,
+            self.vtable_address,
+            self.vtable_address_point,
+            self.vtable_slot_offset,
+            self.vtable_reference_address,
+        )
         if self.resolution is BinaryCodeContextEdgeResolution.DIRECT:
-            if self.selector is not None or self.dispatch_candidate_count != 1:
+            if (
+                self.selector is not None
+                or self.dispatch_candidate_count != 1
+                or any(item is not None for item in vtable_metadata)
+            ):
                 raise ValueError("direct context edge cannot carry virtual-dispatch metadata")
-        elif self.selector is None:
-            raise ValueError("virtual-selector context edge requires a selector")
+        elif self.resolution is BinaryCodeContextEdgeResolution.VIRTUAL_SELECTOR:
+            if any(item is not None for item in vtable_metadata):
+                raise ValueError("selector-only context edge cannot carry vtable metadata")
+            if self.selector is None:
+                raise ValueError("virtual-selector context edge requires a selector")
+        else:
+            if self.selector is None or any(item is None for item in vtable_metadata):
+                raise ValueError("virtual-vtable context edge requires complete binding metadata")
+            if self.dispatch_candidate_count != 1:
+                raise ValueError("virtual-vtable context edge must bind one implementation")
+            assert self.vtable_reference_address is not None
+            assert self.vtable_address_point is not None
+            assert self.vtable_slot_offset is not None
+            if self.vtable_reference_address != (
+                self.vtable_address_point + self.vtable_slot_offset
+            ):
+                raise ValueError(
+                    "virtual-vtable reference does not match its address point and slot"
+                )
         return self
 
 
@@ -241,7 +287,7 @@ class BinaryCodeContextResponse(DomainModel):
             if instruction.operation is IROperation.CALL
         }
         if any(
-            edge.resolution is BinaryCodeContextEdgeResolution.VIRTUAL_SELECTOR
+            edge.resolution is not BinaryCodeContextEdgeResolution.DIRECT
             and "CALLIND"
             not in instructions_by_key[
                 (edge.caller_function_id, edge.callsite_address)
@@ -249,7 +295,7 @@ class BinaryCodeContextResponse(DomainModel):
             for edge in self.call_edges
             if (edge.caller_function_id, edge.callsite_address) in instructions_by_key
         ):
-            raise ValueError("virtual-selector edge lacks an included indirect callsite")
+            raise ValueError("virtual edge lacks an included indirect callsite")
         fact_order = tuple(
             sorted(
                 self.facts,
@@ -287,6 +333,7 @@ class DecompilerContinuationPacket(DomainModel):
         "decompiler-code-context-v2",
         "decompiler-code-context-v3",
         "decompiler-code-context-v4",
+        "decompiler-code-context-v5",
     ] = DECOMPILER_CONTEXT_PROMPT_VERSION
     work_id: str = Field(pattern=r"^work_[0-9a-f]{64}$")
     root_id: str = Field(pattern=r"^coderoot_[0-9a-f]{20}$")
@@ -437,6 +484,12 @@ class _RawEdge:
     resolution: BinaryCodeContextEdgeResolution = BinaryCodeContextEdgeResolution.DIRECT
     selector: str | None = None
     dispatch_candidate_count: int = 1
+    receiver_owner: str | None = None
+    vtable_symbol: str | None = None
+    vtable_address: int | None = None
+    vtable_address_point: int | None = None
+    vtable_slot_offset: int | None = None
+    vtable_reference_address: int | None = None
     dominating_guard_block_ids: tuple[str, ...] = ()
 
 
@@ -633,6 +686,7 @@ def resolve_binary_code_context(
         request,
         functions=functions,
         edges=edges,
+        virtual_methods=ir.virtual_methods,
     )
     if unavailable is not None:
         return _empty_response(
@@ -687,6 +741,12 @@ def resolve_binary_code_context(
                     resolution=item.resolution,
                     selector=item.selector,
                     dispatch_candidate_count=item.dispatch_candidate_count,
+                    receiver_owner=item.receiver_owner,
+                    vtable_symbol=item.vtable_symbol,
+                    vtable_address=item.vtable_address,
+                    vtable_address_point=item.vtable_address_point,
+                    vtable_slot_offset=item.vtable_slot_offset,
+                    vtable_reference_address=item.vtable_reference_address,
                     dominating_guard_block_ids=item.dominating_guard_block_ids,
                 )
                 for item in selected_edges
@@ -1024,6 +1084,7 @@ def _select_context(
     *,
     functions: Mapping[str, IRFunction],
     edges: tuple[_RawEdge, ...],
+    virtual_methods: tuple[IRVirtualMethodReference, ...],
 ) -> tuple[tuple[IRFunction, ...], tuple[_RawEdge, ...], dict[str, set[int]], str | None]:
     function = functions.get(request.function_id or "")
     if function is None:
@@ -1045,7 +1106,12 @@ def _select_context(
                 callers = tuple(
                     item for item in callers if item.function_id == request.related_function_id
                 )
-            matches = _recover_virtual_callers(function, callers, tuple(functions.values()))
+            matches = _recover_virtual_callers(
+                function,
+                callers,
+                tuple(functions.values()),
+                virtual_methods,
+            )
         if not matches:
             return (), (), {}, "no matching direct caller was recovered in frozen IR"
         selected_edges = matches[:8]
@@ -1066,7 +1132,12 @@ def _select_context(
             )
             if not matches:
                 related = functions[request.related_function_id]
-                virtual = _recover_virtual_callers(related, (function,), tuple(functions.values()))
+                virtual = _recover_virtual_callers(
+                    related,
+                    (function,),
+                    tuple(functions.values()),
+                    virtual_methods,
+                )
                 matches = tuple(
                     item for item in virtual if item.caller.function_id == function.function_id
                 )
@@ -1972,7 +2043,10 @@ def _protected_request_instruction_keys(
             for instruction in block.instructions
             if instruction.operation in {IROperation.COMPARE, IROperation.BRANCH}
         )
-        if edge.resolution is BinaryCodeContextEdgeResolution.VIRTUAL_SELECTOR:
+        if edge.resolution in {
+            BinaryCodeContextEdgeResolution.VIRTUAL_SELECTOR,
+            BinaryCodeContextEdgeResolution.VIRTUAL_VTABLE,
+        }:
             protected.update(_virtual_dispatch_support_keys(edge))
     return protected
 
@@ -2138,6 +2212,7 @@ def _recover_virtual_callers(
     callee: IRFunction,
     callers: tuple[IRFunction, ...],
     functions: tuple[IRFunction, ...],
+    virtual_methods: tuple[IRVirtualMethodReference, ...],
 ) -> tuple[_RawEdge, ...]:
     """Recover a bounded selector-compatible dispatch edge from frozen IR.
 
@@ -2160,6 +2235,12 @@ def _recover_virtual_callers(
     )
     if candidate_count == 0:
         return ()
+    target_owner = _declared_method_owner(callee, selector)
+    target_vtables = tuple(
+        item
+        for item in virtual_methods
+        if item.target_function_id == callee.function_id and item.owner == target_owner
+    )
     expected_arguments = len(callee.parameters) + 1
     edges: list[_RawEdge] = []
     for caller in callers:
@@ -2176,14 +2257,33 @@ def _recover_virtual_callers(
                     continue
                 if instruction.operands[0] not in caller.parameters:
                     continue
+                slot_offset = _virtual_dispatch_slot_offset(caller, instruction)
+                bindings = tuple(
+                    item for item in target_vtables if item.slot_offset == slot_offset
+                )
+                binding = bindings[0] if len(bindings) == 1 else None
                 edges.append(
                     _RawEdge(
                         caller=caller,
                         callee=callee,
                         instruction=instruction,
-                        resolution=BinaryCodeContextEdgeResolution.VIRTUAL_SELECTOR,
+                        resolution=(
+                            BinaryCodeContextEdgeResolution.VIRTUAL_VTABLE
+                            if binding is not None
+                            else BinaryCodeContextEdgeResolution.VIRTUAL_SELECTOR
+                        ),
                         selector=selector,
-                        dispatch_candidate_count=candidate_count,
+                        dispatch_candidate_count=(1 if binding is not None else candidate_count),
+                        receiver_owner=None if binding is None else binding.owner,
+                        vtable_symbol=None if binding is None else binding.vtable_symbol,
+                        vtable_address=None if binding is None else binding.vtable_address,
+                        vtable_address_point=(
+                            None if binding is None else binding.address_point
+                        ),
+                        vtable_slot_offset=None if binding is None else binding.slot_offset,
+                        vtable_reference_address=(
+                            None if binding is None else binding.reference_address
+                        ),
                         dominating_guard_block_ids=_dominating_guard_block_ids(
                             caller,
                             instruction.address,
@@ -2203,14 +2303,50 @@ def _recover_virtual_callers(
 
 
 def _is_declared_selector_method(function: IRFunction, selector: str) -> bool:
+    return _declared_method_owner(function, selector) is not None
+
+
+def _declared_method_owner(function: IRFunction, selector: str) -> str | None:
     escaped = re.escape(selector)
-    return (
-        re.search(
-            rf"\b[A-Za-z_][A-Za-z0-9_]*::{escaped}\s*\(",
-            function.pseudocode[:1200],
-        )
-        is not None
+    match = re.search(
+        rf"\b([A-Za-z_][A-Za-z0-9_:]*)::{escaped}\s*\(",
+        function.pseudocode[:1200],
     )
+    return None if match is None else match.group(1)
+
+
+def _virtual_dispatch_slot_offset(
+    caller: IRFunction,
+    instruction: IRInstruction,
+) -> int | None:
+    block = next(
+        (
+            item
+            for item in caller.blocks
+            if any(
+                candidate.address == instruction.address
+                and candidate.index == instruction.index
+                for candidate in item.instructions
+            )
+        ),
+        None,
+    )
+    if block is None:
+        return None
+    preceding = sorted(
+        {item.address for item in block.instructions if item.address < instruction.address}
+    )
+    if not preceding:
+        return None
+    support_address = preceding[-1]
+    candidates = {
+        constant
+        for item in block.instructions
+        if item.address == support_address and item.operation is IROperation.ADD
+        for constant in item.constants
+        if 0 <= constant <= 64 * 1024 and constant % 8 == 0
+    }
+    return next(iter(candidates)) if len(candidates) == 1 else None
 
 
 def _caller_names_selector(function: IRFunction, selector: str) -> bool:

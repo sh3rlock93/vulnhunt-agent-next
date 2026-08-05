@@ -51,8 +51,8 @@ from .decompiler_hunter import (
 from .ir import NormalizedBinaryIR
 
 CODE_REVIEWER_QUEUE_SCOPE: Literal["decompiler-code-reviewer"] = "decompiler-code-reviewer"
-CODE_REVIEWER_PROMPT_VERSION: Literal["decompiler-code-reviewer-v3"] = (
-    "decompiler-code-reviewer-v3"
+CODE_REVIEWER_PROMPT_VERSION: Literal["decompiler-code-reviewer-v4"] = (
+    "decompiler-code-reviewer-v4"
 )
 _MAX_PACKET_BYTES = 1024 * 1024
 _MAX_RAW_RESPONSE_BYTES = 128 * 1024
@@ -74,7 +74,10 @@ one typed frozen-IR context slice; never request execution, an input, fuzzing,
 a VM, a file, a command, a network lookup, exploit material, or disclosure.
 Treat a virtual_selector edge as a compatible selector dispatch site, not a
 unique runtime target. The exact parser route still requires supplied
-format/type or owner evidence. A dominating_guard_block_ids entry is a
+format/type or owner evidence. A virtual_vtable edge proves that the named
+owner's address-backed Itanium vtable maps the recovered slot to the selected
+implementation, but not that attacker-controlled input selects that owner at
+runtime. A dominating_guard_block_ids entry is a
 CFG-derived dominance relation only for the address-backed guard facts in that
 included block; evaluate whether its predicate constrains the claimed values.
 The route_context_response is a deterministic baseline slice and does not
@@ -231,6 +234,7 @@ class BinaryCodeReviewerPacket(DomainModel):
         "decompiler-code-reviewer-v1",
         "decompiler-code-reviewer-v2",
         "decompiler-code-reviewer-v3",
+        "decompiler-code-reviewer-v4",
     ] = CODE_REVIEWER_PROMPT_VERSION
     queue_scope: Literal["decompiler-code-reviewer"] = CODE_REVIEWER_QUEUE_SCOPE
     reviewer_session_id: str = Field(pattern=r"^review_[0-9a-f]{64}$")
