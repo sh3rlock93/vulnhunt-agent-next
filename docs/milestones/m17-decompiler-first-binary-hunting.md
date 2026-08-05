@@ -1163,6 +1163,59 @@ remained zero. The next change must apply the same bounded validation feedback
 to continuation repair without changing schemas, retry counts, context budgets,
 or reportability.
 
+### M17-19 — Bounded continuation validation feedback
+
+#### Trigger
+
+M17-18 made the initial Hunter request schema-valid and advanced the real KTX
+root through two resolved continuation entries. The third continuation attached
+definition/use-only proof anchors to a `direct_callee` request on both permitted
+attempts. `DecompilerContinuationAgent` already retained the exact validator
+message for its terminal exception but did not expose it to the repair turn.
+
+#### Implementation scope
+
+- Add the most recent, already bounded 1,000-character continuation validation
+  error to the existing single repair prompt. Use the existing explicit
+  no-JSON error when parsing fails.
+- Bump the continuation prompt identity to v8 so persisted packet and chain
+  evidence reflects the behavior change.
+- Preserve request schemas, canonicalization, strict validation, two attempts
+  per continuation, six-continuation ceiling, 288 KiB evidence limit, root
+  ordering, reportability, and all static-only prohibitions.
+
+#### Exit criteria
+
+A model-contract test must replay a `direct_callee` request carrying a
+supporting address, confirm that the repair prompt contains the exact validator
+reason, and accept a corrected second response in the same root with two model
+calls. Focused tests must pass twice, followed by M14/M16/M17, full, type, lint,
+and unchanged M15 blind gates. The interrupted real KTX chain must then be
+replayed from the same M17-18 initial assessment and frozen M17-17 IR. No new
+decompilation, target execution, generated input, fuzzing, VM, or dynamic
+experiment is allowed.
+
+#### Current-ImageIO observation
+
+The interrupted KTX chain resumed from its two persisted entries without
+repeating either paid call. M17-19 accepted the third continuation in one call,
+and the fourth continuation used its one repair turn successfully before
+persisting a valid request. The chain reached all six entries with one root
+session, seven total model calls, 860,836 input tokens, 14,297 output tokens,
+and 219,742 evidence bytes. It recovered the exact forwarding wrapper, the
+underlying reader, destination checks, source-range comparisons, the effective
+length selection, and the positive-transfer successor.
+
+The terminal status remained `reviewer_inconclusive`: the fifth response named
+the required positive-transfer block but omitted 17 non-selected blocks, and
+the model mentioned that block only in rationale rather than setting
+`block_id`. The sixth same-variable request therefore selected no new facts and
+returned `proof_unavailable` without another model call. No vulnerability is
+claimed. Dynamic and new-decompiler counters remained zero. The next change
+must preserve newly supplied block IDs through continuation canonicalization and
+make exact block targeting explicit, without increasing continuation or
+evidence budgets.
+
 ## Per-PR validation and merge procedure
 
 For each M17 PR:
