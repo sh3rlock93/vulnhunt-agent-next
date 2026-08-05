@@ -182,6 +182,7 @@ tools/macos/*
 !tools/macos/run_m17_decompiler_hunt.py
 !tools/macos/run_m17_decompiler_hunter.py
 !tools/macos/run_m17_code_context.py
+!tools/macos/run_m17_code_reviewer.py
 docker/local/
 prompts/hunters/*/
 prompts/rankers/*/
