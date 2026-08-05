@@ -315,6 +315,25 @@ def test_v2_coverage_preserves_mandatory_xref_seeds_beyond_fallback_cap() -> Non
     assert by_name["generic_unreferenced"].omission_reason == "fallback_cap_reached"
 
 
+def test_exporter_promotes_range_reader_direct_callees_before_evidence_cap() -> None:
+    source = (
+        Path(__file__).resolve().parents[1] / "tools" / "ghidra" / "ExportImageIOIR.java"
+    ).read_text(encoding="utf-8")
+
+    closure = source.index("for (CoverageRow boundary : rangeReaderBoundaries)")
+    exclusivity = source.index("callee.callers.size() != 1", closure)
+    reason = source.index("range_reader_exclusive_callee:seed=", exclusivity)
+    evidence_cap = source.index("if (frontier.size() > maximumEvidence)", reason)
+
+    assert closure < exclusivity < reason < evidence_cap
+    assert "for (long target : boundary.callees)" in source[closure:evidence_cap]
+    assert "!callee.callers.contains(boundary.entry())" in source[closure:evidence_cap]
+    assert 'callee.selectionTier = "mandatory"' in source[closure:evidence_cap]
+    assert "frontier.sort(Comparator.comparingLong(CoverageRow::entry))" in source[
+        closure:evidence_cap
+    ]
+
+
 def test_coverage_manifest_is_deterministic_and_digest_bound() -> None:
     adapter = GhidraJSONAdapter()
     first = adapter.normalize(

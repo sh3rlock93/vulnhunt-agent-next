@@ -1037,6 +1037,75 @@ IR cannot expose bodies that are absent. The next milestone must preserve a
 small direct-callee closure for mandatory range-reader boundaries and rerun the
 static export before any additional Hunter judgment.
 
+### M17-17 — Mandatory boundary direct-callee closure
+
+#### Trigger
+
+The M17-16 Hunter resolved the range reader's length PHI but could not inspect
+the three destination-transfer helpers. Their calls at `0x18d76fb6c`,
+`0x18d76fb94`, and `0x18d76fc04` already contain exact `callee_address` tags.
+The export census also records the target functions and their caller relation,
+but marks all three `evidence_neighborhood_or_fallback_cap_reached`. They are
+absent from normalized IR, so neither another context request nor a larger
+session allowance can recover their bodies.
+
+#### Implementation scope
+
+- After selecting mandatory range-reader boundaries, promote an internal direct
+  callee only when the census proves the boundary is its sole caller. Mark it
+  mandatory with an address-backed
+  `range_reader_exclusive_callee:seed=<entry>` reason. This excludes shared
+  logging and lifecycle hubs whose reverse edges would expand unrelated root
+  capsules. Do not match a helper name, parser format, expected sink,
+  vulnerability class, or the three observed addresses.
+- Perform the closure before the mandatory evidence-cap check. Keep the closure
+  bounded by the existing per-function census edge limit and fail explicitly
+  if mandatory evidence exceeds the configured maximum.
+- Preserve deterministic entry-address ordering, the total 1,200-function
+  export cap, 4,000 operations per function, coverage depth two, and all
+  normalized-IR identity rules. Mandatory callees displace only lower-priority
+  neighborhood or fallback functions.
+- Do not alter Hunter ranking, context budgets, continuation counts, prompts,
+  reportability, or dynamic execution behavior.
+
+#### Exit criteria
+
+An automated exporter contract test must prove the exclusive direct-callee
+closure is applied before the evidence-cap check, excludes shared targets,
+marks accepted targets mandatory, and restores deterministic frontier ordering.
+All existing adapter, M14/M16/M17, full, type, lint, and unchanged M15 gates
+must pass. A new static-only ImageIO export using the frozen M17 settings must
+retain 1,200 functions and include all three address-tagged transfer targets
+with the new reason. The normalized context
+graph must bind each of the three reader callsites to one exact helper function
+and expose its bounded body. Only after those checks pass may one admission-rank
+one KTX Hunter root run; image execution, generated input, fuzzing, VM boot, and
+dynamic experiments remain prohibited.
+
+#### Current-ImageIO observation
+
+The first closure replay promoted every range-reader callee, including the
+shared `ImageIOLog` and `debugSendingMessageDone` hubs with 128 bounded callers
+each. Their reverse edges expanded several root capsules beyond 96 KiB before
+any model call. The implementation was corrected to require exactly one caller.
+The accepted export retained 1,200 functions, excluded those shared hubs, and
+promoted five exclusive callees: two destination checks and the three transfer
+helpers. Each transfer call now binds to one exact frozen function ID, and all
+24 admitted capsules materialize within budget; the rank-one KTX capsule is
+89,732 bytes.
+
+Two independent rank-one Hunter attempts then produced the same substantive
+allocation-size-mismatch analysis, but neither response passed the request
+schema after its one repair call. The model selected `direct_callee` without a
+packet-supplied related function ID and also attached proof anchors that are
+legal only for `definition_use_chain`. Four model calls used 305,765 input and
+6,895 output tokens in total; no assessment was accepted and no vulnerability
+is claimed. Image execution, generated input, dynamic experiment, fuzzer, and
+VM counts remained zero. The remaining defect is the initial Hunter request
+contract: when the omitted callee has no packet edge, it must select a
+caller-side definition/use slice and receive the concrete validation error on
+its bounded repair turn.
+
 ## Per-PR validation and merge procedure
 
 For each M17 PR:
