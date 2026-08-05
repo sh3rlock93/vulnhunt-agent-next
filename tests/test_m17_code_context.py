@@ -1288,8 +1288,8 @@ async def test_one_root_can_close_a_proof_on_fourth_continuation(tmp_path) -> No
 
 
 @pytest.mark.asyncio
-async def test_one_root_can_close_a_proof_on_sixth_continuation(tmp_path) -> None:
-    helper_names = ("metadata", "geometry", "palette", "profile")
+async def test_one_root_can_close_a_proof_on_seventh_continuation(tmp_path) -> None:
+    helper_names = ("metadata", "geometry", "palette", "profile", "gamma")
     helpers = [
         _function(
             0x100009000 + index * 0x1000,
@@ -1318,7 +1318,7 @@ async def test_one_root_can_close_a_proof_on_sixth_continuation(tmp_path) -> Non
             packet,
             BinaryCodeContextRequestKind.EXACT_FUNCTION,
             function_id=function.function_id,
-        ).model_copy(update={"request_id": f"codectx-six-step-{index}"})
+        ).model_copy(update={"request_id": f"codectx-seven-step-{index}"})
         for index, function in enumerate(helper_functions, start=1)
     ]
     requests.append(
@@ -1327,7 +1327,7 @@ async def test_one_root_can_close_a_proof_on_sixth_continuation(tmp_path) -> Non
             BinaryCodeContextRequestKind.DEFINITION_USE_CHAIN,
             function_id=worker.function_id,
             variable="tmp13",
-        ).model_copy(update={"request_id": "codectx-six-step-5"})
+        ).model_copy(update={"request_id": "codectx-seven-step-6"})
     )
     requests.append(
         _request(
@@ -1335,7 +1335,7 @@ async def test_one_root_can_close_a_proof_on_sixth_continuation(tmp_path) -> Non
             BinaryCodeContextRequestKind.DIRECT_CALLEE,
             function_id=worker.function_id,
             related=sink.function_id,
-        ).model_copy(update={"request_id": "codectx-six-step-6"})
+        ).model_copy(update={"request_id": "codectx-seven-step-7"})
     )
     responses = [
         resolve_binary_code_context(ir=ir, packet=packet, request=request)
@@ -1344,9 +1344,9 @@ async def test_one_root_can_close_a_proof_on_sixth_continuation(tmp_path) -> Non
     client = _FakeClient(
         [
             json.dumps(_needs_next(packet, responses[index], requests[index + 1]))
-            for index in range(5)
+            for index in range(6)
         ]
-        + [json.dumps(_hypothesis(packet, responses[5], sink))]
+        + [json.dumps(_hypothesis(packet, responses[6], sink))]
     )
 
     result = await continue_decompiler_hunter_session(
@@ -1356,20 +1356,83 @@ async def test_one_root_can_close_a_proof_on_sixth_continuation(tmp_path) -> Non
         initial_assessment=_needs(packet, requests[0]),
         initial_usage=_initial_usage(packet),
         client=client,
-        policy=BinaryCodeContextPolicy(maximum_continuations_per_root=6),
+        policy=BinaryCodeContextPolicy(maximum_continuations_per_root=7),
     )
 
-    assert len(result.entries) == 6
+    assert len(result.entries) == 7
     assert result.terminal_status is DecompilerContextTerminalStatus.COMPLETED
     assert result.terminal_assessment.disposition is DecompilerHunterDisposition.CODE_HYPOTHESIS
     assert result.sessions == 1
-    assert result.model_calls == 7
-    assert client.calls == 6
+    assert result.model_calls == 8
+    assert client.calls == 7
 
 
-def test_context_policy_rejects_a_seventh_continuation() -> None:
+def test_context_policy_rejects_an_eighth_continuation() -> None:
     with pytest.raises(ValidationError):
-        BinaryCodeContextPolicy(maximum_continuations_per_root=7)
+        BinaryCodeContextPolicy(maximum_continuations_per_root=8)
+
+
+@pytest.mark.asyncio
+async def test_terminal_inconclusive_resumes_only_the_newly_allowed_continuation(
+    tmp_path,
+) -> None:
+    ir, packet, caller, worker, _ = _fixture(tmp_path)
+    first_request = _request(
+        packet,
+        BinaryCodeContextRequestKind.DEFINITION_USE_CHAIN,
+        function_id=worker.function_id,
+        variable="tmp13",
+    )
+    first_response = resolve_binary_code_context(
+        ir=ir,
+        packet=packet,
+        request=first_request,
+    )
+    second_request = _request(
+        packet,
+        BinaryCodeContextRequestKind.DIRECT_CALLER,
+        function_id=worker.function_id,
+        related=caller.function_id,
+    )
+    first_client = _FakeClient(
+        [json.dumps(_needs_next(packet, first_response, second_request))]
+    )
+    first_result = await continue_decompiler_hunter_session(
+        store_root=tmp_path,
+        ir=ir,
+        packet=packet,
+        initial_assessment=_needs(packet, first_request),
+        initial_usage=_initial_usage(packet),
+        client=first_client,
+        policy=BinaryCodeContextPolicy(maximum_continuations_per_root=1),
+    )
+    persisted_request = first_result.terminal_assessment.context_requests[0]
+    second_response = resolve_binary_code_context(
+        ir=ir,
+        packet=packet,
+        request=persisted_request,
+        prior_entries=first_result.entries,
+    )
+    resumed_client = _FakeClient([json.dumps(_not_vulnerable(packet, second_response))])
+
+    resumed = await continue_decompiler_hunter_session(
+        store_root=tmp_path,
+        ir=ir,
+        packet=packet,
+        initial_assessment=_needs(packet, first_request),
+        initial_usage=_initial_usage(packet),
+        client=resumed_client,
+        policy=BinaryCodeContextPolicy(maximum_continuations_per_root=2),
+    )
+
+    assert first_result.terminal_status is DecompilerContextTerminalStatus.REVIEWER_INCONCLUSIVE
+    assert len(first_result.entries) == 1
+    assert resumed.terminal_status is DecompilerContextTerminalStatus.COMPLETED
+    assert resumed.terminal_assessment.disposition is DecompilerHunterDisposition.NOT_VULNERABLE
+    assert len(resumed.entries) == 2
+    assert resumed.entries[0] == first_result.entries[0]
+    assert resumed.model_calls == first_result.model_calls + 1
+    assert first_client.calls == 1 and resumed_client.calls == 1
 
 
 def test_only_one_root_can_consume_an_extended_continuation() -> None:

@@ -26,6 +26,7 @@ from vulnhunt_agent.macos.binary_analysis import (
 )
 from vulnhunt_agent.macos.binary_analysis.code_context import (
     DecompilerContinuationModelClient,
+    _terminal_result_can_resume,
 )
 from vulnhunt_agent.scheduling.budget import (
     BudgetController,
@@ -180,7 +181,7 @@ async def _main() -> int:
         )
         return 0
     results: list[DecompilerContextRunResult] = []
-    pending: list[_Root] = []
+    pending: list[tuple[_Root, bool]] = []
     for item in admitted:
         persisted = (
             store
@@ -191,9 +192,13 @@ async def _main() -> int:
             / "result.json"
         )
         if persisted.exists():
-            results.append(_read_model(persisted, DecompilerContextRunResult))
+            persisted_result = _read_model(persisted, DecompilerContextRunResult)
+            if _terminal_result_can_resume(persisted_result, policy=policy):
+                pending.append((item, True))
+            else:
+                results.append(persisted_result)
         else:
-            pending.append(item)
+            pending.append((item, False))
     extended_continuation_used = any(len(item.entries) >= 3 for item in results)
     client = None
     if pending:
@@ -210,15 +215,19 @@ async def _main() -> int:
     )
     controller = BudgetController(
         budget,
-        [item.usage for item in pending],
+        [item.usage for item, _ in pending],
         soft_input_token_stop=budget.max_input_tokens,
     )
     budget_deferred: list[dict[str, str]] = []
-    for item in pending:
+    for item, resuming in pending:
         assert client is not None
         budgeted = BudgetedLLMClient(client, controller, work_id=item.packet.work_id)
-        root_policy = policy.for_remaining_root(
-            extended_continuation_used=extended_continuation_used
+        root_policy = (
+            policy
+            if resuming
+            else policy.for_remaining_root(
+                extended_continuation_used=extended_continuation_used
+            )
         )
         try:
             result = await continue_decompiler_hunter_session(

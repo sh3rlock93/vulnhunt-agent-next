@@ -1481,6 +1481,79 @@ change must resume only such a valid terminal request for one final
 continuation, without rerunning the completed six-call chain or widening other
 root budgets.
 
+### M17-25 — Resumable final context continuation
+
+#### Trigger
+
+M17-24 reached the six-continuation ceiling after resolving every supplied
+slice and persisted one exact definition/use request for
+`_CGAccessSessionGetBytes`. The terminal cache currently returns that
+inconclusive result unconditionally, so raising a policy limit would either
+have no effect or require deleting the result and replaying six costly model
+calls.
+
+#### Implementation scope
+
+- Permit one root to use at most seven context continuations. Keep the default
+  at three and preserve the existing two-continuation policy for remaining
+  roots after one root consumes an extended continuation.
+- Resume a persisted terminal result only when it is
+  `reviewer_inconclusive`, its stored entries exactly match the verified chain,
+  its last resolved assessment still has disposition `needs_code_context` with
+  exactly one request, and its entry count is below the active policy limit.
+- Reuse all six persisted entries and issue only the newly allowed seventh
+  model call. Completed results, rejected/unavailable evidence, invalid request
+  counts, and unchanged limits remain cache hits with zero new model calls.
+- Apply the same predicate in the real context CLI so a resumable terminal is
+  routed back into its verified chain instead of being treated as an ordinary
+  completed cache hit. Keep the full policy only for that existing root; later
+  roots retain the reduced continuation policy.
+- Do not change ranking, root admission, evidence or token budgets, prompts,
+  reportability, Reviewer thresholds, decompilation, VM, fuzzer, or dynamic
+  behavior.
+
+#### Exit criteria
+
+A deterministic persistence test must stop inconclusive at one continuation,
+resume under a two-continuation policy, preserve the first chain entry, make
+exactly one additional model call, and overwrite the result as completed. The
+seven-entry schemas must accept seven and reject eight. Run the focused suite
+twice, M14/M16/M17, full, Ruff, project-standard mypy, and the unchanged M15
+gate twice. Finally, resume the existing frozen SGI rank-2 store with a
+seven-continuation policy and classify only the new address-backed result; do
+not replay the first six calls.
+
+#### Current observation
+
+Implemented and validated. The focused suite passed twice (40 tests per pass),
+the M14/M16/M17 set passed (256 tests), the repository suite passed (802
+passed, 8 skipped), Ruff and the project-standard 197-file mypy gate passed,
+and the unchanged M15 gate passed twice with TP=6, FP=0, FN=0 and the stable
+observation digest.
+
+Against the persisted SGI rank-2 chain, the CLI reused all six immutable
+entries and made exactly one new subscription-backed model call. The complete
+chain now records eight model calls including the initial Hunter assessment,
+1,067,199 input tokens, 18,945 output tokens, and 291,606 evidence bytes. Image
+executions, decompiler invocations, fuzzer invocations, and VM boots remained
+zero.
+
+The seventh response resolved 32,558 bytes of address-backed evidence and
+contained the complete `getCGDataProviderBytesAtOffset` function with no
+omitted blocks. The Hunter still ended `reviewer_inconclusive`: it could not
+relate the destination used at 6668353124 to `param_1`, because the normalized
+IR represented the prologue call at 6668352924 as a 128-bit-returning indirect
+call whose upper subpiece replaced the destination register.
+
+Direct static inspection of the same frozen Mach-O explains the discrepancy.
+The machine sequence sets a 0x2030 stack size, performs authenticated indirect
+branch-and-link, allocates the large stack frame, and only then saves `x3`,
+`x2`, `x1`, and `x0`; this is an argument-preserving stack-probe prologue, not
+a producer of the destination pointer. The next bounded milestone must recover
+that general prologue semantic during export/normalization and regenerate the
+IR. Adding more Hunter sessions or evidence bytes would only repeat the false
+dataflow.
+
 ## Per-PR validation and merge procedure
 
 For each M17 PR:
