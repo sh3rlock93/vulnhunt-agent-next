@@ -1347,10 +1347,9 @@ def _select_context(
             focus[function.function_id].add(request.address)
         focus[function.function_id].update(request.supporting_addresses)
         if request.block_id is not None:
-            requested_block = next(
-                item for item in function.blocks if item.block_id == request.block_id
+            focus[function.function_id].update(
+                _block_frontier_addresses(function, request.block_id)
             )
-            focus[function.function_id].add(requested_block.start_address)
         selected = (function,)
         if request.supporting_field_offsets:
             field_functions, field_focus, field_error = _select_object_field_provenance(
@@ -2358,13 +2357,33 @@ def _request_anchor_addresses(
             anchors[function.function_id].add(request.address)
         anchors[function.function_id].update(request.supporting_addresses)
         if request.block_id is not None:
-            block = next(
-                (item for item in function.blocks if item.block_id == request.block_id),
-                None,
-            )
-            if block is not None:
-                anchors[function.function_id].add(block.start_address)
+            if request.kind is BinaryCodeContextRequestKind.DEFINITION_USE_CHAIN:
+                anchors[function.function_id].update(
+                    _block_frontier_addresses(function, request.block_id)
+                )
+            else:
+                block = next(
+                    (item for item in function.blocks if item.block_id == request.block_id),
+                    None,
+                )
+                if block is not None:
+                    anchors[function.function_id].add(block.start_address)
     return anchors
+
+
+def _block_frontier_addresses(function: IRFunction, block_id: str) -> set[int]:
+    blocks = {block.block_id: block for block in function.blocks}
+    block = blocks.get(block_id)
+    if block is None:
+        return set()
+    return {
+        block.start_address,
+        *(
+            blocks[successor].start_address
+            for successor in block.successors
+            if successor in blocks
+        ),
+    }
 
 
 def _request_phi_origin_anchor_addresses(

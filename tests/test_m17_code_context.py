@@ -1769,6 +1769,91 @@ def test_definition_use_request_compacts_same_address_decompiler_noise(tmp_path)
     assert sum(item.operation.value == "unknown" for item in instructions) < 32
 
 
+def test_definition_use_block_target_prioritizes_immediate_cfg_successors(tmp_path) -> None:
+    address = 0x100009000
+    target = {
+        "name": "target",
+        "start": hex(address),
+        "size": 8,
+        "successors": ["copy", "reject"],
+        "instructions": [
+            _instruction(address, "param", result="selected_length"),
+            _instruction(address + 4, "branch", inputs=["selected_length"]),
+        ],
+    }
+    fillers = [
+        {
+            "name": f"filler-{index}",
+            "start": hex(address + 8 + index * 4),
+            "size": 4,
+            "successors": [],
+            "instructions": [
+                _instruction(
+                    address + 8 + index * 4,
+                    "assign",
+                    result=f"filler_value_{index}",
+                    inputs=["constant"],
+                )
+            ],
+        }
+        for index in range(24)
+    ]
+    copy_address = address + 0x100
+    reject_address = address + 0x104
+    helper = {
+        "entry": hex(address),
+        "size": 0x108,
+        "name": "decode_successor_frontier",
+        "parameters": [],
+        "pseudocode": "select a checked transfer successor",
+        "blocks": [
+            target,
+            *fillers,
+            {
+                "name": "copy",
+                "start": hex(copy_address),
+                "size": 4,
+                "successors": [],
+                "instructions": [
+                    _instruction(copy_address, "assign", result="copied", inputs=["one"]),
+                ],
+            },
+            {
+                "name": "reject",
+                "start": hex(reject_address),
+                "size": 4,
+                "successors": [],
+                "instructions": [_instruction(reject_address, "return")],
+            },
+        ],
+    }
+    ir, packet, _, _, _ = _fixture(tmp_path, extra_functions=[helper])
+    function = next(item for item in ir.functions if item.start_address == address)
+    target_block = next(item for item in function.blocks if item.start_address == address)
+    successor_ids = set(target_block.successors)
+    request = BinaryCodeContextRequest(
+        request_id="codectx-successor-frontier",
+        kind=BinaryCodeContextRequestKind.DEFINITION_USE_CHAIN,
+        rationale="Recover the exact immediate successor transfer paths.",
+        function_id=function.function_id,
+        block_id=target_block.block_id,
+        variable="selected_length",
+        evidence_ids=(packet.allowed_evidence_ids[0],),
+        maximum_bytes=16 * 1024,
+    )
+
+    response = resolve_binary_code_context(
+        ir=ir,
+        packet=packet,
+        request=request,
+        policy=BinaryCodeContextPolicy(maximum_blocks_per_response=3),
+    )
+    included = {block.block_id for block in response.functions[0].blocks}
+
+    assert response.status is BinaryCodeContextStatus.RESOLVED
+    assert {target_block.block_id, *successor_ids}.issubset(included)
+
+
 def test_supporting_anchors_are_rejected_for_non_definition_use_request(tmp_path) -> None:
     _, packet, _, worker, _ = _fixture(tmp_path)
     with pytest.raises(ValidationError, match="require a definition/use request"):
@@ -1875,6 +1960,7 @@ def test_definition_use_request_recovers_bounded_cross_function_field_provenance
         kind=BinaryCodeContextRequestKind.DEFINITION_USE_CHAIN,
         rationale="Recover frozen writers and guards for the decoder-state fields.",
         function_id=worker.function_id,
+        block_id=worker.blocks[0].block_id,
         variable="tmp13",
         supporting_field_offsets=(0x114, 0x118),
         evidence_ids=(packet.allowed_evidence_ids[0],),

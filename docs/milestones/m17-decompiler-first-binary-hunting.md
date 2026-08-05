@@ -1322,6 +1322,59 @@ returned `proof_unavailable` without another model call. No vulnerability is
 claimed. The next change must make a block-targeted definition/use slice include
 the target's immediate frozen CFG successors under the existing bounds.
 
+### M17-22 — Block-targeted CFG successor frontier
+
+#### Trigger
+
+M17-21 made the final request structurally correct, but it targeted the block
+containing the effective-length PHI and positive check. The actual transfer and
+failure paths begin in that block's two exact frozen CFG successors. Because
+definition/use selection prioritizes the target and variable uses without an
+explicit successor frontier, both successors remained omitted and the final
+deduplicated request produced no new facts.
+
+#### Implementation scope
+
+- For a definition/use request with `block_id`, add the target block and its
+  immediate same-function CFG successors to both the selection focus and
+  highest-priority request anchors.
+- Use only successor IDs already present in the frozen normalized IR. Do not
+  recurse beyond one edge, cross functions, infer semantic branch meaning, or
+  bypass existing block/instruction/byte limits.
+- Leave basic-block-neighborhood and all non-definition/use request behavior
+  unchanged. Preserve deduplication, continuation count, evidence budget,
+  prompts, schemas, reportability, and static-only restrictions.
+
+#### Exit criteria
+
+A deterministic contract fixture with non-adjacent successor blocks must prove
+that a three-block response contains the exact target and both immediate CFG
+successors rather than source-order filler blocks. Focused tests must pass twice,
+followed by M14/M16/M17, full, type, lint, and unchanged M15 blind gates. Then
+run a fresh KTX chain over the exact frozen IR and require the final successor
+slice to expose new address-backed transfer or safe-failure evidence. No new
+decompilation or dynamic activity is permitted.
+
+#### Current observation
+
+Implemented and validated on the frozen KTX rank-1 evidence. The focused suite
+passed twice (37 tests per pass), the M14/M16/M17 set passed (253 tests), the
+repository suite passed (799 passed, 8 skipped), Ruff and mypy passed, and the
+unchanged M15 blind gate passed twice with TP=6, FP=0, FN=0 and digest
+`sha256:84e4a0cdbbf6b44c689a259c579ef57f475e8064bcad549b3b68adec783795a4`.
+
+The fresh subscription-backed static chain consumed seven model calls (the
+frozen initial assessment plus six continuations), 880,168 input tokens, 17,108
+output tokens, and 226,476 evidence bytes. The new frontier exposed the
+64-bit selected-length PHI and then proved that the requested
+`bb_acec6d125b307cf0` successor path contains no destination write and returns
+zero. The terminal status remained `reviewer_inconclusive`, without claiming a
+vulnerability, because the remaining possible write path
+`bb_8cf6af2391c86276` is a sibling branch from an earlier predecessor rather
+than a successor of the final requested block. It remained in the exact frozen
+omission list. The next bounded change must include the target block's
+same-function predecessor siblings without recursive CFG expansion.
+
 ## Per-PR validation and merge procedure
 
 For each M17 PR:
