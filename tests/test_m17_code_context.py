@@ -2088,6 +2088,150 @@ def test_definition_use_request_recovers_bounded_cross_function_field_provenance
     assert {0x100004004, 0x10000400C, 0x1000040E0}.issubset(response_addresses)
 
 
+def test_definition_use_request_prioritizes_direct_fields_over_provenance_closure(
+    tmp_path,
+) -> None:
+    initialize = _function(
+        0x10000B000,
+        "initialize",
+        [
+            _instruction(0x10000B000, "param", result="this"),
+            _instruction(
+                0x10000B004,
+                "add",
+                result="table_offset_field",
+                inputs=["this", "const_f8"],
+                constants=[0xF8],
+            ),
+            _instruction(
+                0x10000B008,
+                "add",
+                result="table_length_field",
+                inputs=["this", "const_104"],
+                constants=[0x104],
+            ),
+            _instruction(0x10000B00C, "return"),
+        ],
+    )
+    decode_address = 0x10000C000
+    noisy_blocks: list[dict[str, Any]] = [
+        {
+            "name": "entry",
+            "start": hex(decode_address),
+            "size": 4,
+            "successors": ["old-field"],
+            "instructions": [_instruction(decode_address, "param", result="this")],
+        },
+        {
+            "name": "old-field",
+            "start": hex(decode_address + 4),
+            "size": 4,
+            "successors": ["closure-0"],
+            "instructions": [
+                _instruction(
+                    decode_address + 4,
+                    "add",
+                    result="old_field_pointer",
+                    inputs=["this", "const_f8"],
+                    constants=[0xF8],
+                )
+            ],
+        },
+    ]
+    previous = "old_field_pointer"
+    for index in range(24):
+        result = f"old_field_alias_{index}"
+        next_name = f"closure-{index + 1}" if index < 23 else "row-field"
+        noisy_blocks.append(
+            {
+                "name": f"closure-{index}",
+                "start": hex(decode_address + 8 + index * 4),
+                "size": 4,
+                "successors": [next_name],
+                "instructions": [
+                    _instruction(
+                        decode_address + 8 + index * 4,
+                        "cast",
+                        result=result,
+                        inputs=[previous],
+                    )
+                ],
+            }
+        )
+        previous = result
+    row_address = decode_address + 0x100
+    height_address = decode_address + 0x104
+    noisy_blocks.extend(
+        [
+            {
+                "name": "row-field",
+                "start": hex(row_address),
+                "size": 4,
+                "successors": ["height-field"],
+                "instructions": [
+                    _instruction(
+                        row_address,
+                        "add",
+                        result="row_field_pointer",
+                        inputs=["this", "const_134"],
+                        constants=[0x134],
+                    )
+                ],
+            },
+            {
+                "name": "height-field",
+                "start": hex(height_address),
+                "size": 4,
+                "successors": [],
+                "instructions": [
+                    _instruction(
+                        height_address,
+                        "add",
+                        result="height_field_pointer",
+                        inputs=["this", "const_138"],
+                        constants=[0x138],
+                    )
+                ],
+            },
+        ]
+    )
+    decode = {
+        "entry": hex(decode_address),
+        "size": 0x108,
+        "name": "decodeImageImp",
+        "parameters": [],
+        "pseudocode": "recover direct decoder fields after a long provenance closure",
+        "blocks": noisy_blocks,
+    }
+    ir, packet, _, worker, _ = _fixture(
+        tmp_path,
+        extra_functions=[initialize, decode],
+    )
+    request = BinaryCodeContextRequest(
+        request_id="codectx-direct-fields-before-closure",
+        kind=BinaryCodeContextRequestKind.DEFINITION_USE_CHAIN,
+        rationale="Retain every exact requested field before lower-priority closure evidence.",
+        function_id=worker.function_id,
+        variable="tmp13",
+        supporting_field_offsets=(0xF8, 0x104, 0x134, 0x138),
+        evidence_ids=(packet.allowed_evidence_ids[0],),
+        maximum_bytes=32 * 1024,
+    )
+
+    response = resolve_binary_code_context(ir=ir, packet=packet, request=request)
+    response_addresses = {
+        instruction.address
+        for function in response.functions
+        for block in function.blocks
+        for instruction in block.instructions
+    }
+
+    assert response.status is BinaryCodeContextStatus.RESOLVED, response.detail
+    assert {0x10000B004, 0x10000B008, row_address, height_address}.issubset(
+        response_addresses
+    )
+
+
 def test_definition_use_request_retains_phi_predecessor_origins(tmp_path) -> None:
     phi_function = _function(
         0x100006000,

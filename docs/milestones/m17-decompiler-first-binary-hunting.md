@@ -1428,6 +1428,59 @@ buffer. This conclusion closes only the rank-1 size-mismatch candidate and does
 not clear unrelated arithmetic or conversion-loop candidates. The next action
 is to analyze the already-admitted rank-2 root before adding any broader code.
 
+### M17-24 — Direct field-provenance anchor preservation
+
+#### Trigger
+
+The rank-2 `decodeSGI_RLEcompressed` Hunter produced one valid definition/use
+request for the allocation length, payload read length, and four decoder-state
+fields. The frozen broker selected the correct root and two cross-function field
+providers, but returned `proof_unavailable` before any continuation model call.
+Deterministic inspection showed that secondary-function provenance closure
+consumed the 96-instruction allowance before the direct 0x134 and 0x138 field
+ADD instructions. Those instructions were protected during byte fitting but had
+already been omitted during slice construction.
+
+#### Implementation scope
+
+- Add each exact frozen object-field pointer ADD address to the existing
+  field-provenance priority anchors, alongside its recovered guard addresses.
+- Preserve the current candidate selection, definition/use closure, function,
+  block, instruction, byte, continuation, and token bounds. Do not increase any
+  budget or alter reportability, prompts, schemas, ranking, decompilation, VM,
+  fuzzer, or dynamic behavior.
+- Keep M17-22/M17-23 CFG frontiers and all previous blind gates unchanged.
+
+#### Exit criteria
+
+A deterministic multi-function fixture with a long lower-priority provenance
+closure must fail before the change and resolve after it, retaining all four
+direct field ADD addresses within the existing 32 KiB request. Run the focused
+suite twice, M14/M16/M17, full, Ruff, project-standard mypy, and unchanged M15
+gate twice. Then rerun only the frozen rank-2 SGI context chain and require a
+real continuation response with address-backed allocation/read/destination
+evidence. Classify only what the completed proof establishes.
+
+#### Current observation
+
+Implemented and validated. The focused suite passed twice (39 tests per pass),
+the M14/M16/M17 set passed (255 tests), the repository suite passed (801
+passed, 8 skipped), Ruff and the project-standard 197-file mypy gate passed,
+and the unchanged M15 gate passed twice with TP=6, FP=0, FN=0 and the stable
+observation digest.
+
+The corrected rank-2 plan resolved 32,424 bytes of new evidence instead of
+returning `proof_unavailable`. The fresh SGI chain used seven model calls,
+869,052 input tokens, 16,143 output tokens, and 259,048 evidence bytes. It
+traced the table-derived payload length through both range-reader wrappers to
+`getCGDataProviderBytesAtOffset`, then to `_CGAccessSessionGetBytes` at
+6668353124. The six-continuation ceiling was reached with one exact final
+definition/use request still pending, so the terminal status correctly remained
+`reviewer_inconclusive` and no vulnerability is claimed. The next bounded
+change must resume only such a valid terminal request for one final
+continuation, without rerunning the completed six-call chain or widening other
+root budgets.
+
 ## Per-PR validation and merge procedure
 
 For each M17 PR:
