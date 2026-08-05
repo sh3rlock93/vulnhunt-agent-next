@@ -255,6 +255,79 @@ def _coverage_export() -> dict[str, object]:
     return payload
 
 
+def _stack_probe_export(*, tagged: bool = True) -> dict[str, object]:
+    payload = _ghidra_export()
+    payload["functions"] = [
+        {
+            "entry": "0x100001000",
+            "size": 64,
+            "name": "read_large_frame",
+            "parameters": ["this", "destination", "offset", "length"],
+            "pseudocode": "probe_result = (*probe)(); sink(probe_result.hi, length);",
+            "blocks": [
+                {
+                    "name": "entry",
+                    "start": "0x100001000",
+                    "size": 64,
+                    "successors": [],
+                    "instructions": [
+                        {
+                            "address": "0x100001000",
+                            "op": "param",
+                            "result": parameter,
+                            "inputs": [],
+                            "text": f"{parameter} = parameter",
+                        }
+                        for parameter in ("this", "destination", "offset", "length")
+                    ]
+                    + [
+                        {
+                            "address": "0x100001010",
+                            "op": "call",
+                            "result": "probe_result",
+                            "inputs": [],
+                            "target": "DAT_probe",
+                            "width": 128,
+                            "tags": (
+                                ["abi:argument_preserving_stack_probe"] if tagged else []
+                            ),
+                            "text": "CALLIND probe",
+                        },
+                        {
+                            "address": "0x100001010",
+                            "op": "cast",
+                            "result": "saved_x0",
+                            "inputs": ["probe_result", "const_0"],
+                            "constants": [0],
+                            "width": 64,
+                            "text": "SUBPIECE probe_result, 0",
+                        },
+                        {
+                            "address": "0x100001010",
+                            "op": "cast",
+                            "result": "saved_x1",
+                            "inputs": ["probe_result", "const_8"],
+                            "constants": [8],
+                            "width": 64,
+                            "text": "SUBPIECE probe_result, 8",
+                        },
+                        {
+                            "address": "0x100001018",
+                            "op": "call",
+                            "result": "written",
+                            "inputs": ["saved_x1", "length"],
+                            "target": "read_bytes",
+                            "width": 64,
+                            "text": "CALL read_bytes(saved_x1, length)",
+                        },
+                    ],
+                }
+            ],
+        }
+    ]
+    return payload
+
+
 @pytest.mark.parametrize(
     ("adapter", "payload", "engine"),
     [
@@ -282,6 +355,33 @@ def test_adapters_normalize_addresses_control_flow_and_operations(
     ]
     assert function.blocks[0].successors == (function.blocks[1].block_id,)
     assert function.pseudocode_sha256.startswith("sha256:")
+
+
+def test_tagged_stack_probe_restores_argument_register_aliases() -> None:
+    ir = GhidraJSONAdapter().normalize(
+        _stack_probe_export(), expected_snapshot_sha256=_SNAPSHOT, created_at=_NOW
+    )
+    instructions = ir.functions[0].blocks[0].instructions
+    by_result = {item.result: item for item in instructions if item.result is not None}
+
+    assert by_result["saved_x0"].operands[0] == "this"
+    assert by_result["saved_x1"].operands[0] == "destination"
+    assert by_result["saved_x0"].tags == ("abi:preserved_argument",)
+    assert "stack-probe preserved argument: destination" in by_result["saved_x1"].text
+
+
+def test_untagged_indirect_call_does_not_restore_argument_aliases() -> None:
+    ir = GhidraJSONAdapter().normalize(
+        _stack_probe_export(tagged=False),
+        expected_snapshot_sha256=_SNAPSHOT,
+        created_at=_NOW,
+    )
+    instructions = ir.functions[0].blocks[0].instructions
+    by_result = {item.result: item for item in instructions if item.result is not None}
+
+    assert by_result["saved_x0"].operands[0] == "probe_result"
+    assert by_result["saved_x1"].operands[0] == "probe_result"
+    assert "abi:preserved_argument" not in by_result["saved_x1"].tags
 
 
 def test_normalized_ir_identity_excludes_creation_time() -> None:
@@ -332,6 +432,24 @@ def test_exporter_promotes_range_reader_direct_callees_before_evidence_cap() -> 
     assert "frontier.sort(Comparator.comparingLong(CoverageRow::entry))" in source[
         closure:evidence_cap
     ]
+
+
+def test_exporter_requires_exact_arm64e_stack_probe_sequence() -> None:
+    source = (
+        Path(__file__).resolve().parents[1] / "tools" / "ghidra" / "ExportImageIOIR.java"
+    ).read_text(encoding="utf-8")
+
+    start = source.index("private boolean isArgumentPreservingStackProbe")
+    stop = source.index("private void appendDirectCalleeAddressTag", start)
+    contract = source[start:stop]
+
+    assert 'mnemonic.equals("CALLIND")' in contract
+    assert 'machineInstruction(call, "BLRAA", "x16", "x17")' in contract
+    assert 'machineInstruction(load, "LDR", "x16", "[x17]")' in contract
+    assert 'machineInstruction(add, "ADD", "x17", "x17")' in contract
+    assert 'machineInstruction(page, "ADRP", "x17")' in contract
+    assert 'machineInstruction(allocate, "SUB", "sp", "sp")' in contract
+    assert 'tags.add("abi:argument_preserving_stack_probe")' in source
 
 
 def test_coverage_manifest_is_deterministic_and_digest_bound() -> None:

@@ -1554,6 +1554,103 @@ that general prologue semantic during export/normalization and regenerate the
 IR. Adding more Hunter sessions or evidence bytes would only repeat the false
 dataflow.
 
+### M17-26 — ARM64e stack-probe argument preservation
+
+#### Trigger
+
+M17-25 supplied the complete provider-reader function, but Ghidra modeled an
+early authenticated indirect stack-probe call as a 128-bit value producer. Its
+upper return subpiece replaced the incoming destination register in high
+p-code, even though the underlying machine code saves `x1` after the probe and
+uses that saved value as the `_CGAccessSessionGetBytes` destination. The false
+clobber prevents the exact destination-capacity proof requested by the Hunter.
+
+#### Implementation scope
+
+- In the Ghidra exporter, tag a call as an argument-preserving stack probe only
+  when it is a `CALLIND` within the first 0x40 function bytes and the listing
+  contains the exact contiguous ARM64e sequence: frame-size setup in `w9`,
+  `ADRP/ADD x17`, `LDR x16,[x17]`, `BLRAA x16,x17`, then `SUB sp,sp`.
+- In the adapter, only for a tagged call, map 64-bit subpieces of its synthetic
+  result back to the raw declared parameter order by ABI register slot. Retain
+  the original SSA result, address, constants, and text, and add an explicit
+  preserved-argument tag and explanatory suffix.
+- Leave every untagged indirect call, malformed/non-64-bit subpiece, and
+  out-of-range ABI slot unchanged. Do not recognize function names, target
+  addresses, parser formats, or vulnerability labels.
+- Keep the independent Reviewer compatible with the already permitted
+  seven-response Hunter chain. If bounded response compaction removes a guard
+  block or callsite, rebind edge references to the final retained slices before
+  validating the packet; never leave a stale evidence reference.
+- Do not alter ranking, admission, evidence/context/token budgets, prompts,
+  continuation limits, reportability, Reviewer thresholds, VM, fuzzer, or
+  dynamic behavior.
+
+#### Exit criteria
+
+Positive and negative adapter fixtures must prove that tagged `x0`/`x1`
+subpieces recover `this`/destination while the identical untagged call remains
+unchanged. Seven-entry Reviewer packets must validate while an eighth entry is
+rejected, and compacted responses must not retain edge references to omitted
+blocks. A source contract must enforce every machine instruction in the
+exporter predicate. The exporter must compile and run in Ghidra 12.1.2 against
+the same frozen Mach-O, clean its project, and recover `param_1` at 6668352924
+without a function allowlist. Then run focused tests twice, M14/M16/M17, full,
+Ruff, project-standard mypy, and the unchanged M15 gate twice. Finally,
+regenerate the static pipeline under the new IR digest and rerun the admitted
+SGI root through Hunter and Reviewer; classify only the new address-backed
+proof.
+
+#### Current observation
+
+Implemented and validated. The focused adapter/context/Reviewer suite passed
+twice (72 tests per pass), the M14/M16/M17 set passed (261 tests), and the
+repository suite passed (807 passed, 8 skipped). Ruff and the project-standard
+197-file mypy gate passed. The unchanged M15 gate passed twice with TP=6, FP=0,
+FN=0 and stable observation digest
+`sha256:84e4a0cdbbf6b44c689a259c579ef57f475e8064bcad549b3b68adec783795a4`.
+
+A real exporter run over the 1,200-function frozen ImageIO corpus compiled
+successfully and tagged three exact stack-probe prologues. Its temporary Ghidra
+project was deleted. Normalizing that export produced IR digest
+`sha256:d7514c017bab1c2933e8f66fca1df7c8d5989f0335e061928fc5d0f060000936`.
+At 6668352924, the low and high synthetic subpieces now consume `this` and
+`param_1` respectively and carry `abi:preserved_argument`; no ImageIO function
+or address is present in the rule. The static pipeline retained snapshot
+`sha256:47ad3755368140434c7821c0aa030c5631e5157dc50d7efc082440392c1c7adf`,
+ImageIO UUID `EEB840D5-3559-386F-BBD3-D24AA749D2EC`, and rank 2 for
+`decodeSGI_RLEcompressed`. It made no model or dynamic calls.
+
+The two-root Hunter admission made three model calls, used 225,921 input and
+4,777 output tokens, and requested code context for both roots. The SGI root
+then completed its seven-response chain with eight model calls including its
+initial assessment, 1,047,075 input tokens, 19,190 output tokens, and 263,448
+evidence bytes. It emitted the conditional code hypothesis
+`codehypothesis-sgi-rle-short-read-uninitialized-suffix`: the underlying reader
+may clamp the requested row length to its available-byte count, the root
+discards the returned count, and later parsing remains bounded by the original
+row length.
+
+The real run also exposed two integration defects before review: Reviewer
+packets still capped Hunter context at two responses, and response compaction
+could retain a call-edge guard ID after removing the referenced block. Both
+were repaired without changing evidence or continuation budgets. The first
+failed before a model call; a separate low-budget dry result made zero calls;
+the final independent Reviewer completed with three calls, 568,364 input and
+9,397 output tokens. Every image, fuzzer, generated-input, dynamic-experiment,
+and VM counter remained zero.
+
+The Reviewer proved the frozen target, reachable parser route, and
+attacker-controlled SGI row offset/length, but ended `reviewer_inconclusive`.
+Two exact static gaps remain: whether the root extent field at offset 200
+equals or bounds the underlying reader length field at offset 80 on every row
+read path, and the destination-write contract of the imported
+`_CGAccessSessionGetBytes`. Therefore this is a useful conditional
+uninitialized-read hypothesis, not a confirmed or Apple-submission-ready
+vulnerability. The next bounded milestone must recover those two provenance
+contracts rather than add sessions, lower Reviewer thresholds, or use dynamic
+execution.
+
 ## Per-PR validation and merge procedure
 
 For each M17 PR:

@@ -2018,9 +2018,12 @@ def _fit_response_budget(
     tuple[str, ...],
 ]:
     current = slices
+    current_edges = _bind_context_edges_to_slices(current, edges)
     current_omissions = list(omissions)
-    if _context_evidence_bytes(current, edges, facts, tuple(current_omissions)) <= maximum:
-        return current, edges, facts, tuple(current_omissions)
+    if _context_evidence_bytes(
+        current, current_edges, facts, tuple(current_omissions)
+    ) <= maximum:
+        return current, current_edges, facts, tuple(current_omissions)
     stripped = []
     for item in current:
         stripped.append(
@@ -2036,7 +2039,12 @@ def _fit_response_budget(
     current_omissions.append("response byte budget may omit lower-priority instructions")
     while (
         facts
-        and _context_evidence_bytes(current, edges, facts, tuple(sorted(set(current_omissions))))
+        and _context_evidence_bytes(
+            current,
+            current_edges,
+            facts,
+            tuple(sorted(set(current_omissions))),
+        )
         > maximum
     ):
         candidates = tuple(
@@ -2067,7 +2075,42 @@ def _fit_response_budget(
             if blocks:
                 trimmed.append(function.model_copy(update={"blocks": tuple(blocks)}))
         current = tuple(trimmed)
-    return current, edges, facts, tuple(sorted(set(current_omissions)))
+        current_edges = _bind_context_edges_to_slices(current, current_edges)
+    return current, current_edges, facts, tuple(sorted(set(current_omissions)))
+
+
+def _bind_context_edges_to_slices(
+    slices: tuple[BinaryCodeContextFunctionSlice, ...],
+    edges: tuple[BinaryCodeContextEdge, ...],
+) -> tuple[BinaryCodeContextEdge, ...]:
+    """Drop edge references invalidated by deterministic response compaction."""
+
+    function_ids = {item.function_id for item in slices}
+    instruction_addresses = {
+        (function.function_id, instruction.address)
+        for function in slices
+        for block in function.blocks
+        for instruction in block.instructions
+    }
+    block_ids = {
+        (function.function_id, block.block_id)
+        for function in slices
+        for block in function.blocks
+    }
+    return tuple(
+        edge.model_copy(
+            update={
+                "dominating_guard_block_ids": tuple(
+                    block_id
+                    for block_id in edge.dominating_guard_block_ids
+                    if (edge.caller_function_id, block_id) in block_ids
+                )
+            }
+        )
+        for edge in edges
+        if edge.caller_function_id not in function_ids
+        or (edge.caller_function_id, edge.callsite_address) in instruction_addresses
+    )
 
 
 def _fact_drop_priority(fact: BinaryEvidenceFact) -> tuple[int, int, int]:

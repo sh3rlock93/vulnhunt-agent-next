@@ -33,6 +33,7 @@ import ghidra.program.model.data.DataType;
 import ghidra.program.model.listing.Data;
 import ghidra.program.model.listing.Function;
 import ghidra.program.model.listing.FunctionIterator;
+import ghidra.program.model.listing.Instruction;
 import ghidra.program.model.listing.Parameter;
 import ghidra.program.model.pcode.HighFunction;
 import ghidra.program.model.pcode.HighVariable;
@@ -297,11 +298,55 @@ public class ExportImageIOIR extends GhidraScript {
 		}
 		appendDirectCalleeAddressTag(tags, operation, mnemonic);
 		appendControlFlowTags(tags, operation, mnemonic);
+		if (isArgumentPreservingStackProbe(operation, mnemonic)) {
+			tags.add("abi:argument_preserving_stack_probe");
+		}
 		if (operation.getOutput() != null) appendInputSourceTags(tags, callee);
 		appendRangeReaderTags(tags, operation, callee, inputStart);
 		json.add("tags", sorted(tags));
 		json.addProperty("text", truncate(mnemonic + " " + operation.toString(), 1900));
 		return json;
+	}
+
+	private boolean isArgumentPreservingStackProbe(PcodeOp operation, String mnemonic) {
+		if (!mnemonic.equals("CALLIND")) return false;
+		Address address = operation.getSeqnum().getTarget();
+		Function function = currentProgram.getFunctionManager().getFunctionContaining(address);
+		if (function == null) return false;
+		long delta = address.getOffset() - function.getEntryPoint().getOffset();
+		if (delta < 0 || delta > 0x40) return false;
+
+		Instruction call = currentProgram.getListing().getInstructionAt(address);
+		if (!machineInstruction(call, "BLRAA", "x16", "x17")) return false;
+		Instruction load = call.getPrevious();
+		if (!machineInstruction(load, "LDR", "x16", "[x17]")) return false;
+		Instruction add = load.getPrevious();
+		if (!machineInstruction(add, "ADD", "x17", "x17")) return false;
+		Instruction page = add.getPrevious();
+		if (!machineInstruction(page, "ADRP", "x17")) return false;
+		Instruction size = page.getPrevious();
+		if (!(machineInstruction(size, "MOV", "w9") ||
+				machineInstruction(size, "MOVZ", "w9"))) return false;
+		String frameSize = operand(size, 1);
+		if (!frameSize.startsWith("#")) return false;
+		Instruction allocate = call.getNext();
+		return machineInstruction(allocate, "SUB", "sp", "sp");
+	}
+
+	private boolean machineInstruction(Instruction instruction, String mnemonic,
+			String... operands) {
+		if (instruction == null ||
+				!instruction.getMnemonicString().equalsIgnoreCase(mnemonic) ||
+				instruction.getNumOperands() < operands.length) return false;
+		for (int index = 0; index < operands.length; index++) {
+			if (!operand(instruction, index).equals(operands[index])) return false;
+		}
+		return true;
+	}
+
+	private String operand(Instruction instruction, int index) {
+		return instruction.getDefaultOperandRepresentation(index)
+			.toLowerCase(Locale.ROOT).replace(" ", "");
 	}
 
 	private void appendDirectCalleeAddressTag(JsonArray tags, PcodeOp operation,

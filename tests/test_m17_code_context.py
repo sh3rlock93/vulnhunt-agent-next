@@ -41,7 +41,10 @@ from vulnhunt_agent.macos.binary_analysis import (
     select_context_continuation_roots,
 )
 from vulnhunt_agent.macos.binary_analysis.capsules import _recover_call_edges
-from vulnhunt_agent.macos.binary_analysis.code_context import _refinement_block_ids
+from vulnhunt_agent.macos.binary_analysis.code_context import (
+    _bind_context_edges_to_slices,
+    _refinement_block_ids,
+)
 
 _SNAPSHOT = "sha256:" + "b" * 64
 _UUID = "B2345678-1234-5678-9ABC-DEF012345678"
@@ -602,6 +605,40 @@ def test_virtual_selector_caller_recovers_dispatch_and_dominating_guard(tmp_path
         for instruction in block.instructions
     )
     assert response.evidence_bytes <= 32 * 1024
+
+
+def test_compaction_removes_edge_guard_references_to_omitted_blocks(tmp_path) -> None:
+    ir, packet, _, _, _ = _fixture(
+        tmp_path,
+        extra_functions=_virtual_dispatch_functions(),
+    )
+    target = next(item for item in ir.functions if item.start_address == 0x100005000)
+    caller = next(item for item in ir.functions if item.start_address == 0x100004000)
+    request = _request(
+        packet,
+        BinaryCodeContextRequestKind.DIRECT_CALLER,
+        function_id=target.function_id,
+        related=caller.function_id,
+        maximum_bytes=32 * 1024,
+    )
+    response = resolve_binary_code_context(ir=ir, packet=packet, request=request)
+    edge = response.call_edges[0]
+    trimmed = tuple(
+        function.model_copy(update={
+            "blocks": tuple(
+                block
+                for block in function.blocks
+                if block.block_id not in edge.dominating_guard_block_ids
+            )
+        })
+        for function in response.functions
+    )
+
+    rebound = _bind_context_edges_to_slices(trimmed, response.call_edges)
+
+    assert len(rebound) == 1
+    assert rebound[0].callsite_address == edge.callsite_address
+    assert rebound[0].dominating_guard_block_ids == ()
 
 
 def test_virtual_vtable_caller_binds_exact_owner_and_slot(tmp_path) -> None:

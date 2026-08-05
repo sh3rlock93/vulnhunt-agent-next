@@ -252,7 +252,7 @@ class BinaryCodeReviewerPacket(DomainModel):
     target: BinaryCodeReviewerTarget
     capsule: BinaryEvidenceCapsule
     hunter_context_responses: tuple[BinaryCodeContextResponse, ...] = Field(
-        default=(), max_length=2
+        default=(), max_length=7
     )
     route_context_response: BinaryCodeContextResponse | None = None
     reviewer_context_response: BinaryCodeContextResponse | None = None

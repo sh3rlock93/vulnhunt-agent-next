@@ -674,6 +674,29 @@ def test_unknown_attacker_control_and_alias_uncertainty_stay_inconclusive() -> N
     assert decision.status is StaticReportabilityStatus.REVIEWER_INCONCLUSIVE
 
 
+def test_reviewer_packet_accepts_the_full_seven_response_hunter_chain() -> None:
+    _, _, _, packet = _fixture(maximum_capsule_functions=1)
+    assert packet.route_context_response is not None
+    response = packet.route_context_response.model_dump(mode="json")
+    payload = packet.model_dump(mode="json", exclude={"packet_sha256"})
+    payload["hunter_context_responses"] = tuple(response for _ in range(7))
+    from vulnhunt_agent.macos.binary_analysis.code_reviewer import _digest
+
+    expanded = BinaryCodeReviewerPacket.model_validate({
+        **payload,
+        "packet_sha256": _digest(payload),
+    })
+
+    assert len(expanded.hunter_context_responses) == 7
+
+    payload["hunter_context_responses"] = tuple(response for _ in range(8))
+    with pytest.raises(ValidationError, match="at most 7 items"):
+        BinaryCodeReviewerPacket.model_validate({
+            **payload,
+            "packet_sha256": _digest(payload),
+        })
+
+
 def test_decision_ignores_irrelevant_prose_but_changes_with_evidence_digest() -> None:
     _, _, _, packet = _fixture()
     first = _verdict(packet, prose="First independent wording")
