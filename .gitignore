@@ -180,6 +180,7 @@ tools/macos/*
 !tools/macos/imageio_canary_interposer.c
 !tools/macos/run_m14_imageio_pilot.py
 !tools/macos/run_m17_decompiler_hunt.py
+!tools/macos/run_m17_decompiler_hunter.py
 docker/local/
 prompts/hunters/*/
 prompts/rankers/*/
