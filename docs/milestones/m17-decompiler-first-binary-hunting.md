@@ -731,6 +731,66 @@ closes only the exact static vtable-binding gap. Budgeted definition/use
 compaction and attacker-controlled file-byte-to-size provenance remain the
 next separate gaps. This observation is not a vulnerability claim.
 
+### M17-12 — Budgeted definition/use proof compaction
+
+#### Trigger
+
+The M17-11 KTX Hunter named four exact SSA values, five code addresses, and
+five decoder-state offsets in one valid 32 KiB request, but the broker rejected
+the response before the Hunter could continue. A diagnostic replay still lost
+one direct PHI origin at 96 KiB. Ghidra had emitted one semantic operation and
+up to fourteen `INDIRECT`/`UNKNOWN` side-effect records at the same machine
+address; the slicer ranked every co-addressed record equally and the budget
+gate protected every downstream use and every field-guard pair.
+
+#### Implementation scope
+
+- Rank semantic instructions ahead of `UNKNOWN` side effects at requested and
+  definition/use anchor addresses, while retaining canonical address/index
+  order in the emitted slice.
+- Protect a minimal deterministic SSA proof core: requested definitions, one
+  security-relevant direct use per requested value, all direct PHI origins,
+  the best semantic instruction at every explicit address, one address-backed
+  field-pointer operation per requested offset, and one representative field
+  comparison. Lower-priority uses and duplicate branch-side effects remain
+  eligible for budget trimming.
+- Account for every omission marker before the final byte-budget decision so a
+  resolved response can never exceed its declared maximum after serialization.
+- Preserve the existing request schema, evidence identities, field-provenance
+  selection, reportability rules, and all static-only execution constraints.
+  Do not add vulnerability classes, target allowlists, dynamic experiments, or
+  ImageIO-specific matching.
+
+#### Exit criteria
+
+A synthetic function with more than 64 same-address decompiler side effects
+and repeated downstream uses must resolve deterministically within 16 KiB,
+retain the semantic input call and both PHI origins, and omit most noise. The
+unchanged real KTX request must resolve within 32 KiB with all four requested
+values having a definition and use, every PHI origin present, all five exact
+addresses and all five object offsets retained, and a stable response digest.
+All prior M17 and M15 regression gates must remain unchanged.
+
+#### Current-ImageIO observation
+
+The unchanged first KTX request now resolves to 31,943 bytes with 35 new facts:
+11 `decodeImageImp` instructions and 24 `willDecode` instructions. It retains
+all requested definitions/uses, four direct PHI inputs, five exact addresses,
+and five field offsets. A second 32 KiB continuation resolves to 32,510 bytes
+and the Hunter terminates with one conditional `allocation_size_mismatch`
+hypothesis: an IOSurface-derived 64-bit read length can be paired with a
+decoder-field-sized `calloc` destination before `getBytesAtOffset`.
+
+The independent Reviewer used one additional 32,362-byte frozen-IR slice and
+proved the frozen target, exact KTX vtable route, and feasible conditional path,
+but remained `reviewer_inconclusive` at confidence 0.84. Attacker control of
+the relevant geometry/state fields, a satisfiable requested-length versus
+effective-capacity inequality, and `getBytesAtOffset` write/capacity semantics
+remain unproven. The run used no image execution, generated input, dynamic
+experiment, fuzzer invocation, or VM boot. M17-12 therefore closes the context
+budget miss and recovers a reviewable code hypothesis; it does not establish a
+reportable vulnerability.
+
 ## Per-PR validation and merge procedure
 
 For each M17 PR:
