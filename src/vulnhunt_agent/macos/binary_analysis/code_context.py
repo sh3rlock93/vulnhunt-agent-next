@@ -45,8 +45,8 @@ from .ir import (
     NormalizedBinaryIR,
 )
 
-DECOMPILER_CONTEXT_PROMPT_VERSION: Literal["decompiler-code-context-v8"] = (
-    "decompiler-code-context-v8"
+DECOMPILER_CONTEXT_PROMPT_VERSION: Literal["decompiler-code-context-v9"] = (
+    "decompiler-code-context-v9"
 )
 _MAX_RAW_RESPONSE_BYTES = 128 * 1024
 _MAX_PACKET_BYTES = 768 * 1024
@@ -86,8 +86,11 @@ the broker selection. When proof depends on decoder-state fields written or
 validated in other methods, put their numeric object offsets in
 supporting_field_offsets on that same request. The broker will recover only
 frozen normalized-IR accesses to those offsets; prose field names or offsets do
-not select evidence. A direct_callee request must set only function_id and the
-address-backed related_function_id; leave block_id, address, variable,
+not select evidence. When a prior response supplies the exact block needed for
+the next proof step, set block_id on a block-neighborhood or definition/use
+request; naming the block only in rationale does not select it. A direct_callee
+request must set only function_id and the address-backed related_function_id;
+leave block_id, address, variable,
 supporting_addresses, supporting_variables, and supporting_field_offsets empty.
 A call edge marked virtual_selector proves a compatible
 selector dispatch site, not a unique runtime target; retain its candidate count
@@ -353,6 +356,7 @@ class DecompilerContinuationPacket(DomainModel):
         "decompiler-code-context-v6",
         "decompiler-code-context-v7",
         "decompiler-code-context-v8",
+        "decompiler-code-context-v9",
     ] = DECOMPILER_CONTEXT_PROMPT_VERSION
     work_id: str = Field(pattern=r"^work_[0-9a-f]{64}$")
     root_id: str = Field(pattern=r"^coderoot_[0-9a-f]{20}$")
@@ -611,6 +615,17 @@ class DecompilerContinuationAgent:
         }
         raw: list[str] = []
         validation_errors: list[str] = []
+        known_block_ids = frozenset(
+            {
+                *packet.base_packet.known_block_ids,
+                *(
+                    block.block_id
+                    for response in packet.context_responses
+                    for function in response.functions
+                    for block in function.blocks
+                ),
+            }
+        )
         for _ in range(self.policy.maximum_attempts_per_continuation):
             response = await self.client.chat(
                 messages=messages,
@@ -627,7 +642,7 @@ class DecompilerContinuationAgent:
                     assessment = DecompilerHunterAssessment.model_validate(
                         _canonicalize_model_set_arrays(
                             parsed,
-                            known_block_ids=frozenset(packet.base_packet.known_block_ids),
+                            known_block_ids=known_block_ids,
                         )
                     )
                     validate_continuation_assessment(packet, assessment)

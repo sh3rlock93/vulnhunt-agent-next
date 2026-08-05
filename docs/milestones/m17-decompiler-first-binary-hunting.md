@@ -1216,6 +1216,59 @@ must preserve newly supplied block IDs through continuation canonicalization and
 make exact block targeting explicit, without increasing continuation or
 evidence budgets.
 
+### M17-20 — Prior-response block targeting
+
+#### Trigger
+
+The M17-19 Hunter named `bb_acec6d125b307cf0` as the positive-transfer
+successor required to close the proof, but encoded it only in request rationale.
+The broker therefore repeated a same-variable slice, deduplicated all selected
+facts, and returned `proof_unavailable`. Continuation validation accepts blocks
+supplied by earlier responses, while pre-validation canonicalization currently
+recognizes only blocks from the base capsule and would erase a correct newly
+supplied `block_id` hint.
+
+#### Implementation scope
+
+- Build the canonicalizer's known-block set from the immutable union of base
+  packet blocks and every block in this continuation packet's prior frozen
+  responses.
+- Continue dropping an optional definition/use `block_id` only when it is
+  outside that union. Do not weaken final continuation validation.
+- Instruct the continuation model to encode an exact newly supplied block in
+  `block_id`; prose rationale alone does not select evidence.
+- Bump continuation prompt identity to v9. Do not change resolver selection,
+  deduplication, request schemas, continuation count, evidence bytes, model-call
+  limits, reportability, or static-only restrictions.
+
+#### Exit criteria
+
+One contract test must prove that a definition/use request retains a block ID
+introduced by a prior response, while the existing unknown-block test continues
+to prove that an invented ID is removed. Focused tests must pass twice, followed
+by M14/M16/M17, full, type, lint, and unchanged M15 blind gates. Then replay a
+fresh rank-one KTX session over the exact M17-17 frozen IR so the model can emit
+the corrected block-targeted request before the six-entry limit. No new
+decompilation or dynamic activity is permitted.
+
+#### Current-ImageIO observation
+
+The fresh v9 chain proved the new behavior at entry three: a block ID supplied
+by the prior reader response survived canonicalization on a definition/use
+request and selected a valid next slice. The six-entry run used one root
+session, six total model calls, 710,378 input tokens, 12,477 output tokens, and
+219,742 evidence bytes. No schema failure, budget deferral, new decompilation,
+or dynamic activity occurred.
+
+The terminal state was still `reviewer_inconclusive`. At entry five the model
+explicitly identified `bb_9a1a0c81fcf253f9` in both its summary and request
+rationale, stated that the prior request had left `block_id` null, and then
+again emitted `block_id: null`. The sixth repeated variable-only slice returned
+`proof_unavailable` without a model call. No vulnerability is claimed. The next
+change must reject this internally inconsistent request shape and let the
+existing bounded repair set the already supplied block ID; it must not infer or
+insert the block automatically.
+
 ## Per-PR validation and merge procedure
 
 For each M17 PR:
