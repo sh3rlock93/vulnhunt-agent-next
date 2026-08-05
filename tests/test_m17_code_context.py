@@ -1033,6 +1033,117 @@ async def test_definition_use_preserves_a_prior_response_block_hint(tmp_path) ->
 
 
 @pytest.mark.asyncio
+async def test_definition_use_preserves_a_prior_response_omitted_block_hint(tmp_path) -> None:
+    address = 0x100008000
+    large = _function(
+        address,
+        "decode_large_helper",
+        [
+            _instruction(address, "param", result="seed"),
+            _instruction(address + 4, "assign", result="next_value", inputs=["seed"]),
+            _instruction(address + 8, "return", inputs=["next_value"]),
+        ],
+    )
+    large["blocks"] = [
+        {
+            "name": f"large-{index}",
+            "start": instruction["address"],
+            "size": 4,
+            "successors": [],
+            "instructions": [instruction],
+        }
+        for index, instruction in enumerate(large["blocks"][0]["instructions"])
+    ]
+    ir, packet, _caller, _worker, _sink = _fixture(tmp_path, extra_functions=[large])
+    helper = next(item for item in ir.functions if item.start_address == address)
+    first = _request(
+        packet,
+        BinaryCodeContextRequestKind.EXACT_FUNCTION,
+        function_id=helper.function_id,
+    )
+    policy = BinaryCodeContextPolicy(
+        maximum_continuations_per_root=1,
+        maximum_blocks_per_response=1,
+    )
+    first_response = resolve_binary_code_context(
+        ir=ir,
+        packet=packet,
+        request=first,
+        policy=policy,
+    )
+    omitted_block_id = first_response.functions[0].omitted_block_ids[0]
+    supplied_variable = next(
+        value
+        for function in first_response.functions
+        for block in function.blocks
+        for instruction in block.instructions
+        for value in (instruction.result, *instruction.operands)
+        if value is not None
+    )
+    next_request = _request(
+        packet,
+        BinaryCodeContextRequestKind.DEFINITION_USE_CHAIN,
+        function_id=helper.function_id,
+        variable=supplied_variable,
+        block_id=omitted_block_id,
+    )
+    payload = _needs_next(packet, first_response, next_request)
+
+    result = await continue_decompiler_hunter_session(
+        store_root=tmp_path,
+        ir=ir,
+        packet=packet,
+        initial_assessment=_needs(packet, first),
+        initial_usage=_initial_usage(packet),
+        client=_FakeClient([json.dumps(payload)]),
+        policy=policy,
+    )
+
+    assert result.terminal_assessment.context_requests[0].block_id == omitted_block_id
+
+
+@pytest.mark.asyncio
+async def test_definition_use_repairs_a_missing_referenced_block_id(tmp_path) -> None:
+    ir, packet, _caller, _worker, sink = _fixture(tmp_path)
+    first = _request(
+        packet,
+        BinaryCodeContextRequestKind.EXACT_FUNCTION,
+        function_id=sink.function_id,
+    )
+    first_response = resolve_binary_code_context(ir=ir, packet=packet, request=first)
+    supplied_block_id = first_response.functions[0].blocks[0].block_id
+    corrected = _request(
+        packet,
+        BinaryCodeContextRequestKind.DEFINITION_USE_CHAIN,
+        function_id=sink.function_id,
+        variable="bytes",
+        block_id=supplied_block_id,
+    )
+    invalid = _needs_next(packet, first_response, corrected)
+    invalid["context_requests"][0]["block_id"] = None
+    invalid["context_requests"][0]["rationale"] = (
+        f"Beginning at supplied successor {supplied_block_id}, recover the write path."
+    )
+    repaired = _needs_next(packet, first_response, corrected)
+    client = _FakeClient([json.dumps(invalid), json.dumps(repaired)])
+
+    result = await continue_decompiler_hunter_session(
+        store_root=tmp_path,
+        ir=ir,
+        packet=packet,
+        initial_assessment=_needs(packet, first),
+        initial_usage=_initial_usage(packet),
+        client=client,
+        policy=BinaryCodeContextPolicy(maximum_continuations_per_root=1),
+    )
+
+    assert result.terminal_assessment.context_requests[0].block_id == supplied_block_id
+    assert client.calls == 2
+    assert "Validation error:" in client.last_user_texts[1]
+    assert "rationale references a supplied block" in client.last_user_texts[1]
+
+
+@pytest.mark.asyncio
 async def test_one_root_can_close_a_proof_on_third_continuation(tmp_path) -> None:
     metadata = _function(
         0x100007000,

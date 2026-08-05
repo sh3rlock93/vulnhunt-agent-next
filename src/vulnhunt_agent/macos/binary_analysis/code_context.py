@@ -45,8 +45,8 @@ from .ir import (
     NormalizedBinaryIR,
 )
 
-DECOMPILER_CONTEXT_PROMPT_VERSION: Literal["decompiler-code-context-v9"] = (
-    "decompiler-code-context-v9"
+DECOMPILER_CONTEXT_PROMPT_VERSION: Literal["decompiler-code-context-v10"] = (
+    "decompiler-code-context-v10"
 )
 _MAX_RAW_RESPONSE_BYTES = 128 * 1024
 _MAX_PACKET_BYTES = 768 * 1024
@@ -357,6 +357,7 @@ class DecompilerContinuationPacket(DomainModel):
         "decompiler-code-context-v7",
         "decompiler-code-context-v8",
         "decompiler-code-context-v9",
+        "decompiler-code-context-v10",
     ] = DECOMPILER_CONTEXT_PROMPT_VERSION
     work_id: str = Field(pattern=r"^work_[0-9a-f]{64}$")
     root_id: str = Field(pattern=r"^coderoot_[0-9a-f]{20}$")
@@ -583,6 +584,17 @@ def _canonicalize_model_set_arrays(
     return result
 
 
+def _continuation_known_block_ids(
+    packet: DecompilerContinuationPacket,
+) -> frozenset[str]:
+    identifiers = set(packet.base_packet.known_block_ids)
+    for response in packet.context_responses:
+        for function in response.functions:
+            identifiers.update(block.block_id for block in function.blocks)
+            identifiers.update(function.omitted_block_ids)
+    return frozenset(identifiers)
+
+
 @dataclass
 class DecompilerContinuationAgent:
     client: DecompilerContinuationModelClient
@@ -615,17 +627,7 @@ class DecompilerContinuationAgent:
         }
         raw: list[str] = []
         validation_errors: list[str] = []
-        known_block_ids = frozenset(
-            {
-                *packet.base_packet.known_block_ids,
-                *(
-                    block.block_id
-                    for response in packet.context_responses
-                    for function in response.functions
-                    for block in function.blocks
-                ),
-            }
-        )
+        known_block_ids = _continuation_known_block_ids(packet)
         for _ in range(self.policy.maximum_attempts_per_continuation):
             response = await self.client.chat(
                 messages=messages,
@@ -1126,7 +1128,7 @@ def validate_continuation_assessment(
         raise ValueError("continuation assessment changed root-session identity")
     facts = {item.fact_id: item for item in base.capsule.facts}
     functions = set(base.known_function_ids)
-    blocks = set(base.known_block_ids)
+    blocks = set(_continuation_known_block_ids(packet))
     addresses = set(base.known_addresses)
     variables: set[str] = set()
     for response in packet.context_responses:
@@ -1164,6 +1166,15 @@ def validate_continuation_assessment(
             raise ValueError("continuation requested a related function outside frozen IR")
         if request.block_id is not None and request.block_id not in blocks:
             raise ValueError("continuation requested an unknown block")
+        referenced_blocks = set(re.findall(r"\bbb_[0-9a-f]{16}\b", request.rationale))
+        if (
+            request.kind is BinaryCodeContextRequestKind.DEFINITION_USE_CHAIN
+            and request.block_id is None
+            and referenced_blocks.intersection(blocks)
+        ):
+            raise ValueError(
+                "definition/use rationale references a supplied block but block_id is missing"
+            )
         if request.address is not None and request.address not in addresses:
             raise ValueError("continuation requested an unknown address")
         if any(address not in addresses for address in request.supporting_addresses):
