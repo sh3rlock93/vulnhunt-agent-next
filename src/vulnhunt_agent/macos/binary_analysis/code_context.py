@@ -130,7 +130,7 @@ class DecompilerContextTerminalStatus(StrEnum):
 
 class BinaryCodeContextPolicy(DomainModel):
     maximum_roots_per_run: int = Field(default=6, ge=1, le=6)
-    maximum_continuations_per_root: int = Field(default=3, ge=1, le=4)
+    maximum_continuations_per_root: int = Field(default=3, ge=1, le=5)
     maximum_total_evidence_bytes: int = Field(
         default=288 * 1024,
         ge=16 * 1024,
@@ -358,11 +358,11 @@ class DecompilerContinuationPacket(DomainModel):
     admission_rank: int = Field(ge=1, le=100000)
     capsule_sha256: str = Field(pattern=SHA256_PATTERN)
     ir_sha256: str = Field(pattern=SHA256_PATTERN)
-    continuation_ordinal: int = Field(ge=1, le=4)
+    continuation_ordinal: int = Field(ge=1, le=5)
     previous_chain_sha256: str = Field(pattern=SHA256_PATTERN)
     base_packet: DecompilerHunterPacket
     prior_assessment: DecompilerHunterAssessment
-    context_responses: tuple[BinaryCodeContextResponse, ...] = Field(min_length=1, max_length=4)
+    context_responses: tuple[BinaryCodeContextResponse, ...] = Field(min_length=1, max_length=5)
     total_evidence_bytes: int = Field(ge=1, le=288 * 1024)
     packet_sha256: str = Field(pattern=SHA256_PATTERN)
 
@@ -409,7 +409,7 @@ class DecompilerContextChainEntry(DomainModel):
     )
     work_id: str = Field(pattern=r"^work_[0-9a-f]{64}$")
     root_id: str = Field(pattern=r"^coderoot_[0-9a-f]{20}$")
-    ordinal: int = Field(ge=1, le=4)
+    ordinal: int = Field(ge=1, le=5)
     previous_chain_sha256: str = Field(pattern=SHA256_PATTERN)
     request_sha256: str = Field(pattern=SHA256_PATTERN)
     response: BinaryCodeContextResponse
@@ -444,7 +444,7 @@ class DecompilerContextRunResult(DomainModel):
     initial_assessment_sha256: str = Field(pattern=SHA256_PATTERN)
     terminal_status: DecompilerContextTerminalStatus
     terminal_assessment: DecompilerHunterAssessment
-    entries: tuple[DecompilerContextChainEntry, ...] = Field(max_length=4)
+    entries: tuple[DecompilerContextChainEntry, ...] = Field(max_length=5)
     total_evidence_bytes: int = Field(ge=1, le=288 * 1024)
     sessions: Literal[1] = 1
     model_calls: int = Field(ge=0)
@@ -511,6 +511,73 @@ class _RawEdge:
     dominating_guard_block_ids: tuple[str, ...] = ()
 
 
+def _canonicalize_model_set_arrays(
+    payload: dict[str, object],
+    *,
+    known_block_ids: frozenset[str],
+) -> dict[str, object]:
+    result = dict(payload)
+
+    def canonicalize(container: dict[str, object], names: tuple[str, ...]) -> None:
+        for name in names:
+            value = container.get(name)
+            if not isinstance(value, list):
+                continue
+            try:
+                container[name] = sorted(set(value))
+            except TypeError:
+                continue
+
+    canonicalize(result, ("evidence_ids", "safe_path_evidence_ids"))
+    hypotheses = result.get("hypotheses")
+    if isinstance(hypotheses, list):
+        normalized_hypotheses = []
+        for value in hypotheses:
+            if not isinstance(value, dict):
+                normalized_hypotheses.append(value)
+                continue
+            hypothesis = dict(value)
+            canonicalize(
+                hypothesis,
+                (
+                    "source_evidence_ids",
+                    "path_evidence_ids",
+                    "guard_evidence_ids",
+                    "sink_evidence_ids",
+                    "contradicting_evidence_ids",
+                ),
+            )
+            normalized_hypotheses.append(hypothesis)
+        result["hypotheses"] = normalized_hypotheses
+    requests = result.get("context_requests")
+    if isinstance(requests, list):
+        normalized_requests = []
+        for value in requests:
+            if not isinstance(value, dict):
+                normalized_requests.append(value)
+                continue
+            request = dict(value)
+            canonicalize(
+                request,
+                (
+                    "evidence_ids",
+                    "supporting_addresses",
+                    "supporting_variables",
+                    "supporting_field_offsets",
+                ),
+            )
+            block_id = request.get("block_id")
+            if (
+                request.get("kind") == BinaryCodeContextRequestKind.DEFINITION_USE_CHAIN.value
+                and isinstance(block_id, str)
+                and block_id not in known_block_ids
+            ):
+                request["block_id"] = None
+            normalized_requests.append(request)
+        result["context_requests"] = normalized_requests
+    return result
+
+
 @dataclass
 class DecompilerContinuationAgent:
     client: DecompilerContinuationModelClient
@@ -556,7 +623,12 @@ class DecompilerContinuationAgent:
             parsed = try_extract_object(response.text)
             try:
                 if parsed is not None:
-                    assessment = DecompilerHunterAssessment.model_validate(parsed)
+                    assessment = DecompilerHunterAssessment.model_validate(
+                        _canonicalize_model_set_arrays(
+                            parsed,
+                            known_block_ids=frozenset(packet.base_packet.known_block_ids),
+                        )
+                    )
                     validate_continuation_assessment(packet, assessment)
                     usage = with_estimated_cost(
                         BudgetUsage(
@@ -715,6 +787,15 @@ def resolve_binary_code_context(
             BinaryCodeContextRejection.PROOF_UNAVAILABLE,
             unavailable,
         )
+    refinement_blocks = _refinement_block_ids(request, prior_entries)
+    slice_policy = active
+    if refinement_blocks:
+        slice_policy = active.model_copy(
+            update={
+                "maximum_blocks_per_response": 32,
+                "maximum_instructions_per_response": 512,
+            }
+        )
     slices, omissions = _build_slices(
         selected,
         focus=focus,
@@ -722,7 +803,8 @@ def resolve_binary_code_context(
         phi_origin_anchors=_request_phi_origin_anchor_addresses(request, selected),
         variable_anchors=_request_variable_anchor_addresses(request, selected),
         field_guard_anchors=_request_field_guard_anchor_addresses(request, selected),
-        policy=active,
+        refinement_blocks=refinement_blocks,
+        policy=slice_policy,
     )
     slices, deduplication_omissions = _remove_known_evidence(
         slices,
@@ -898,7 +980,7 @@ async def continue_decompiler_hunter_session(
     client: DecompilerContinuationModelClient,
     policy: BinaryCodeContextPolicy | None = None,
 ) -> DecompilerContextRunResult:
-    """Continue one persisted Hunter root at most four times and resume by chain digest."""
+    """Continue one persisted Hunter root at most five times and resume by chain digest."""
 
     active = policy or BinaryCodeContextPolicy()
     _validate_frozen_bindings(ir, packet)
@@ -1500,6 +1582,50 @@ def _qualified_owner(function: IRFunction) -> str:
     return match.group(1) if match is not None else ""
 
 
+def _refinement_block_ids(
+    request: BinaryCodeContextRequest,
+    prior_entries: Sequence[DecompilerContextChainEntry],
+) -> dict[str, set[str]]:
+    if request.kind not in {
+        BinaryCodeContextRequestKind.DEFINITION_USE_CHAIN,
+        BinaryCodeContextRequestKind.EXACT_FUNCTION,
+    }:
+        return {}
+    requested_variables = {
+        value
+        for value in (request.variable, *request.supporting_variables)
+        if value is not None
+    }
+    requested_supporting_addresses = set(request.supporting_addresses)
+    for entry in reversed(prior_entries):
+        previous = entry.response.request
+        if previous.function_id != request.function_id:
+            continue
+        if previous.kind is BinaryCodeContextRequestKind.DEFINITION_USE_CHAIN:
+            if previous.maximum_bytes >= request.maximum_bytes:
+                continue
+            if request.kind is BinaryCodeContextRequestKind.DEFINITION_USE_CHAIN:
+                previous_variables = {
+                    value
+                    for value in (previous.variable, *previous.supporting_variables)
+                    if value is not None
+                }
+                if not requested_variables.issuperset(previous_variables):
+                    continue
+                if not requested_supporting_addresses.issuperset(previous.supporting_addresses):
+                    continue
+        elif request.maximum_bytes < previous.maximum_bytes:
+            continue
+        omitted = {
+            function.function_id: set(function.omitted_block_ids)
+            for function in entry.response.functions
+            if function.function_id == request.function_id and function.omitted_block_ids
+        }
+        if omitted:
+            return omitted
+    return {}
+
+
 def _build_slices(
     functions: tuple[IRFunction, ...],
     *,
@@ -1508,6 +1634,7 @@ def _build_slices(
     phi_origin_anchors: Mapping[str, set[int]],
     variable_anchors: Mapping[str, set[int]],
     field_guard_anchors: Mapping[str, set[int]],
+    refinement_blocks: Mapping[str, set[str]],
     policy: BinaryCodeContextPolicy,
 ) -> tuple[tuple[BinaryCodeContextFunctionSlice, ...], tuple[str, ...]]:
     slices: list[BinaryCodeContextFunctionSlice] = []
@@ -1518,6 +1645,7 @@ def _build_slices(
         phi_origin_anchor_addresses = phi_origin_anchors.get(function.function_id, set())
         variable_anchor_addresses = variable_anchors.get(function.function_id, set())
         field_guard_anchor_addresses = field_guard_anchors.get(function.function_id, set())
+        refinement_block_ids = refinement_blocks.get(function.function_id, set())
         anchor_indices = {
             index
             for index, block in enumerate(function.blocks)
@@ -1569,7 +1697,7 @@ def _build_slices(
             if any(_is_signal(item) for item in block.instructions)
         }
 
-        def block_priority(index: int) -> tuple[int, int]:
+        def block_priority(index: int) -> tuple[int, int, int]:
             if index in anchor_indices:
                 priority = 0
             elif index in phi_origin_anchor_indices:
@@ -1584,7 +1712,8 @@ def _build_slices(
                 priority = 5
             else:
                 priority = 6
-            return priority, function.blocks[index].start_address
+            refinement_priority = int(function.blocks[index].block_id not in refinement_block_ids)
+            return priority, refinement_priority, function.blocks[index].start_address
 
         selected_indices = sorted(
             range(len(function.blocks)),

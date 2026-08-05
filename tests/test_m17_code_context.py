@@ -41,6 +41,7 @@ from vulnhunt_agent.macos.binary_analysis import (
     select_context_continuation_roots,
 )
 from vulnhunt_agent.macos.binary_analysis.capsules import _recover_call_edges
+from vulnhunt_agent.macos.binary_analysis.code_context import _refinement_block_ids
 
 _SNAPSHOT = "sha256:" + "b" * 64
 _UUID = "B2345678-1234-5678-9ABC-DEF012345678"
@@ -899,6 +900,66 @@ async def test_missing_callee_sink_completes_code_hypothesis(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_continuation_canonicalizes_unordered_evidence_ids(tmp_path) -> None:
+    ir, packet, _, worker, sink = _fixture(tmp_path)
+    request = _request(
+        packet,
+        BinaryCodeContextRequestKind.DIRECT_CALLEE,
+        function_id=worker.function_id,
+        related=sink.function_id,
+    )
+    response = resolve_binary_code_context(ir=ir, packet=packet, request=request)
+    payload = _hypothesis(packet, response, sink)
+    payload["evidence_ids"] = list(reversed(payload["evidence_ids"]))
+    client = _FakeClient([json.dumps(payload)])
+
+    result = await continue_decompiler_hunter_session(
+        store_root=tmp_path,
+        ir=ir,
+        packet=packet,
+        initial_assessment=_needs(packet, request),
+        initial_usage=_initial_usage(packet),
+        client=client,
+    )
+
+    assert result.terminal_assessment.disposition is DecompilerHunterDisposition.CODE_HYPOTHESIS
+    assert result.model_calls == 2
+    assert client.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_definition_use_drops_only_an_unknown_optional_block_hint(tmp_path) -> None:
+    ir, packet, _caller, worker, sink = _fixture(tmp_path)
+    first = _request(
+        packet,
+        BinaryCodeContextRequestKind.EXACT_FUNCTION,
+        function_id=sink.function_id,
+    )
+    first_response = resolve_binary_code_context(ir=ir, packet=packet, request=first)
+    next_request = _request(
+        packet,
+        BinaryCodeContextRequestKind.DEFINITION_USE_CHAIN,
+        function_id=worker.function_id,
+        variable="tmp13",
+    )
+    payload = _needs_next(packet, first_response, next_request)
+    payload["context_requests"][0]["block_id"] = "bb_ffffffffffffffff"
+
+    result = await continue_decompiler_hunter_session(
+        store_root=tmp_path,
+        ir=ir,
+        packet=packet,
+        initial_assessment=_needs(packet, first),
+        initial_usage=_initial_usage(packet),
+        client=_FakeClient([json.dumps(payload)]),
+        policy=BinaryCodeContextPolicy(maximum_continuations_per_root=1),
+    )
+
+    assert result.terminal_assessment.disposition is DecompilerHunterDisposition.NEEDS_CODE_CONTEXT
+    assert result.terminal_assessment.context_requests[0].block_id is None
+
+
+@pytest.mark.asyncio
 async def test_one_root_can_close_a_proof_on_third_continuation(tmp_path) -> None:
     metadata = _function(
         0x100007000,
@@ -1042,9 +1103,9 @@ async def test_one_root_can_close_a_proof_on_fourth_continuation(tmp_path) -> No
     assert client.calls == 4
 
 
-def test_context_policy_rejects_a_fifth_continuation() -> None:
+def test_context_policy_rejects_a_sixth_continuation() -> None:
     with pytest.raises(ValidationError):
-        BinaryCodeContextPolicy(maximum_continuations_per_root=5)
+        BinaryCodeContextPolicy(maximum_continuations_per_root=6)
 
 
 def test_only_one_root_can_consume_an_extended_continuation() -> None:
@@ -1060,6 +1121,183 @@ def test_only_one_root_can_consume_an_extended_continuation() -> None:
     assert first.maximum_continuations_per_root == 4
     assert remaining.maximum_continuations_per_root == 2
     assert remaining.maximum_total_evidence_bytes == 192 * 1024
+
+
+@pytest.mark.asyncio
+async def test_larger_definition_use_refinement_prioritizes_omitted_blocks(tmp_path) -> None:
+    address = 0x100009000
+    instructions = [
+        _instruction(address, "param", result="destination"),
+        _instruction(address + 4, "param", result="length"),
+        _instruction(
+            address + 8,
+            "call",
+            inputs=["destination", "length"],
+            target="validate_range",
+        ),
+        *(
+            _instruction(
+                address + 12 + index * 4,
+                "assign",
+                result=f"length_copy_{index}",
+                inputs=["length"],
+            )
+            for index in range(28)
+        ),
+        _instruction(
+            address + 124,
+            "store",
+            inputs=["destination", "length_copy_27"],
+        ),
+        _instruction(address + 128, "return"),
+    ]
+    reader = _function(address, "wide_range_reader", instructions)
+    reader["blocks"] = [
+        {
+            "name": f"wide-{index}",
+            "start": item["address"],
+            "size": 4,
+            "successors": [],
+            "instructions": [item],
+        }
+        for index, item in enumerate(instructions)
+    ]
+    ir, packet, _caller, _worker, _sink = _fixture(tmp_path, extra_functions=[reader])
+    reader_function = next(item for item in ir.functions if item.name == "wide_range_reader")
+    first = _request(
+        packet,
+        BinaryCodeContextRequestKind.DEFINITION_USE_CHAIN,
+        function_id=reader_function.function_id,
+        address=address + 12,
+        variable="length",
+        supporting_variables=("destination",),
+        maximum_bytes=32 * 1024,
+    ).model_copy(update={"request_id": "codectx-wide-reader-initial"})
+    first_response = resolve_binary_code_context(ir=ir, packet=packet, request=first)
+    assert first_response.status is BinaryCodeContextStatus.RESOLVED
+    assert not any(
+        item.kind is BinaryEvidenceFactKind.SECURITY_SINK
+        and item.address == address + 124
+        for item in first_response.facts
+    )
+    second = first.model_copy(
+        update={
+            "request_id": "codectx-wide-reader-refinement",
+            "address": address + 16,
+            "maximum_bytes": 96 * 1024,
+        }
+    )
+    first_result = await continue_decompiler_hunter_session(
+        store_root=tmp_path,
+        ir=ir,
+        packet=packet,
+        initial_assessment=_needs(packet, first),
+        initial_usage=_initial_usage(packet),
+        client=_FakeClient([json.dumps(_needs_next(packet, first_response, second))]),
+        policy=BinaryCodeContextPolicy(maximum_continuations_per_root=1),
+    )
+    exact_refinement = _request(
+        packet,
+        BinaryCodeContextRequestKind.EXACT_FUNCTION,
+        function_id=reader_function.function_id,
+        maximum_bytes=96 * 1024,
+    ).model_copy(update={"request_id": "codectx-wide-reader-exact-refinement"})
+
+    assert _refinement_block_ids(exact_refinement, first_result.entries) == {
+        reader_function.function_id: set(first_response.functions[0].omitted_block_ids)
+    }
+
+    refined = resolve_binary_code_context(
+        ir=ir,
+        packet=packet,
+        request=first_result.terminal_assessment.context_requests[0],
+        prior_entries=first_result.entries,
+        policy=BinaryCodeContextPolicy(maximum_continuations_per_root=5),
+    )
+
+    assert refined.status is BinaryCodeContextStatus.RESOLVED
+    assert any(
+        item.kind is BinaryEvidenceFactKind.SECURITY_SINK
+        and item.address == address + 124
+        for item in refined.facts
+    )
+    assert len(refined.functions[0].omitted_block_ids) < len(
+        first_response.functions[0].omitted_block_ids
+    )
+
+
+@pytest.mark.asyncio
+async def test_typed_refinement_inherits_a_broad_slice_omission_frontier(tmp_path) -> None:
+    address = 0x10000A000
+    instructions = [
+        _instruction(address, "param", result="value"),
+        *(
+            _instruction(
+                address + 4 + index * 4,
+                "assign",
+                result=f"value_copy_{index}",
+                inputs=["value"],
+            )
+            for index in range(11)
+        ),
+    ]
+    broad_function = _function(address, "broad_reader", instructions)
+    broad_function["blocks"] = [
+        {
+            "name": f"broad-{index}",
+            "start": item["address"],
+            "size": 4,
+            "successors": [],
+            "instructions": [item],
+        }
+        for index, item in enumerate(instructions)
+    ]
+    ir, packet, _caller, _worker, _sink = _fixture(
+        tmp_path,
+        extra_functions=[broad_function],
+    )
+    target = next(item for item in ir.functions if item.name == "broad_reader")
+    policy = BinaryCodeContextPolicy(
+        maximum_continuations_per_root=1,
+        maximum_blocks_per_response=8,
+    )
+    broad = _request(
+        packet,
+        BinaryCodeContextRequestKind.EXACT_FUNCTION,
+        function_id=target.function_id,
+        maximum_bytes=96 * 1024,
+    ).model_copy(update={"request_id": "codectx-broad-worker"})
+    broad_response = resolve_binary_code_context(
+        ir=ir,
+        packet=packet,
+        request=broad,
+        policy=policy,
+    )
+    refined = _request(
+        packet,
+        BinaryCodeContextRequestKind.DEFINITION_USE_CHAIN,
+        function_id=target.function_id,
+        variable="value",
+        maximum_bytes=96 * 1024,
+    ).model_copy(update={"request_id": "codectx-typed-worker-refinement"})
+    result = await continue_decompiler_hunter_session(
+        store_root=tmp_path,
+        ir=ir,
+        packet=packet,
+        initial_assessment=_needs(packet, broad),
+        initial_usage=_initial_usage(packet),
+        client=_FakeClient([json.dumps(_needs_next(packet, broad_response, refined))]),
+        policy=policy,
+    )
+
+    frontier = _refinement_block_ids(
+        result.terminal_assessment.context_requests[0],
+        result.entries,
+    )
+
+    assert frontier == {
+        target.function_id: set(broad_response.functions[0].omitted_block_ids)
+    }
 
 
 def test_typed_broker_resolves_block_defuse_and_return_use(tmp_path) -> None:
