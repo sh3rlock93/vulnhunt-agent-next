@@ -3248,6 +3248,10 @@ def _request_fingerprint(request: BinaryCodeContextRequest) -> tuple[object, ...
         request.block_id,
         request.address,
         request.variable,
+        request.supporting_addresses,
+        request.supporting_variables,
+        request.supporting_field_offsets,
+        request.maximum_bytes,
     )
 
 

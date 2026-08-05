@@ -1734,6 +1734,68 @@ submission ready. The next hunt should move to another admitted root rather
 than lower Reviewer thresholds or claim this conditional path as a confirmed
 vulnerability.
 
+### M17-28 — State-aware same-anchor refinement
+
+#### Trigger
+
+The next admitted KTX root followed the requested length through two wrappers,
+the range dispatcher, and the file backend. Backend evidence then made the
+dispatcher's earlier range guards newly relevant, but the Hunter had already
+requested that dispatcher block before learning the backend contract. Its
+second request retained the primary function, block, address, and variable
+while adding newly discovered supporting addresses and variables. The broker's
+coarse duplicate fingerprint ignored those selection anchors and rejected the
+seventh continuation as `duplicate_request`.
+
+#### Implementation scope
+
+- Define duplicate identity from every field that changes frozen-IR selection:
+  request kind, function relation, block, address, primary variable, supporting
+  addresses, supporting variables, supporting field offsets, and response byte
+  ceiling.
+- Continue to ignore request ID, rationale, and cited evidence IDs for duplicate
+  identity. Rewording a request or changing citations alone must not buy another
+  model call.
+- Reuse the existing equal-budget block refinement and omission-frontier rules;
+  do not add sessions, continuations, evidence bytes, prompt changes, Reviewer
+  relaxation, target allowlists, or dynamic execution.
+
+#### Exit criteria
+
+Synthetic coverage must prove that an expanded same-anchor request can recover
+a previously omitted sink, while repeating that fully expanded selection is
+still rejected. The pre-existing paid-call duplicate regression must remain
+green. Run the full M17 context suite, all M14/M16/M17 binary tests, the complete
+repository suite, Ruff, project-standard mypy, and the unchanged M15 blind gate
+twice. Finally resume the exact frozen KTX chain from its sixth signed entry and
+require the seventh response to resolve rather than reject.
+
+#### Current observation
+
+Implemented. The frozen KTX continuation resumed from the unchanged sixth chain
+entry and resolved the seventh request with 32,702 new evidence bytes. The
+seven-entry chain completed as
+`codehypothesis-clamped-read-uninitialized-tail` at Hunter confidence 0.78,
+using one root session, nine total model calls including repairs, 1,083,817
+input tokens, 24,727 output tokens, and 306,143 evidence bytes. Its chain digest
+is `sha256:ca1699f993d24ddfa622dd16bed83badbb2c80bffed9f85194e57e5d11a11934`.
+No image, generated input, fuzzer, VM, or dynamic experiment was used.
+
+The M14/M16/M17 binary suite passed 268 tests and the complete repository suite
+passed 814 tests with 8 environment-dependent skips. Ruff passed, mypy passed
+34 source files, and the unchanged M15 gate passed twice with TP=6, FP=0, FN=0
+and stable observation digest
+`sha256:84e4a0cdbbf6b44c689a259c579ef57f475e8064bcad549b3b68adec783795a4`.
+
+The independent Reviewer made one call with 203,304 input and 4,313 output
+tokens and correctly returned `reviewer_inconclusive`, with
+`reportable_static=0`. The code proves the internal clamp, shortened backend
+transfer, discarded status, and distinct direct-destination path. It does not
+yet prove runtime KTX selection, attacker provenance for the positive shortened
+range, the initialization contract of `__ImageIO_Malloc` or IOSurface storage,
+or the extent consumed by `createImageBlock`. This remains a conditional
+uninitialized-tail candidate rather than an Apple-submission-ready finding.
+
 ## Per-PR validation and merge procedure
 
 For each M17 PR:

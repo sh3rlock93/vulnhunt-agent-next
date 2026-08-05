@@ -2108,6 +2108,120 @@ def test_direct_callee_response_can_refine_a_new_referenced_block(tmp_path) -> N
     assert function.blocks[2].block_id in included
 
 
+def test_same_primary_anchor_can_refine_after_supporting_evidence_expands(tmp_path) -> None:
+    address = 0x10000AC00
+    helper = {
+        "entry": hex(address),
+        "size": 16,
+        "name": "state_aware_refinement",
+        "parameters": ["length"],
+        "pseudocode": "follow a length from its guard to the destination write",
+        "blocks": [
+            {
+                "name": "guard",
+                "start": hex(address),
+                "size": 4,
+                "successors": ["transfer"],
+                "instructions": [
+                    _instruction(address, "compare", result="valid", inputs=["length"]),
+                ],
+            },
+            {
+                "name": "transfer",
+                "start": hex(address + 4),
+                "size": 4,
+                "successors": ["sink"],
+                "instructions": [
+                    _instruction(address + 4, "assign", result="bounded", inputs=["length"]),
+                ],
+            },
+            {
+                "name": "sink",
+                "start": hex(address + 8),
+                "size": 4,
+                "successors": [],
+                "instructions": [
+                    _instruction(address + 8, "store", inputs=["destination", "bounded"]),
+                ],
+            },
+        ],
+    }
+    ir, packet, _, _, _ = _fixture(tmp_path, extra_functions=[helper])
+    function = next(item for item in ir.functions if item.start_address == address)
+    guard_block = function.blocks[0]
+    policy = BinaryCodeContextPolicy(maximum_blocks_per_response=1)
+    first = BinaryCodeContextRequest(
+        request_id="codectx-state-aware-initial",
+        kind=BinaryCodeContextRequestKind.DEFINITION_USE_CHAIN,
+        rationale="Recover the initial target-local length guard.",
+        function_id=function.function_id,
+        block_id=guard_block.block_id,
+        address=address,
+        variable="length",
+        evidence_ids=(packet.allowed_evidence_ids[0],),
+        maximum_bytes=32 * 1024,
+    )
+    first_response = resolve_binary_code_context(
+        ir=ir,
+        packet=packet,
+        request=first,
+        policy=policy,
+    )
+    assert first_response.status is BinaryCodeContextStatus.RESOLVED
+    assert first_response.functions[0].omitted_block_ids
+
+    refined = first.model_copy(
+        update={
+            "request_id": "codectx-state-aware-expanded",
+            "evidence_ids": (first_response.facts[0].fact_id,),
+            "supporting_addresses": (address + 4, address + 8),
+            "supporting_variables": ("bounded",),
+        }
+    )
+    first_entry = _make_entry(
+        packet=packet,
+        ordinal=1,
+        previous="sha256:" + "0" * 64,
+        response=first_response,
+        assessment=_needs(packet, refined),
+        usage=_initial_usage(packet).model_copy(update={"sessions": 0}),
+        raw=(),
+    )
+
+    refined_response = resolve_binary_code_context(
+        ir=ir,
+        packet=packet,
+        request=refined,
+        prior_entries=(first_entry,),
+        policy=policy,
+    )
+
+    assert refined_response.status is BinaryCodeContextStatus.RESOLVED
+    assert any(
+        fact.kind is BinaryEvidenceFactKind.SECURITY_SINK and fact.address == address + 8
+        for fact in refined_response.facts
+    )
+
+    second_entry = _make_entry(
+        packet=packet,
+        ordinal=2,
+        previous=first_entry.chain_sha256,
+        response=refined_response,
+        assessment=_needs(packet, refined),
+        usage=_initial_usage(packet).model_copy(update={"sessions": 0}),
+        raw=(),
+    )
+    duplicate = resolve_binary_code_context(
+        ir=ir,
+        packet=packet,
+        request=refined.model_copy(update={"request_id": "codectx-state-aware-repeat"}),
+        prior_entries=(first_entry, second_entry),
+        policy=policy,
+    )
+
+    assert duplicate.rejection is BinaryCodeContextRejection.DUPLICATE_REQUEST
+
+
 def test_definition_use_block_target_prioritizes_predecessor_sibling(tmp_path) -> None:
     address = 0x10000A000
     target_address = address + 0x200
