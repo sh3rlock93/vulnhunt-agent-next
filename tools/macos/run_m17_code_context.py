@@ -65,8 +65,8 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--work-id", action="append", default=[])
     parser.add_argument("--model", default=settings.DEFAULT_MODEL.model_id)
     parser.add_argument("--max-roots", type=int, default=6)
-    parser.add_argument("--max-continuations", type=int, default=2)
-    parser.add_argument("--max-evidence-kib", type=int, default=192)
+    parser.add_argument("--max-continuations", type=int, default=3)
+    parser.add_argument("--max-evidence-kib", type=int, default=288)
     parser.add_argument("--max-input-tokens", type=int, default=1_000_000)
     parser.add_argument("--max-output-tokens", type=int, default=100_000)
     parser.add_argument("--max-wall-clock-minutes", type=int, default=90)
@@ -120,12 +120,14 @@ async def _main() -> int:
     plan_rows: list[dict[str, object]] = []
     for item in admitted:
         if len(item.assessment.context_requests) != 1:
-            plan_rows.append({
-                "work_id": item.packet.work_id,
-                "root_id": item.packet.root_id,
-                "status": "reviewer_inconclusive",
-                "reason": "exactly one typed request is required",
-            })
+            plan_rows.append(
+                {
+                    "work_id": item.packet.work_id,
+                    "root_id": item.packet.root_id,
+                    "status": "reviewer_inconclusive",
+                    "reason": "exactly one typed request is required",
+                }
+            )
             continue
         response = resolve_binary_code_context(
             ir=ir,
@@ -133,47 +135,66 @@ async def _main() -> int:
             request=item.assessment.context_requests[0],
             policy=policy,
         )
-        plan_rows.append({
-            "work_id": item.packet.work_id,
-            "root_id": item.packet.root_id,
-            "admission_rank": item.packet.admission_rank,
-            "request_kind": response.request.kind.value,
-            "resolution_status": response.status.value,
-            "rejection": response.rejection.value if response.rejection else None,
-            "response_sha256": response.response_sha256,
-            "additional_evidence_bytes": response.evidence_bytes,
-        })
+        plan_rows.append(
+            {
+                "work_id": item.packet.work_id,
+                "root_id": item.packet.root_id,
+                "admission_rank": item.packet.admission_rank,
+                "request_kind": response.request.kind.value,
+                "resolution_status": response.status.value,
+                "rejection": response.rejection.value if response.rejection else None,
+                "response_sha256": response.response_sha256,
+                "additional_evidence_bytes": response.evidence_bytes,
+            }
+        )
     if arguments.plan_only:
-        print(json.dumps({
-            "schema_version": "decompiler-context-cli-plan-v1",
-            "admitted": plan_rows,
-            "deferred_work_ids": deferred_ids,
-            "model_calls": 0,
-            "image_executions": 0,
-            "decompiler_invocations": 0,
-            "fuzzer_invocations": 0,
-            "vm_boots": 0,
-        }, indent=2, sort_keys=True))
+        print(
+            json.dumps(
+                {
+                    "schema_version": "decompiler-context-cli-plan-v1",
+                    "admitted": plan_rows,
+                    "deferred_work_ids": deferred_ids,
+                    "model_calls": 0,
+                    "image_executions": 0,
+                    "decompiler_invocations": 0,
+                    "fuzzer_invocations": 0,
+                    "vm_boots": 0,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
         return 0
     if not admitted:
-        print(json.dumps({
-            "schema_version": "decompiler-context-cli-result-v1",
-            "completed": [],
-            "deferred_work_ids": deferred_ids,
-            "message": "no completed Hunter roots currently need code context",
-        }, indent=2, sort_keys=True))
+        print(
+            json.dumps(
+                {
+                    "schema_version": "decompiler-context-cli-result-v1",
+                    "completed": [],
+                    "deferred_work_ids": deferred_ids,
+                    "message": "no completed Hunter roots currently need code context",
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
         return 0
     results: list[DecompilerContextRunResult] = []
     pending: list[_Root] = []
     for item in admitted:
         persisted = (
-            store / "hunters" / item.packet.work_id / "decompiler-analysis" /
-            "code-context" / "result.json"
+            store
+            / "hunters"
+            / item.packet.work_id
+            / "decompiler-analysis"
+            / "code-context"
+            / "result.json"
         )
         if persisted.exists():
             results.append(_read_model(persisted, DecompilerContextRunResult))
         else:
             pending.append(item)
+    third_continuation_used = any(len(item.entries) == 3 for item in results)
     client = None
     if pending:
         client = LLMClient(arguments.model)
@@ -196,6 +217,17 @@ async def _main() -> int:
     for item in pending:
         assert client is not None
         budgeted = BudgetedLLMClient(client, controller, work_id=item.packet.work_id)
+        root_policy = policy
+        if third_continuation_used and policy.maximum_continuations_per_root == 3:
+            root_policy = policy.model_copy(
+                update={
+                    "maximum_continuations_per_root": 2,
+                    "maximum_total_evidence_bytes": min(
+                        policy.maximum_total_evidence_bytes,
+                        192 * 1024,
+                    ),
+                }
+            )
         try:
             result = await continue_decompiler_hunter_session(
                 store_root=store,
@@ -204,14 +236,17 @@ async def _main() -> int:
                 initial_assessment=item.assessment,
                 initial_usage=item.usage,
                 client=cast(DecompilerContinuationModelClient, budgeted),
-                policy=policy,
+                policy=root_policy,
             )
             results.append(result)
+            third_continuation_used = third_continuation_used or len(result.entries) == 3
         except BudgetExceededError as exc:
-            budget_deferred.append({
-                "work_id": item.packet.work_id,
-                "reason": exc.reason,
-            })
+            budget_deferred.append(
+                {
+                    "work_id": item.packet.work_id,
+                    "reason": exc.reason,
+                }
+            )
             break
         finally:
             controller.finish_work(item.packet.work_id)
