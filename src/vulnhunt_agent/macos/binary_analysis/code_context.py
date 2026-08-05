@@ -2376,13 +2376,14 @@ def _block_frontier_addresses(function: IRFunction, block_id: str) -> set[int]:
     block = blocks.get(block_id)
     if block is None:
         return set()
+    frontier_ids = {block.block_id, *block.successors}
+    for predecessor in function.blocks:
+        if block.block_id in predecessor.successors:
+            frontier_ids.update(predecessor.successors)
     return {
-        block.start_address,
-        *(
-            blocks[successor].start_address
-            for successor in block.successors
-            if successor in blocks
-        ),
+        blocks[frontier_id].start_address
+        for frontier_id in frontier_ids
+        if frontier_id in blocks
     }
 
 

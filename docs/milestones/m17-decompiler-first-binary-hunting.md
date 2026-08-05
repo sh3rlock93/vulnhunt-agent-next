@@ -1375,6 +1375,59 @@ than a successor of the final requested block. It remained in the exact frozen
 omission list. The next bounded change must include the target block's
 same-function predecessor siblings without recursive CFG expansion.
 
+### M17-23 — Block-targeted CFG branch-sibling frontier
+
+#### Trigger
+
+M17-22 followed the final target into its immediate successor and proved that
+path returns zero without writing. The only unresolved possible transfer block,
+`bb_8cf6af2391c86276`, is not downstream of that target: it is another successor
+of the target's immediate predecessor. It therefore stayed omitted even though
+the model named it exactly from frozen evidence.
+
+#### Implementation scope
+
+- For a definition/use request with `block_id`, retain the M17-22 target and
+  immediate-successor frontier and add the other same-function successors of
+  each immediate predecessor of the target.
+- Select only IDs already present in the frozen normalized IR. Traverse one
+  reverse edge solely to enumerate that predecessor's direct successors; do not
+  include recursive ancestors, descendants, cross-function blocks, or inferred
+  branch semantics.
+- Keep all existing block, instruction, byte, continuation, token, and evidence
+  budgets unchanged. Do not alter prompts, schemas, reportability, Reviewer
+  thresholds, decompilation, VM, fuzzer, or dynamic behavior.
+
+#### Exit criteria
+
+A deterministic non-adjacent CFG fixture must prove that a three-block response
+contains the exact target, its direct successor, and the other successor of its
+immediate predecessor. The M17-22 successor contract must remain green. Run the
+focused suite twice, M14/M16/M17, full, Ruff, mypy, and the unchanged M15 blind
+gate twice. Finally, rerun the frozen KTX rank-1 chain and require new
+address-backed evidence from `bb_8cf6af2391c86276`; classify only what that
+evidence proves.
+
+#### Current observation
+
+Implemented and validated. The focused suite passed twice (38 tests per pass),
+the M14/M16/M17 set passed (254 tests), the repository suite passed (800
+passed, 8 skipped), Ruff and the project-standard 197-file mypy gate passed,
+and the unchanged M15 gate passed twice with TP=6, FP=0, FN=0 and digest
+`sha256:84e4a0cdbbf6b44c689a259c579ef57f475e8064bcad549b3b68adec783795a4`.
+
+The fresh subscription-backed frozen KTX chain completed in seven model calls,
+877,659 input tokens, 14,770 output tokens, and 257,621 evidence bytes. The
+branch-sibling frontier exposed `bb_8cf6af2391c86276`, the transfer at
+6668352364, and the complete direct callee `getCGDataProviderBytesAtOffset`
+without omitted blocks. The terminal assessment was `not_vulnerable`: the
+caller-side writable destination extent matches the forwarded 64-bit length on
+the investigated paths, source availability may clamp that length, allocator
+failure is checked, and the conversion path uses a zero-initialized temporary
+buffer. This conclusion closes only the rank-1 size-mismatch candidate and does
+not clear unrelated arithmetic or conversion-loop candidates. The next action
+is to analyze the already-admitted rank-2 root before adding any broader code.
+
 ## Per-PR validation and merge procedure
 
 For each M17 PR:
