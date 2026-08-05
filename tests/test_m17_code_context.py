@@ -39,11 +39,15 @@ from vulnhunt_agent.macos.binary_analysis import (
     rank_binary_functions,
     resolve_binary_code_context,
     select_context_continuation_roots,
+    validate_continuation_assessment,
 )
 from vulnhunt_agent.macos.binary_analysis.capsules import _recover_call_edges
 from vulnhunt_agent.macos.binary_analysis.code_context import (
     _bind_context_edges_to_slices,
+    _make_continuation_packet,
+    _make_entry,
     _refinement_block_ids,
+    _select_object_field_provenance,
 )
 
 _SNAPSHOT = "sha256:" + "b" * 64
@@ -1487,6 +1491,14 @@ def test_only_one_root_can_consume_an_extended_continuation() -> None:
     assert remaining.maximum_total_evidence_bytes == 192 * 1024
 
 
+def test_extended_root_evidence_ceiling_is_bounded_at_384_kib() -> None:
+    policy = BinaryCodeContextPolicy(maximum_total_evidence_bytes=384 * 1024)
+
+    assert policy.maximum_total_evidence_bytes == 384 * 1024
+    with pytest.raises(ValidationError, match="less than or equal to 393216"):
+        BinaryCodeContextPolicy(maximum_total_evidence_bytes=384 * 1024 + 1)
+
+
 @pytest.mark.asyncio
 async def test_larger_definition_use_refinement_prioritizes_omitted_blocks(tmp_path) -> None:
     address = 0x100009000
@@ -1779,6 +1791,38 @@ def test_definition_use_response_exposes_exact_edge_at_requested_callsite(tmp_pa
     assert response.call_edges[0].callee_function_id == sink.function_id
 
 
+def test_continuation_rejects_supporting_address_from_another_function(tmp_path) -> None:
+    ir, packet, caller, worker, _ = _fixture(tmp_path)
+    first = _request(
+        packet,
+        BinaryCodeContextRequestKind.DIRECT_CALLER,
+        function_id=worker.function_id,
+        related=caller.function_id,
+    )
+    response = resolve_binary_code_context(ir=ir, packet=packet, request=first)
+    caller_address = response.functions[0].blocks[0].instructions[0].address
+    evidence = response.facts[0].fact_id
+    invalid = BinaryCodeContextRequest(
+        request_id="codectx-cross-function-supporting-address",
+        kind=BinaryCodeContextRequestKind.DEFINITION_USE_CHAIN,
+        rationale="The cited caller is context, not part of the target definition/use slice.",
+        function_id=worker.function_id,
+        variable="length",
+        supporting_addresses=(caller_address,),
+        evidence_ids=(evidence,),
+    )
+    continuation = _make_continuation_packet(
+        packet=packet,
+        prior_assessment=_needs(packet, first),
+        responses=(response,),
+        ordinal=1,
+        previous=packet.packet_sha256,
+    )
+
+    with pytest.raises(ValueError, match="supporting address outside its target function"):
+        validate_continuation_assessment(continuation, _needs(packet, invalid))
+
+
 def test_definition_use_request_compacts_same_address_decompiler_noise(tmp_path) -> None:
     address = 0x100006000
     noisy = _function(
@@ -1952,6 +1996,116 @@ def test_definition_use_block_target_prioritizes_immediate_cfg_successors(tmp_pa
 
     assert response.status is BinaryCodeContextStatus.RESOLVED
     assert {target_block.block_id, *successor_ids}.issubset(included)
+
+
+def test_direct_callee_response_can_refine_a_new_referenced_block(tmp_path) -> None:
+    address = 0x10000A800
+    helper = {
+        "entry": hex(address),
+        "size": 16,
+        "name": "decode_equal_budget_refinement",
+        "parameters": [],
+        "pseudocode": "refine a newly referenced successor at the response byte ceiling",
+        "blocks": [
+            {
+                "name": "entry",
+                "start": hex(address),
+                "size": 8,
+                "successors": ["tail"],
+                "instructions": [
+                    _instruction(address, "param", result="seed"),
+                    _instruction(address + 4, "compare", result="has_seed", inputs=["seed"]),
+                ],
+            },
+            {
+                "name": "tail",
+                "start": hex(address + 8),
+                "size": 4,
+                "successors": ["done"],
+                "instructions": [
+                    _instruction(address + 8, "assign", result="tail", inputs=["seed"])
+                ],
+            },
+            {
+                "name": "done",
+                "start": hex(address + 12),
+                "size": 4,
+                "successors": [],
+                "instructions": [_instruction(address + 12, "return", inputs=["tail"])],
+            },
+        ],
+    }
+    caller = _function(
+        address - 0x100,
+        "decode_equal_budget_caller",
+        [
+            _instruction(address - 0x100, "param", result="seed"),
+            _instruction(
+                address - 0xFC,
+                "call",
+                result="status",
+                inputs=["seed"],
+                target="decode_equal_budget_refinement",
+            ),
+            _instruction(address - 0xF8, "return", inputs=["status"]),
+        ],
+    )
+    ir, packet, _, _, _ = _fixture(tmp_path, extra_functions=[caller, helper])
+    function = next(item for item in ir.functions if item.start_address == address)
+    caller_function = next(
+        item for item in ir.functions if item.start_address == address - 0x100
+    )
+    first = BinaryCodeContextRequest(
+        request_id="codectx-equal-budget-first",
+        kind=BinaryCodeContextRequestKind.DIRECT_CALLEE,
+        rationale="Recover the bounded callee prefix.",
+        function_id=caller_function.function_id,
+        related_function_id=function.function_id,
+        evidence_ids=(packet.allowed_evidence_ids[0],),
+        maximum_bytes=32 * 1024,
+    )
+    policy = BinaryCodeContextPolicy(maximum_blocks_per_response=1)
+    first_response = resolve_binary_code_context(
+        ir=ir,
+        packet=packet,
+        request=first,
+        policy=policy,
+    )
+    target_block = function.blocks[1]
+    second = BinaryCodeContextRequest(
+        request_id="codectx-equal-budget-second",
+        kind=BinaryCodeContextRequestKind.DEFINITION_USE_CHAIN,
+        rationale="Follow the newly supplied successor without exceeding the response cap.",
+        function_id=function.function_id,
+        block_id=target_block.block_id,
+        variable="tail",
+        evidence_ids=(first_response.facts[0].fact_id,),
+        maximum_bytes=32 * 1024,
+    )
+    entry = _make_entry(
+        packet=packet,
+        ordinal=1,
+        previous="sha256:" + "0" * 64,
+        response=first_response,
+        assessment=_needs(packet, second),
+        usage=_initial_usage(packet).model_copy(update={"sessions": 0}),
+        raw=(),
+    )
+
+    refined = resolve_binary_code_context(
+        ir=ir,
+        packet=packet,
+        request=second,
+        prior_entries=(entry,),
+        policy=policy,
+    )
+    included = {
+        block.block_id for function_slice in refined.functions for block in function_slice.blocks
+    }
+
+    assert refined.status is BinaryCodeContextStatus.RESOLVED, refined.detail
+    assert target_block.block_id in included
+    assert function.blocks[2].block_id in included
 
 
 def test_definition_use_block_target_prioritizes_predecessor_sibling(tmp_path) -> None:
@@ -2186,6 +2340,166 @@ def test_definition_use_request_recovers_bounded_cross_function_field_provenance
     assert prepare_function.function_id in response_ids
     assert unrelated_function.function_id not in response_ids
     assert {0x100004004, 0x10000400C, 0x1000040E0}.issubset(response_addresses)
+
+
+def test_object_field_provenance_prefers_cited_function_over_unrelated_lifecycle(
+    tmp_path,
+) -> None:
+    cited = _function(
+        0x100009000,
+        "getBytesAtOffset",
+        [
+            _instruction(0x100009000, "param", result="this"),
+            _instruction(
+                0x100009004,
+                "add",
+                result="reader_length_field",
+                inputs=["this", "const_50"],
+                constants=[0x50],
+            ),
+            _instruction(0x100009008, "load", inputs=["reader_length_field"]),
+            _instruction(0x10000900C, "return"),
+        ],
+    )
+    unrelated = _function(
+        0x10000A000,
+        "initialize",
+        [
+            _instruction(0x10000A000, "param", result="this"),
+            _instruction(
+                0x10000A004,
+                "add",
+                result="unrelated_length_field",
+                inputs=["this", "const_50"],
+                constants=[0x50],
+            ),
+            _instruction(0x10000A008, "store", inputs=["unrelated_length_field", "size"]),
+            _instruction(0x10000A00C, "return"),
+        ],
+    )
+    root = _function(
+        0x10000B000,
+        "decodeRows",
+        [
+            _instruction(0x10000B000, "param", result="this"),
+            _instruction(0x10000B004, "param", result="row"),
+            _instruction(0x10000B008, "return"),
+        ],
+    )
+    ir, _, _, _, _ = _fixture(
+        tmp_path,
+        extra_functions=[cited, unrelated, root],
+    )
+    by_address = {item.start_address: item for item in ir.functions}
+    cited_function = by_address[0x100009000]
+    unrelated_function = by_address[0x10000A000]
+    root_function = by_address[0x10000B000]
+
+    selected, _, error = _select_object_field_provenance(
+        root_function,
+        ir.functions,
+        (0x50,),
+        preferred_function_ids=frozenset({cited_function.function_id}),
+    )
+
+    assert error is None
+    assert tuple(item.function_id for item in selected) == (cited_function.function_id,)
+    assert unrelated_function.function_id not in {item.function_id for item in selected}
+
+
+def test_definition_use_prefers_root_owner_constructor_callee_field_writer(
+    tmp_path,
+) -> None:
+    root = _function(
+        0x10000C000,
+        "decodeRows",
+        [
+            _instruction(0x10000C000, "param", result="this"),
+            _instruction(0x10000C004, "param", result="row"),
+            _instruction(0x10000C008, "return", inputs=["row"]),
+        ],
+    )
+    root["pseudocode"] = "/* FormatReadPlugin::decodeRows() */\n" + root["pseudocode"]
+    constructor = _function(
+        0x10000D000,
+        "FormatReadPlugin",
+        [
+            _instruction(0x10000D000, "param", result="this"),
+            _instruction(
+                0x10000D004,
+                "call",
+                inputs=["this"],
+                target="IIOReadPlugin",
+            ),
+            _instruction(0x10000D008, "return"),
+        ],
+    )
+    constructor["pseudocode"] = (
+        "/* FormatReadPlugin::FormatReadPlugin() */\n" + constructor["pseudocode"]
+    )
+    base_constructor = _function(
+        0x10000E000,
+        "IIOReadPlugin",
+        [
+            _instruction(0x10000E000, "param", result="this"),
+            _instruction(
+                0x10000E004,
+                "add",
+                result="extent_field",
+                inputs=["this", "const_c8"],
+                constants=[0xC8],
+            ),
+            _instruction(0x10000E008, "store", inputs=["extent_field", "reader_size"]),
+            _instruction(0x10000E00C, "return"),
+        ],
+    )
+    base_constructor["pseudocode"] = (
+        "/* IIOReadPlugin::IIOReadPlugin() */\n" + base_constructor["pseudocode"]
+    )
+    unrelated = _function(
+        0x10000F000,
+        "initialize",
+        [
+            _instruction(0x10000F000, "param", result="this"),
+            _instruction(
+                0x10000F004,
+                "add",
+                result="unrelated_extent",
+                inputs=["this", "const_c8"],
+                constants=[0xC8],
+            ),
+            _instruction(0x10000F008, "store", inputs=["unrelated_extent", "size"]),
+            _instruction(0x10000F00C, "return"),
+        ],
+    )
+    unrelated["pseudocode"] = (
+        "/* OtherReadPlugin::initialize() */\n" + unrelated["pseudocode"]
+    )
+    ir, packet, _, _, _ = _fixture(
+        tmp_path,
+        extra_functions=[root, constructor, base_constructor, unrelated],
+    )
+    by_address = {item.start_address: item for item in ir.functions}
+    root_function = by_address[0x10000C000]
+    base_function = by_address[0x10000E000]
+    unrelated_function = by_address[0x10000F000]
+    request = BinaryCodeContextRequest(
+        request_id="codectx-constructor-callee-provenance",
+        kind=BinaryCodeContextRequestKind.DEFINITION_USE_CHAIN,
+        rationale="Recover the root owner's base-constructor field initialization.",
+        function_id=root_function.function_id,
+        variable="row",
+        supporting_field_offsets=(0xC8,),
+        evidence_ids=(packet.allowed_evidence_ids[0],),
+        maximum_bytes=32 * 1024,
+    )
+
+    response = resolve_binary_code_context(ir=ir, packet=packet, request=request)
+    response_ids = {item.function_id for item in response.functions}
+
+    assert response.status is BinaryCodeContextStatus.RESOLVED, response.detail
+    assert base_function.function_id in response_ids
+    assert unrelated_function.function_id not in response_ids
 
 
 def test_definition_use_request_prioritizes_direct_fields_over_provenance_closure(

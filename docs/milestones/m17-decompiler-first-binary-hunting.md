@@ -1651,6 +1651,89 @@ vulnerability. The next bounded milestone must recover those two provenance
 contracts rather than add sessions, lower Reviewer thresholds, or use dynamic
 execution.
 
+### M17-27 — Cross-object initialization and complete backend closure
+
+#### Trigger
+
+M17-26 could name the two missing proof obligations, but the 1,200-function
+export omitted both `SGIReadPlugin` constructors and both `IIOReadPlugin`
+constructors. The field-provenance selector also preferred an unrelated
+lifecycle access over a function cited by the Reviewer. After constructor
+coverage recovered the real extent write, the same root exposed two further
+bounded broker defects: cross-function request anchors passed continuation
+validation but failed at resolution, and the first definition/use refinement
+of a direct-callee response remained at the ordinary 20-block frontier.
+
+#### Implementation scope
+
+- Promote constructors belonging to owners of mandatory parser evidence before
+  the evidence cap. Use qualified symbol ownership and constructor identity;
+  do not recognize ImageIO formats, function addresses, field offsets, or
+  vulnerability classes.
+- When resolving object-field provenance, prefer functions cited by the active
+  request and one-hop base constructors reached from the root owner's
+  constructors before unrelated lifecycle candidates.
+- Require every requested block, address, and variable to belong to its
+  `function_id` during continuation validation so the existing single repair
+  turn corrects invalid cross-function anchors before broker resolution.
+- Treat a block-addressed definition/use request as a refinement when its block
+  was included, omitted, or named as a successor by a prior response, including
+  a response reached through `direct_callee`. At the 96 KiB response ceiling,
+  an equal-size request may advance only to such a newly referenced block.
+- Retain seven continuations, the 96 KiB per-response cap, and the reduced
+  192 KiB budget for later roots. Raise only the single extended-root evidence
+  ceiling to 384 KiB after offline replay proved that 288 KiB and 320 KiB both
+  truncated the final 25-block backend function.
+- Preserve the frozen-IR, citation, reportability, no-execution, no-fuzzer, and
+  no-VM contracts.
+
+#### Exit criteria
+
+Synthetic tests must prove parser-owner constructor promotion, cited-function
+field preference, one-hop base-constructor provenance, target-local request
+validation, direct-callee-to-definition/use refinement, and rejection above
+the 384 KiB extended-root ceiling. The same frozen ImageIO export must contain
+the SGI and base constructors, and offline replay must return all 25 backend
+blocks with zero omissions within the bounded ceiling. Run focused tests,
+M14/M16/M17, the full suite, Ruff, project-standard mypy, and the unchanged M15
+blind gate twice before accepting the real Hunter and Reviewer results.
+
+#### Current observation
+
+Implemented and validated. The exporter selected 1,262 functions, including
+both `SGIReadPlugin` and both `IIOReadPlugin` constructors, and produced IR
+digest `sha256:ad32dd627bd743b589531d993153668d1313560298e53b05a5b86a942861e724`
+for the unchanged snapshot and ImageIO UUID. The exact Reviewer request now
+selects the SGI root, the cited reader `getBytesAtOffset`, and the base
+constructor that writes the root extent. An offline final replay returned all
+25 `getFileBytesAtOffset` blocks, zero omissions, 85,816 response bytes, and
+380,046 total evidence bytes.
+
+The focused suite passed 64 tests, the repository suite passed 813 tests with
+8 environment-dependent skips, Ruff passed, and mypy passed 34 source files.
+The unchanged M15 gate passed twice with TP=6, FP=0, FN=0 and stable observation
+digest
+`sha256:84e4a0cdbbf6b44c689a259c579ef57f475e8064bcad549b3b68adec783795a4`.
+
+The real rank-2 SGI chain completed seven continuations and emitted
+`codehypothesis-rle-discarded-short-read`. It used one root session, nine model
+calls including repair calls, 1,296,938 input tokens, 23,761 output tokens, and
+380,046 evidence bytes. The independent Reviewer made one call with 236,122
+input and 3,347 output tokens. Every image, decompiler rerun after the frozen
+export, generated input, dynamic experiment, fuzzer, and VM counter remained
+zero.
+
+The Reviewer proved the direct parser/backend path, the short-read
+initialization invariant, applicable guards, sink, impact boundary, and
+contradiction analysis, but correctly ended `reviewer_inconclusive`. The
+remaining gap is not missing code: a validated immutable regular-file range
+ordinarily makes `pread` complete, and the static evidence does not prove that
+attacker-controlled image bytes alone can force a short read without external
+truncation, mutation, or I/O failure. This candidate is therefore not Apple
+submission ready. The next hunt should move to another admitted root rather
+than lower Reviewer thresholds or claim this conditional path as a confirmed
+vulnerability.
+
 ## Per-PR validation and merge procedure
 
 For each M17 PR:
