@@ -918,6 +918,96 @@ def test_definition_use_request_binds_multiple_independent_proof_anchors(tmp_pat
     assert set((request.address, *request.supporting_addresses)).issubset(combined_addresses)
 
 
+def test_definition_use_request_compacts_same_address_decompiler_noise(tmp_path) -> None:
+    address = 0x100006000
+    noisy = _function(
+        address,
+        "decode_noisy_rows",
+        [
+            _instruction(address, "param", result="input_count", tags=["input_length"]),
+            _instruction(
+                address + 4,
+                "mul",
+                result="surface_bytes",
+                inputs=["input_count", "surface_stride"],
+            ),
+            _instruction(
+                address + 8,
+                "mul",
+                result="allocated_bytes",
+                inputs=["input_count", "allocated_stride"],
+            ),
+            _instruction(
+                address + 12,
+                "phi",
+                result="requested_bytes",
+                inputs=["surface_bytes", "allocated_bytes"],
+            ),
+            _instruction(
+                address + 16,
+                "call",
+                inputs=["destination", "requested_bytes"],
+                target="getBytesAtOffset",
+                tags=["read_session_input"],
+            ),
+            *(
+                _instruction(
+                    address + 16,
+                    "unknown",
+                    result=f"indirect_effect_{index}",
+                    inputs=[f"prior_effect_{index}"],
+                )
+                for index in range(80)
+            ),
+            *(
+                _instruction(
+                    address + 20 + index * 4,
+                    "assign",
+                    result=f"downstream_{index}",
+                    inputs=["input_count"],
+                )
+                for index in range(20)
+            ),
+            _instruction(address + 0xFC, "return"),
+        ],
+    )
+    ir, packet, _, _, _ = _fixture(tmp_path, extra_functions=[noisy])
+    target = next(item for item in ir.functions if item.start_address == address)
+    request = BinaryCodeContextRequest(
+        request_id="codectx-compact-decompiler-noise",
+        kind=BinaryCodeContextRequestKind.DEFINITION_USE_CHAIN,
+        rationale="Retain the requested size proof without same-address side-effect noise.",
+        function_id=target.function_id,
+        address=address + 16,
+        variable="requested_bytes",
+        supporting_addresses=(address + 4, address + 8),
+        supporting_variables=("allocated_bytes", "input_count"),
+        evidence_ids=(packet.allowed_evidence_ids[0],),
+        maximum_bytes=16 * 1024,
+    )
+
+    first = resolve_binary_code_context(ir=ir, packet=packet, request=request)
+    second = resolve_binary_code_context(ir=ir, packet=packet, request=request)
+    instructions = tuple(
+        instruction
+        for function in first.functions
+        for block in function.blocks
+        for instruction in block.instructions
+    )
+
+    assert first.status is BinaryCodeContextStatus.RESOLVED
+    assert first.evidence_bytes <= request.maximum_bytes
+    assert first.response_sha256 == second.response_sha256
+    assert any(
+        item.address == address + 16 and item.callee == "getBytesAtOffset"
+        for item in instructions
+    )
+    assert {"surface_bytes", "allocated_bytes", "requested_bytes"}.issubset(
+        {item.result for item in instructions}
+    )
+    assert sum(item.operation.value == "unknown" for item in instructions) < 32
+
+
 def test_supporting_anchors_are_rejected_for_non_definition_use_request(tmp_path) -> None:
     _, packet, _, worker, _ = _fixture(tmp_path)
     with pytest.raises(ValidationError, match="require a definition/use request"):

@@ -1529,6 +1529,12 @@ def _build_slices(
                 block.instructions,
                 target_addresses,
                 min(remaining_instructions, per_block_limit),
+                priority_targets=(
+                    anchor_addresses
+                    | phi_origin_anchor_addresses
+                    | variable_anchor_addresses
+                    | field_guard_anchor_addresses
+                ),
             )
             if not instructions:
                 continue
@@ -1579,25 +1585,36 @@ def _bounded_instructions(
     instructions: tuple[IRInstruction, ...],
     targets: set[int],
     maximum: int,
+    *,
+    priority_targets: set[int] | None = None,
 ) -> tuple[IRInstruction, ...]:
     if len(instructions) <= maximum:
         return instructions
+    priority_targets = priority_targets or set()
     target_indices = {index for index, item in enumerate(instructions) if item.address in targets}
+    priority_target_indices = {
+        index for index, item in enumerate(instructions) if item.address in priority_targets
+    }
     signal_indices = {index for index, item in enumerate(instructions) if _is_signal(item)}
 
-    def priority(index: int) -> tuple[int, int, int]:
+    def priority(index: int) -> tuple[int, int, int, int]:
+        instruction = instructions[index]
+        signal_rank = int(index not in signal_indices)
+        unknown_rank = int(instruction.operation is IROperation.UNKNOWN)
+        if index in priority_target_indices:
+            return 0, signal_rank, unknown_rank, index
         if index in target_indices:
-            return 0, 0, index
+            return 1, signal_rank, unknown_rank, index
         distance = (
             min(abs(index - target) for target in target_indices)
             if target_indices
             else len(instructions)
         )
         if distance <= 3:
-            return 1, distance, index
+            return 2, distance, signal_rank, index
         if index in signal_indices:
-            return 2, 0, index
-        return 3, distance, index
+            return 3, 0, unknown_rank, index
+        return 4, distance, unknown_rank, index
 
     chosen = sorted(sorted(range(len(instructions)), key=priority)[:maximum])
     return tuple(instructions[index] for index in chosen)
@@ -1741,6 +1758,7 @@ def _fit_response_budget(
         )
     current = tuple(stripped)
     current_omissions.append("response byte budget omitted pseudocode; normalized IR retained")
+    current_omissions.append("response byte budget may omit lower-priority instructions")
     while (
         facts
         and _context_evidence_bytes(current, edges, facts, tuple(sorted(set(current_omissions))))
@@ -1774,7 +1792,6 @@ def _fit_response_budget(
             if blocks:
                 trimmed.append(function.model_copy(update={"blocks": tuple(blocks)}))
         current = tuple(trimmed)
-    current_omissions.append("response byte budget may omit lower-priority instructions")
     return current, edges, facts, tuple(sorted(set(current_omissions)))
 
 
@@ -1951,14 +1968,29 @@ def _protected_request_instruction_keys(
         if variable is not None
     }
     if requested_variables:
-        protected.update(
-            (function.function_id, instruction.address, instruction.index)
-            for function in functions
-            for block in function.blocks
-            for instruction in block.instructions
-            if instruction.result in requested_variables
-            or bool(set(instruction.operands).intersection(requested_variables))
-        )
+        if request.kind is BinaryCodeContextRequestKind.DEFINITION_USE_CHAIN:
+            for function in functions:
+                protected.update(
+                    (function.function_id, address, index)
+                    for address, index in _definition_use_core_instruction_keys(
+                        function,
+                        requested_variables,
+                        requested_addresses={
+                            address
+                            for address in (request.address, *request.supporting_addresses)
+                            if address is not None
+                        },
+                    )
+                )
+        else:
+            protected.update(
+                (function.function_id, instruction.address, instruction.index)
+                for function in functions
+                for block in function.blocks
+                for instruction in block.instructions
+                if instruction.result in requested_variables
+                or bool(set(instruction.operands).intersection(requested_variables))
+            )
         for function in functions:
             protected.update(
                 (function.function_id, address, index)
@@ -1989,18 +2021,17 @@ def _protected_request_instruction_keys(
                 for block in function.blocks
                 for instruction in block.instructions
                 if instruction.address == direct_address
-                and instruction.operation in {IROperation.ADD, IROperation.LOAD, IROperation.STORE}
+                and instruction.operation is IROperation.ADD
+                and offset in instruction.constants
             )
-        for function in functions:
-            guard_addresses = _object_field_guard_anchor_addresses(
-                function, request.supporting_field_offsets
-            )
+            guard_addresses = _object_field_guard_anchor_addresses(function, (offset,))
+            guard_address = min(guard_addresses) if guard_addresses else None
             protected.update(
                 (function.function_id, instruction.address, instruction.index)
                 for block in function.blocks
                 for instruction in block.instructions
-                if instruction.address in guard_addresses
-                and instruction.operation in {IROperation.COMPARE, IROperation.BRANCH}
+                if instruction.address == guard_address
+                and instruction.operation is IROperation.COMPARE
             )
     requested_addresses = {
         address
@@ -2026,7 +2057,7 @@ def _protected_request_instruction_keys(
             )
             protected.update(
                 (function_id, instruction.address, instruction.index)
-                for function_id, instruction in matches[:2]
+                for function_id, instruction in _preferred_address_matches(matches)
             )
     for edge in edges:
         protected.add(
@@ -2140,15 +2171,66 @@ def _request_variable_anchor_addresses(
     }
     if not requested_variables:
         return anchors
+    requested_addresses = {
+        address
+        for address in (request.address, *request.supporting_addresses)
+        if address is not None
+    }
     for function in functions:
         anchors[function.function_id].update(
-            instruction.address
-            for block in function.blocks
-            for instruction in block.instructions
-            if instruction.result in requested_variables
-            or bool(set(instruction.operands).intersection(requested_variables))
+            address
+            for address, _ in _definition_use_core_instruction_keys(
+                function,
+                requested_variables,
+                requested_addresses=requested_addresses,
+            )
         )
     return anchors
+
+
+def _definition_use_core_instruction_keys(
+    function: IRFunction,
+    variables: set[str],
+    *,
+    requested_addresses: set[int],
+) -> set[tuple[int, int]]:
+    """Select the minimum deterministic proof core for requested SSA values."""
+
+    instructions = tuple(
+        instruction for block in function.blocks for instruction in block.instructions
+    )
+    keys = _direct_phi_origin_instruction_keys(function, variables)
+    for variable in sorted(variables):
+        definitions = tuple(item for item in instructions if item.result == variable)
+        keys.update((item.address, item.index) for item in definitions)
+        uses = tuple(item for item in instructions if variable in item.operands)
+        if uses:
+            best = min(
+                uses,
+                key=lambda item: (
+                    item.address not in requested_addresses,
+                    item.operation
+                    not in {
+                        IROperation.ALLOCATE,
+                        IROperation.COPY,
+                        IROperation.STORE,
+                        IROperation.CALL,
+                    },
+                    item.operation is not IROperation.COMPARE,
+                    item.operation is IROperation.UNKNOWN,
+                    item.address,
+                    item.index,
+                ),
+            )
+            keys.add((best.address, best.index))
+    return keys
+
+
+def _preferred_address_matches(
+    matches: Sequence[tuple[str, IRInstruction]],
+) -> tuple[tuple[str, IRInstruction], ...]:
+    signals = tuple(item for item in matches if _is_signal(item[1]))
+    return signals[:2] if signals else tuple(matches[:1])
 
 
 def _direct_phi_origin_instruction_keys(
