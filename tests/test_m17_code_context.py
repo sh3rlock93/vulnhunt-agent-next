@@ -1854,6 +1854,112 @@ def test_definition_use_block_target_prioritizes_immediate_cfg_successors(tmp_pa
     assert {target_block.block_id, *successor_ids}.issubset(included)
 
 
+def test_definition_use_block_target_prioritizes_predecessor_sibling(tmp_path) -> None:
+    address = 0x10000A000
+    target_address = address + 0x200
+    sibling_address = address + 0x204
+    target_exit_address = address + 0x208
+    helper = {
+        "entry": hex(address),
+        "size": 0x20C,
+        "name": "decode_branch_sibling_frontier",
+        "parameters": [],
+        "pseudocode": "select a sibling transfer path",
+        "blocks": [
+            {
+                "name": "predecessor",
+                "start": hex(address),
+                "size": 8,
+                "successors": ["target", "sibling"],
+                "instructions": [
+                    _instruction(address, "param", result="branch_choice"),
+                    _instruction(address + 4, "branch", inputs=["branch_choice"]),
+                ],
+            },
+            *[
+                {
+                    "name": f"filler-{index}",
+                    "start": hex(address + 8 + index * 4),
+                    "size": 4,
+                    "successors": [],
+                    "instructions": [
+                        _instruction(
+                            address + 8 + index * 4,
+                            "assign",
+                            result=f"filler_value_{index}",
+                            inputs=["constant"],
+                        )
+                    ],
+                }
+                for index in range(24)
+            ],
+            {
+                "name": "target",
+                "start": hex(target_address),
+                "size": 4,
+                "successors": ["target-exit"],
+                "instructions": [
+                    _instruction(
+                        target_address,
+                        "phi",
+                        result="selected_length",
+                        inputs=["requested_length", "available_length"],
+                    )
+                ],
+            },
+            {
+                "name": "sibling",
+                "start": hex(sibling_address),
+                "size": 4,
+                "successors": [],
+                "instructions": [
+                    _instruction(
+                        sibling_address,
+                        "store",
+                        inputs=["destination", "selected_length"],
+                    )
+                ],
+            },
+            {
+                "name": "target-exit",
+                "start": hex(target_exit_address),
+                "size": 4,
+                "successors": [],
+                "instructions": [_instruction(target_exit_address, "return")],
+            },
+        ],
+    }
+    ir, packet, _, _, _ = _fixture(tmp_path, extra_functions=[helper])
+    function = next(item for item in ir.functions if item.start_address == address)
+    blocks_by_address = {block.start_address: block for block in function.blocks}
+    target_block = blocks_by_address[target_address]
+    request = BinaryCodeContextRequest(
+        request_id="codectx-branch-sibling-frontier",
+        kind=BinaryCodeContextRequestKind.DEFINITION_USE_CHAIN,
+        rationale="Recover the other exact branch from the target predecessor.",
+        function_id=function.function_id,
+        block_id=target_block.block_id,
+        variable="selected_length",
+        evidence_ids=(packet.allowed_evidence_ids[0],),
+        maximum_bytes=16 * 1024,
+    )
+
+    response = resolve_binary_code_context(
+        ir=ir,
+        packet=packet,
+        request=request,
+        policy=BinaryCodeContextPolicy(maximum_blocks_per_response=3),
+    )
+    assert response.status is BinaryCodeContextStatus.RESOLVED, response.detail
+    included = {block.block_id for block in response.functions[0].blocks}
+
+    assert included == {
+        target_block.block_id,
+        blocks_by_address[sibling_address].block_id,
+        blocks_by_address[target_exit_address].block_id,
+    }
+
+
 def test_supporting_anchors_are_rejected_for_non_definition_use_request(tmp_path) -> None:
     _, packet, _, worker, _ = _fixture(tmp_path)
     with pytest.raises(ValidationError, match="require a definition/use request"):
