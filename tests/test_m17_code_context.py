@@ -1103,9 +1103,89 @@ async def test_one_root_can_close_a_proof_on_fourth_continuation(tmp_path) -> No
     assert client.calls == 4
 
 
-def test_context_policy_rejects_a_sixth_continuation() -> None:
+@pytest.mark.asyncio
+async def test_one_root_can_close_a_proof_on_sixth_continuation(tmp_path) -> None:
+    helper_names = ("metadata", "geometry", "palette", "profile")
+    helpers = [
+        _function(
+            0x100009000 + index * 0x1000,
+            f"decode_{name}",
+            [
+                _instruction(0x100009000 + index * 0x1000, "param", result=name),
+                _instruction(
+                    0x100009004 + index * 0x1000,
+                    "return",
+                    inputs=[name],
+                ),
+            ],
+        )
+        for index, name in enumerate(helper_names)
+    ]
+    ir, packet, _caller, worker, sink = _fixture(
+        tmp_path,
+        extra_functions=helpers,
+    )
+    helper_functions = [
+        next(item for item in ir.functions if item.name == f"decode_{name}")
+        for name in helper_names
+    ]
+    requests = [
+        _request(
+            packet,
+            BinaryCodeContextRequestKind.EXACT_FUNCTION,
+            function_id=function.function_id,
+        ).model_copy(update={"request_id": f"codectx-six-step-{index}"})
+        for index, function in enumerate(helper_functions, start=1)
+    ]
+    requests.append(
+        _request(
+            packet,
+            BinaryCodeContextRequestKind.DEFINITION_USE_CHAIN,
+            function_id=worker.function_id,
+            variable="tmp13",
+        ).model_copy(update={"request_id": "codectx-six-step-5"})
+    )
+    requests.append(
+        _request(
+            packet,
+            BinaryCodeContextRequestKind.DIRECT_CALLEE,
+            function_id=worker.function_id,
+            related=sink.function_id,
+        ).model_copy(update={"request_id": "codectx-six-step-6"})
+    )
+    responses = [
+        resolve_binary_code_context(ir=ir, packet=packet, request=request)
+        for request in requests
+    ]
+    client = _FakeClient(
+        [
+            json.dumps(_needs_next(packet, responses[index], requests[index + 1]))
+            for index in range(5)
+        ]
+        + [json.dumps(_hypothesis(packet, responses[5], sink))]
+    )
+
+    result = await continue_decompiler_hunter_session(
+        store_root=tmp_path,
+        ir=ir,
+        packet=packet,
+        initial_assessment=_needs(packet, requests[0]),
+        initial_usage=_initial_usage(packet),
+        client=client,
+        policy=BinaryCodeContextPolicy(maximum_continuations_per_root=6),
+    )
+
+    assert len(result.entries) == 6
+    assert result.terminal_status is DecompilerContextTerminalStatus.COMPLETED
+    assert result.terminal_assessment.disposition is DecompilerHunterDisposition.CODE_HYPOTHESIS
+    assert result.sessions == 1
+    assert result.model_calls == 7
+    assert client.calls == 6
+
+
+def test_context_policy_rejects_a_seventh_continuation() -> None:
     with pytest.raises(ValidationError):
-        BinaryCodeContextPolicy(maximum_continuations_per_root=6)
+        BinaryCodeContextPolicy(maximum_continuations_per_root=7)
 
 
 def test_only_one_root_can_consume_an_extended_continuation() -> None:
