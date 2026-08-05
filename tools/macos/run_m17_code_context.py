@@ -67,7 +67,7 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--model", default=settings.DEFAULT_MODEL.model_id)
     parser.add_argument("--max-roots", type=int, default=6)
     parser.add_argument("--max-continuations", type=int, default=3)
-    parser.add_argument("--max-evidence-kib", type=int, default=288)
+    parser.add_argument("--max-evidence-kib", type=int, default=384)
     parser.add_argument("--max-input-tokens", type=int, default=1_000_000)
     parser.add_argument("--max-output-tokens", type=int, default=100_000)
     parser.add_argument("--max-wall-clock-minutes", type=int, default=90)

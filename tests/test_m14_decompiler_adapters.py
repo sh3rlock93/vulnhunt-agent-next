@@ -434,6 +434,23 @@ def test_exporter_promotes_range_reader_direct_callees_before_evidence_cap() -> 
     ]
 
 
+def test_exporter_promotes_parser_owner_constructors_before_evidence_cap() -> None:
+    source = (
+        Path(__file__).resolve().parents[1] / "tools" / "ghidra" / "ExportImageIOIR.java"
+    ).read_text(encoding="utf-8")
+
+    owners = source.index("TreeSet<String> parserOwners")
+    promotion = source.index("for (CoverageRow row : rows)", owners + 1)
+    constructor = source.index("isOwnerConstructor(row.function, owner)", promotion)
+    reason = source.index("parser_owner_constructor:owner=", constructor)
+    evidence_cap = source.index("if (frontier.size() > maximumEvidence)", reason)
+    helper = source.index("private boolean isOwnerConstructor")
+
+    assert owners < promotion < constructor < reason < evidence_cap < helper
+    assert 'row.selectionTier = "mandatory"' in source[reason:evidence_cap]
+    assert "function.getName().equals(leaf)" in source[helper:]
+
+
 def test_exporter_requires_exact_arm64e_stack_probe_sequence() -> None:
     source = (
         Path(__file__).resolve().parents[1] / "tools" / "ghidra" / "ExportImageIOIR.java"

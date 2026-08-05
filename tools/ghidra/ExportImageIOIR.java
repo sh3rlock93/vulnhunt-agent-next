@@ -540,6 +540,7 @@ public class ExportImageIOIR extends GhidraScript {
 
 		List<CoverageRow> frontier = new ArrayList<>();
 		List<CoverageRow> rangeReaderBoundaries = new ArrayList<>();
+		TreeSet<String> parserOwners = new TreeSet<>();
 		for (CoverageRow row : rows) {
 			TreeSet<String> directReasons = new TreeSet<>();
 			boolean hasNameAction = false;
@@ -570,7 +571,19 @@ public class ExportImageIOIR extends GhidraScript {
 				row.selectionTier = "mandatory";
 				row.selectionReasons.addAll(directReasons);
 				frontier.add(row);
+				String owner = functionOwner(row.function.getName(true));
+				if (owner != null) parserOwners.add(owner);
 			}
+		}
+		for (CoverageRow row : rows) {
+			String owner = functionOwner(row.function.getName(true));
+			if (owner == null || !parserOwners.contains(owner) ||
+					!isOwnerConstructor(row.function, owner)) continue;
+			row.selectionReasons.add("parser_owner_constructor:owner=" + owner);
+			if (row.selected) continue;
+			row.selected = true;
+			row.selectionTier = "mandatory";
+			frontier.add(row);
 		}
 		for (CoverageRow boundary : rangeReaderBoundaries) {
 			for (long target : boundary.callees) {
@@ -732,6 +745,12 @@ public class ExportImageIOIR extends GhidraScript {
 	private String functionOwner(String qualified) {
 		int separator = qualified.lastIndexOf("::");
 		return separator > 0 ? qualified.substring(0, separator) : null;
+	}
+
+	private boolean isOwnerConstructor(Function function, String owner) {
+		int separator = owner.lastIndexOf("::");
+		String leaf = separator >= 0 ? owner.substring(separator + 2) : owner;
+		return function.getName().equals(leaf);
 	}
 
 	private int parserScore(String name) {
