@@ -1037,7 +1037,7 @@ def _recover_call_edges(
             for instruction in block.instructions:
                 if instruction.operation is not IROperation.CALL or not instruction.callee:
                     continue
-                target = _resolve_callee(instruction.callee, by_name, by_address)
+                target = _resolve_callee(instruction, by_name, by_address)
                 if target is None:
                     if not instruction.callee.startswith("_"):
                         unresolved[function.function_id].append(instruction)
@@ -1066,10 +1066,23 @@ def _recover_call_edges(
 
 
 def _resolve_callee(
-    callee: str,
+    instruction: IRInstruction,
     by_name: dict[str, list[IRFunction]],
     by_address: dict[int, IRFunction],
 ) -> IRFunction | None:
+    tagged_addresses = []
+    for tag in instruction.tags:
+        if not tag.startswith("callee_address:"):
+            continue
+        try:
+            tagged_addresses.append(int(tag.removeprefix("callee_address:"), 16))
+        except ValueError:
+            return None
+    if tagged_addresses:
+        if len(set(tagged_addresses)) != 1:
+            return None
+        return by_address.get(tagged_addresses[0])
+    callee = instruction.callee or ""
     candidates = {
         item.function_id: item
         for name in {callee, callee.lstrip("_")}

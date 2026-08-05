@@ -45,8 +45,8 @@ from .ir import (
     NormalizedBinaryIR,
 )
 
-DECOMPILER_CONTEXT_PROMPT_VERSION: Literal["decompiler-code-context-v5"] = (
-    "decompiler-code-context-v5"
+DECOMPILER_CONTEXT_PROMPT_VERSION: Literal["decompiler-code-context-v7"] = (
+    "decompiler-code-context-v7"
 )
 _MAX_RAW_RESPONSE_BYTES = 128 * 1024
 _MAX_PACKET_BYTES = 768 * 1024
@@ -86,7 +86,10 @@ the broker selection. When proof depends on decoder-state fields written or
 validated in other methods, put their numeric object offsets in
 supporting_field_offsets on that same request. The broker will recover only
 frozen normalized-IR accesses to those offsets; prose field names or offsets do
-not select evidence. A call edge marked virtual_selector proves a compatible
+not select evidence. A direct_callee request must set only function_id and the
+address-backed related_function_id; leave block_id, address, variable,
+supporting_addresses, supporting_variables, and supporting_field_offsets empty.
+A call edge marked virtual_selector proves a compatible
 selector dispatch site, not a unique runtime target; retain its candidate count
 and require format/owner evidence before claiming the exact implementation is
 reachable. A virtual_vtable edge additionally proves that the target owner's
@@ -334,6 +337,8 @@ class DecompilerContinuationPacket(DomainModel):
         "decompiler-code-context-v3",
         "decompiler-code-context-v4",
         "decompiler-code-context-v5",
+        "decompiler-code-context-v6",
+        "decompiler-code-context-v7",
     ] = DECOMPILER_CONTEXT_PROMPT_VERSION
     work_id: str = Field(pattern=r"^work_[0-9a-f]{64}$")
     root_id: str = Field(pattern=r"^coderoot_[0-9a-f]{20}$")
@@ -710,6 +715,14 @@ def resolve_binary_code_context(
         slices,
         packet,
         prior_entries,
+        preserved_keys={
+            (
+                item.caller.function_id,
+                item.instruction.address,
+                item.instruction.index,
+            )
+            for item in selected_edges
+        },
     )
     omissions = tuple(sorted(set((*omissions, *deduplication_omissions))))
     facts = _facts_for_slices(slices, excluded=known_facts)
@@ -729,6 +742,35 @@ def resolve_binary_code_context(
         for block in function.blocks
         for instruction in block.instructions
     }
+    response_block_ids = {
+        (function.function_id, block.block_id)
+        for function in slices
+        for block in function.blocks
+    }
+    selected_edge_keys = {
+        (
+            item.caller.function_id,
+            item.callee.function_id,
+            item.instruction.address,
+        )
+        for item in selected_edges
+    }
+    response_edge_candidates = (
+        *selected_edges,
+        *(
+            item
+            for item in edges
+            if (item.caller.function_id, item.instruction.address)
+            in response_instruction_addresses
+            and "read_session_input" in item.instruction.tags
+            and (
+                item.caller.function_id,
+                item.callee.function_id,
+                item.instruction.address,
+            )
+            not in selected_edge_keys
+        ),
+    )[:64]
     response_edges = tuple(
         sorted(
             (
@@ -747,9 +789,13 @@ def resolve_binary_code_context(
                     vtable_address_point=item.vtable_address_point,
                     vtable_slot_offset=item.vtable_slot_offset,
                     vtable_reference_address=item.vtable_reference_address,
-                    dominating_guard_block_ids=item.dominating_guard_block_ids,
+                    dominating_guard_block_ids=tuple(
+                        block_id
+                        for block_id in item.dominating_guard_block_ids
+                        if (item.caller.function_id, block_id) in response_block_ids
+                    ),
                 )
-                for item in selected_edges
+                for item in response_edge_candidates
                 if item.caller.function_id not in response_function_ids
                 or (item.caller.function_id, item.instruction.address)
                 in response_instruction_addresses
@@ -767,10 +813,21 @@ def resolve_binary_code_context(
         facts,
         omissions,
         maximum=maximum,
-        protected_instruction_keys=_protected_request_instruction_keys(
-            request,
-            selected,
-            selected_edges,
+        protected_instruction_keys=(
+            _protected_request_instruction_keys(
+                request,
+                selected,
+                selected_edges,
+            )
+            | {
+                (
+                    item.caller.function_id,
+                    item.instruction.address,
+                    item.instruction.index,
+                )
+                for item in response_edge_candidates
+                if item.caller.function_id in response_function_ids
+            }
         ),
     )
     if not slices or not facts:
@@ -1181,6 +1238,12 @@ def _select_context(
             selected = _unique_functions((function, *field_functions))
             for function_id, addresses in field_focus.items():
                 focus[function_id].update(addresses)
+        selected_edges = tuple(
+            item
+            for item in edges
+            if item.caller.function_id == function.function_id
+            and item.instruction.address in focus[function.function_id]
+        )[:64]
     elif request.kind is BinaryCodeContextRequestKind.CALLSITE_RETURN_USE:
         call = next(
             (
@@ -1679,7 +1742,10 @@ def _remove_known_evidence(
     slices: tuple[BinaryCodeContextFunctionSlice, ...],
     packet: DecompilerHunterPacket,
     prior_entries: Sequence[DecompilerContextChainEntry],
+    *,
+    preserved_keys: set[tuple[str, int, int]] | None = None,
 ) -> tuple[tuple[BinaryCodeContextFunctionSlice, ...], tuple[str, ...]]:
+    preserved_keys = preserved_keys or set()
     known_keys = {
         (function.function_id, instruction.address, instruction.index)
         for function in (
@@ -1705,6 +1771,8 @@ def _remove_known_evidence(
                 instruction
                 for instruction in block.instructions
                 if (function.function_id, instruction.address, instruction.index) not in known_keys
+                or (function.function_id, instruction.address, instruction.index)
+                in preserved_keys
             )
             deduplicated += len(block.instructions) - len(instructions)
             if instructions:
@@ -2265,7 +2333,7 @@ def _recover_edges(ir: NormalizedBinaryIR) -> tuple[_RawEdge, ...]:
             for instruction in block.instructions:
                 if instruction.operation is not IROperation.CALL or not instruction.callee:
                     continue
-                callee = _resolve_callee(instruction.callee, by_name, by_address)
+                callee = _resolve_callee(instruction, by_name, by_address)
                 if callee is not None:
                     edges.append(
                         _RawEdge(
@@ -2538,10 +2606,23 @@ def _guard_addresses_for_blocks(
 
 
 def _resolve_callee(
-    name: str,
+    instruction: IRInstruction,
     by_name: Mapping[str, list[IRFunction]],
     by_address: Mapping[int, IRFunction],
 ) -> IRFunction | None:
+    tagged_addresses = []
+    for tag in instruction.tags:
+        if not tag.startswith("callee_address:"):
+            continue
+        try:
+            tagged_addresses.append(int(tag.removeprefix("callee_address:"), 16))
+        except ValueError:
+            return None
+    if tagged_addresses:
+        if len(set(tagged_addresses)) != 1:
+            return None
+        return by_address.get(tagged_addresses[0])
+    name = instruction.callee or ""
     candidates = {
         item.function_id: item for key in {name, name.lstrip("_")} for item in by_name.get(key, [])
     }

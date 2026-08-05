@@ -791,6 +791,73 @@ experiment, fuzzer invocation, or VM boot. M17-12 therefore closes the context
 budget miss and recovers a reviewable code hypothesis; it does not establish a
 reportable vulnerability.
 
+### M17-13 — Address-backed range-reader boundary closure
+
+#### Trigger
+
+The M17-12 Reviewer could not determine whether the KTX
+`getBytesAtOffset` call writes the requested length, truncates it to destination
+capacity, or rejects the destination. The 1,200-function export contained three
+same-named `getBytesAtOffset` implementations plus one
+`_CGImageReadSessionGetBytesAtOffset`, but all four fell outside the evidence
+cap. Name-only call resolution intentionally refused to choose among the three
+duplicates.
+
+#### Implementation scope
+
+- Promote only the known ImageIO range-reader boundary identities to mandatory
+  export evidence, displacing lower-priority fallback functions without raising
+  the 1,200-function cap.
+- Add a canonical `callee_address:<hex>` tag to direct Ghidra `CALL` operations.
+  Do not assign one to `CALLIND` or infer an address from a duplicated name.
+- Resolve direct call edges by that frozen address before the legacy unique-name
+  fallback in both evidence-capsule and context-broker graph construction. An
+  unknown or conflicting address tag remains unresolved.
+- When a definition/use slice explicitly retains a direct callsite, expose its
+  exact frozen edge in the same response so the next typed request can name the
+  related callee without guessing.
+- Also expose bounded direct edges whose callsites are retained inside a newly
+  supplied callee slice, allowing a forwarding wrapper to be followed on the
+  next existing continuation without broad callgraph expansion.
+- Tell Hunter and Reviewer to request the exact direct callee when a
+  range-reader's write or clamp behavior is a proof obligation; API names alone
+  are not evidence of semantics.
+- Preserve prior v1/v2/v3 normalized-IR compatibility, context budgets, static
+  reportability thresholds, and every no-execution/no-fuzzing constraint.
+
+#### Exit criteria
+
+Synthetic duplicate-name readers must resolve only with one exact address tag,
+while old untagged ambiguous IR remains unavailable. A real capped ImageIO
+export must contain all four range-reader implementations as mandatory evidence
+and bind the KTX callsite at `0x18d6b6c84` to exactly `0x18d65ec14` in both graph
+builders. Focused, binary-regression, full-suite, type, lint, and unchanged M15
+blind gates must pass.
+
+#### Current-ImageIO observation
+
+The real 1,200-function export includes all four range-reader functions with
+`range_reader_boundary` as their mandatory reason. KTX `initialize` at
+`0x18d6b62dc` binds to `0x18d6671f0`; KTX `decodeImageImp` at `0x18d6b6c84`
+binds to `0x18d65ec14`. The latter wrapper in turn binds directly to the
+`IIOImageRead::getBytesAtOffset` implementation at `0x18d76fa28`, whose frozen
+pseudocode validates a non-null destination and positive request, clamps only
+against available source bytes, and dispatches to provider/file/CFData copy
+helpers. This closes exact callee availability and identity; destination
+capacity, attacker-controlled field provenance, and a satisfiable allocation
+inequality still require independent proof before reportability. No image,
+generated input, fuzzer, VM, or dynamic experiment was invoked.
+
+The completed KTX replay used one Hunter session, five model calls, 513,975
+input tokens, 10,045 output tokens, three context responses, and 165,434 total
+evidence bytes. The first definition/use response exposed the exact session
+wrapper edge, the second exposed the wrapper's exact reader edge, and the third
+opened `IIOImageRead::getBytesAtOffset`. The Hunter correctly remained
+`needs_code_context`: 17 blocks containing the decisive provider/file/CFData
+copy and failure behavior were outside that final 32 KiB slice. This is a
+bounded proof-depth limit, not evidence that a destination guard is absent, and
+M17-13 does not produce a reportable finding.
+
 ## Per-PR validation and merge procedure
 
 For each M17 PR:
