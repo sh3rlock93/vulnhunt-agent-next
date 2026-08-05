@@ -290,8 +290,25 @@ class _FakeClient:
         self.responses = list(responses)
         self.calls: list[dict] = []
 
-    async def chat(self, **kwargs) -> LLMResponse:
-        self.calls.append(kwargs)
+    async def chat(
+        self,
+        messages: list[dict],
+        system: str | None = None,
+        tools: list[dict] | None = None,
+        max_tokens: int | None = None,
+        cache_system: bool = False,
+        cache_tools: bool = False,
+        cache_last_user: bool = False,
+    ) -> LLMResponse:
+        self.calls.append({
+            "messages": messages,
+            "system": system,
+            "tools": tools,
+            "max_tokens": max_tokens,
+            "cache_system": cache_system,
+            "cache_tools": cache_tools,
+            "cache_last_user": cache_last_user,
+        })
         value = self.responses.pop(0)
         return LLMResponse(
             text=value,
