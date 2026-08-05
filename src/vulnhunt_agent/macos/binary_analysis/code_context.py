@@ -12,7 +12,7 @@ import json
 import os
 import re
 import tempfile
-from collections import defaultdict
+from collections import defaultdict, deque
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
@@ -45,8 +45,8 @@ from .ir import (
     NormalizedBinaryIR,
 )
 
-DECOMPILER_CONTEXT_PROMPT_VERSION: Literal["decompiler-code-context-v11"] = (
-    "decompiler-code-context-v11"
+DECOMPILER_CONTEXT_PROMPT_VERSION: Literal["decompiler-code-context-v12"] = (
+    "decompiler-code-context-v12"
 )
 _MAX_RAW_RESPONSE_BYTES = 128 * 1024
 _MAX_PACKET_BYTES = 768 * 1024
@@ -100,7 +100,11 @@ and require format/owner evidence before claiming the exact implementation is
 reachable. A virtual_vtable edge additionally proves that the target owner's
 address-backed Itanium vtable contains the selected function at the recovered
 slot. It does not by itself prove that attacker-controlled input selects that
-owner at runtime. Dominating guard block IDs are CFG-derived and may be used
+owner at runtime. An IR indirect operation tagged as an
+address-taken out-parameter proves that the cited call received the exact stack
+address and may define the post-call value. It does not by itself prove that
+the output equals the requested size or the call's return value. Dominating
+guard block IDs are CFG-derived and may be used
 only with their supplied address-backed guard facts. Return only the
 DecompilerHunterAssessment JSON object."""
 )
@@ -361,6 +365,7 @@ class DecompilerContinuationPacket(DomainModel):
         "decompiler-code-context-v9",
         "decompiler-code-context-v10",
         "decompiler-code-context-v11",
+        "decompiler-code-context-v12",
     ] = DECOMPILER_CONTEXT_PROMPT_VERSION
     work_id: str = Field(pattern=r"^work_[0-9a-f]{64}$")
     root_id: str = Field(pattern=r"^coderoot_[0-9a-f]{20}$")
@@ -2670,7 +2675,7 @@ def _definition_use_core_instruction_keys(
     instructions = tuple(
         instruction for block in function.blocks for instruction in block.instructions
     )
-    keys = _direct_phi_origin_instruction_keys(function, variables)
+    keys = _definition_provenance_instruction_keys(function, variables)
     for variable in sorted(variables):
         definitions = tuple(item for item in instructions if item.result == variable)
         keys.update((item.address, item.index) for item in definitions)
@@ -2694,6 +2699,93 @@ def _definition_use_core_instruction_keys(
                 ),
             )
             keys.add((best.address, best.index))
+    return keys
+
+
+_DEFINITION_PROVENANCE_OPERATIONS = frozenset(
+    {
+        IROperation.ASSIGN,
+        IROperation.PHI,
+        IROperation.ADD,
+        IROperation.SUBTRACT,
+        IROperation.MULTIPLY,
+        IROperation.SHIFT_LEFT,
+        IROperation.SHIFT_RIGHT,
+        IROperation.BITWISE_AND,
+        IROperation.BITWISE_OR,
+        IROperation.BYTE_SWAP,
+        IROperation.CAST,
+        IROperation.ALLOCATE,
+        IROperation.LOAD,
+        IROperation.INDIRECT,
+    }
+)
+
+
+def _definition_provenance_instruction_keys(
+    function: IRFunction,
+    variables: set[str],
+    *,
+    maximum_depth: int = 12,
+    maximum_instructions: int = 128,
+) -> set[tuple[int, int]]:
+    """Retain a bounded exact-key provenance chain through SSA aliases.
+
+    Exact instruction keys matter when Ghidra emits a PHI, INDIRECT barrier,
+    and unrelated side-effect noise at the same machine address. Address-only
+    focus would otherwise compact away the allocation or alias definition.
+    """
+
+    by_result: dict[str, list[IRInstruction]] = defaultdict(list)
+    by_address: dict[int, list[IRInstruction]] = defaultdict(list)
+    for block in function.blocks:
+        for instruction in block.instructions:
+            by_address[instruction.address].append(instruction)
+            if instruction.result is not None:
+                by_result[instruction.result].append(instruction)
+
+    pending = deque((variable, 0) for variable in sorted(variables))
+    visited: set[str] = set()
+    keys: set[tuple[int, int]] = set()
+    while pending and len(keys) < maximum_instructions:
+        variable, depth = pending.popleft()
+        if variable in visited:
+            continue
+        visited.add(variable)
+        for definition in by_result.get(variable, ()):
+            keys.add((definition.address, definition.index))
+            if "side_effect:address_taken_out_parameter" in definition.tags:
+                keys.update(
+                    (item.address, item.index)
+                    for item in by_address[definition.address]
+                    if item.operation
+                    in {
+                        IROperation.ALLOCATE,
+                        IROperation.CALL,
+                        IROperation.COPY,
+                        IROperation.FREE,
+                    }
+                )
+            if depth >= maximum_depth:
+                continue
+            if definition.operation not in _DEFINITION_PROVENANCE_OPERATIONS:
+                continue
+            provenance_operands = definition.operands
+            if "side_effect:address_taken_out_parameter" in definition.tags:
+                # The first two Ghidra INDIRECT inputs are the pre-call value
+                # and an internal op token. The address dependency and call
+                # result appended by the adapter are the relevant post-call
+                # provenance; following the old value crosses the definition.
+                provenance_operands = definition.operands[2:]
+            elif definition.operation is IROperation.INDIRECT:
+                provenance_operands = definition.operands[:1]
+            for operand in provenance_operands:
+                if definition.operation is IROperation.ALLOCATE and "_ram_" in operand:
+                    continue
+                if operand in by_result and operand not in visited:
+                    pending.append((operand, depth + 1))
+            if len(keys) >= maximum_instructions:
+                break
     return keys
 
 

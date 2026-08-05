@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import stat
 import uuid
 from collections.abc import Mapping, Sequence
@@ -30,6 +31,11 @@ from .ir import (
 from .snapshot import DyldArchitecture
 
 _MAX_EXPORT_BYTES = 256 * 1024 * 1024
+
+_STACK_STORAGE_PATTERN = re.compile(
+    r"(?:^|_)stack_([0-9a-f]+)_[0-9]+(?:_|$)", re.IGNORECASE
+)
+_CONSTANT_OPERAND_PATTERN = re.compile(r"^const_([0-9a-f]+)$", re.IGNORECASE)
 
 _OPERATION_ALIASES = {
     "param": IROperation.PARAMETER,
@@ -76,6 +82,7 @@ _OPERATION_ALIASES = {
     "branch": IROperation.BRANCH,
     "load": IROperation.LOAD,
     "store": IROperation.STORE,
+    "indirect": IROperation.INDIRECT,
     "call": IROperation.CALL,
     "phi": IROperation.PHI,
     "ret": IROperation.RETURN,
@@ -466,6 +473,103 @@ def _normalize_ghidra_virtual_methods(
     return tuple(references)
 
 
+def _address_taken_out_parameter_aliases(
+    raw_blocks: Sequence[object],
+    *,
+    instructions_key: str,
+    instruction_operation_key: str,
+    instruction_operands_key: str,
+) -> dict[tuple[int, str], tuple[int, str, str | None]]:
+    """Bind Ghidra INDIRECT outputs to an address-taken call argument.
+
+    Ghidra models a value potentially changed through a pointer argument as an
+    ``INDIRECT`` SSA output at the call's address.  The second INDIRECT input is
+    an internal op token, not a value definition.  Preserve an address-backed
+    dependency only when the call operand is defined by pointer arithmetic for
+    the exact stack storage named by the INDIRECT result.
+    """
+
+    instructions = tuple(
+        _mapping(instruction, label="instruction")
+        for raw_block in raw_blocks
+        for instruction in _sequence(
+            _mapping(raw_block, label="basic block").get(instructions_key),
+            label="instructions",
+        )
+    )
+    definitions = {
+        result: instruction
+        for instruction in instructions
+        if (result := _optional_text(instruction.get("result"))) is not None
+    }
+    calls_by_address: dict[int, list[Mapping[str, Any]]] = {}
+    indirects_by_address: dict[int, list[Mapping[str, Any]]] = {}
+    for instruction in instructions:
+        address = _address(instruction.get("address"))
+        raw_operation = _text(
+            instruction.get(instruction_operation_key), label="operation"
+        )
+        operation = _operation(raw_operation)
+        if operation in {
+            IROperation.ALLOCATE,
+            IROperation.CALL,
+            IROperation.COPY,
+            IROperation.FREE,
+        }:
+            calls_by_address.setdefault(address, []).append(instruction)
+        elif operation is IROperation.INDIRECT:
+            indirects_by_address.setdefault(address, []).append(instruction)
+
+    aliases: dict[tuple[int, str], tuple[int, str, str | None]] = {}
+    ambiguous: set[tuple[int, str]] = set()
+    for address, calls in calls_by_address.items():
+        effects = indirects_by_address.get(address, ())
+        if not effects:
+            continue
+        for call in calls:
+            call_result = _optional_text(call.get("result"))
+            call_operands = _string_sequence(
+                call.get(instruction_operands_key, ()), label="instruction operands"
+            )
+            for argument_index, pointer_operand in enumerate(call_operands):
+                pointer_definition = definitions.get(pointer_operand)
+                if pointer_definition is None:
+                    continue
+                pointer_tags = _string_sequence(
+                    pointer_definition.get("tags", ()), label="tags"
+                )
+                if "pointer_arithmetic" not in pointer_tags:
+                    continue
+                pointer_inputs = _string_sequence(
+                    pointer_definition.get(instruction_operands_key, ()),
+                    label="instruction operands",
+                )
+                offsets = {
+                    match.group(1).lower()
+                    for operand in pointer_inputs
+                    if (match := _CONSTANT_OPERAND_PATTERN.fullmatch(operand))
+                }
+                if not offsets:
+                    continue
+                for effect in effects:
+                    result = _optional_text(effect.get("result"))
+                    if result is None:
+                        continue
+                    storage = _STACK_STORAGE_PATTERN.search(result)
+                    if storage is None or storage.group(1).lower() not in offsets:
+                        continue
+                    key = (address, result)
+                    relation = (argument_index, pointer_operand, call_result)
+                    if key in ambiguous:
+                        continue
+                    if key in aliases and aliases[key] != relation:
+                        aliases.pop(key)
+                        ambiguous.add(key)
+                        continue
+                    aliases[key] = relation
+    return aliases
+
+
 def _normalize_functions(
     raw: object,
     *,
@@ -492,6 +596,12 @@ def _normalize_functions(
         identifier = function_id(image_uuid, start)
         raw_blocks = _sequence(item.get(blocks_key), label="basic blocks")
         raw_parameters = _string_sequence(item.get(parameters_key, ()), label="parameters")
+        address_taken_out_parameters = _address_taken_out_parameter_aliases(
+            raw_blocks,
+            instructions_key=instructions_key,
+            instruction_operation_key=instruction_operation_key,
+            instruction_operands_key=instruction_operands_key,
+        )
         preserved_argument_aliases = _argument_preserving_stack_probe_aliases(
             raw_blocks,
             parameters=raw_parameters,
@@ -518,7 +628,7 @@ def _normalize_functions(
                 raw_operation = _text(instruction.get(instruction_operation_key), label="operation")
                 operation = _operation(raw_operation)
                 tags = _string_sequence(instruction.get("tags", ()), label="tags")
-                if operation is IROperation.UNKNOWN:
+                if operation in {IROperation.INDIRECT, IROperation.UNKNOWN}:
                     tags = (*tags, f"source_op:{raw_operation.lower()}")
                 address = _address(instruction.get("address"))
                 result = _optional_text(instruction.get("result"))
@@ -526,8 +636,26 @@ def _normalize_functions(
                     instruction.get(instruction_operands_key, ()),
                     label="instruction operands",
                 )
-                preserved_parameter = preserved_argument_aliases.get((address, result))
+                out_parameter = address_taken_out_parameters.get((address, result or ""))
                 text = str(instruction.get("text", ""))
+                if out_parameter is not None:
+                    argument_index, pointer_operand, call_result = out_parameter
+                    dependencies = tuple(
+                        dependency
+                        for dependency in (pointer_operand, call_result)
+                        if dependency is not None and dependency not in operands
+                    )
+                    operands = (*operands, *dependencies)[:32]
+                    tags = (
+                        *tags,
+                        "side_effect:address_taken_out_parameter",
+                        f"out_parameter_index:{argument_index}",
+                    )
+                    text = (
+                        f"{text} [address-taken call output argument "
+                        f"{argument_index}: {pointer_operand}]"
+                    )[:2000]
+                preserved_parameter = preserved_argument_aliases.get((address, result))
                 if preserved_parameter is not None:
                     operands = (preserved_parameter, *operands[1:])
                     tags = (*tags, "abi:preserved_argument")

@@ -44,6 +44,7 @@ class IROperation(StrEnum):
     COPY = "copy"
     LOAD = "load"
     STORE = "store"
+    INDIRECT = "indirect"
     CALL = "call"
     FREE = "free"
     RETURN = "return"

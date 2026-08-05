@@ -44,6 +44,7 @@ from vulnhunt_agent.macos.binary_analysis import (
 from vulnhunt_agent.macos.binary_analysis.capsules import _recover_call_edges
 from vulnhunt_agent.macos.binary_analysis.code_context import (
     _bind_context_edges_to_slices,
+    _definition_provenance_instruction_keys,
     _make_continuation_packet,
     _make_entry,
     _refinement_block_ids,
@@ -1911,6 +1912,159 @@ def test_definition_use_request_compacts_same_address_decompiler_noise(tmp_path)
         {item.result for item in instructions}
     )
     assert sum(item.operation.value == "unknown" for item in instructions) < 32
+
+
+def test_definition_use_retains_indirect_phi_and_address_taken_allocation_provenance(
+    tmp_path,
+) -> None:
+    address = 0x100008000
+    capacity = "local_a8_stack_ffffffffffffff58_8_10000800c_6260"
+    target_payload = _function(
+        address,
+        "decode_address_taken_extent",
+        [
+            _instruction(
+                address,
+                "param",
+                result="input_count",
+                tags=["input_length"],
+            ),
+            _instruction(
+                address,
+                "assign",
+                result="extent_before_call",
+                inputs=["legacy_extent"],
+            ),
+            _instruction(
+                address + 4,
+                "mul",
+                result="allocated_bytes",
+                inputs=["input_count", "pixel_stride"],
+            ),
+            _instruction(
+                address + 8,
+                "int_sub",
+                result="out_extent_ptr",
+                inputs=["sp", "const_ffffffffffffff58"],
+                tags=["pointer_arithmetic"],
+            ),
+            _instruction(
+                address + 12,
+                "alloc",
+                result="allocated_buffer",
+                inputs=["allocated_bytes", "alignment", "out_extent_ptr"],
+                target="__ImageIO_Malloc",
+            ),
+            _instruction(
+                address + 12,
+                "INDIRECT",
+                result=capacity,
+                inputs=["extent_before_call", "const_e3"],
+            ),
+            _instruction(
+                address + 12,
+                "cast",
+                result="buffer_register",
+                inputs=["allocated_buffer"],
+            ),
+            *(
+                _instruction(
+                    address + 12,
+                    "unknown",
+                    result=f"same_address_noise_{index}",
+                    inputs=[f"prior_noise_{index}"],
+                )
+                for index in range(48)
+            ),
+            _instruction(
+                address + 16,
+                "INDIRECT",
+                result="buffer_path",
+                inputs=["buffer_register", "const_f0"],
+            ),
+            _instruction(
+                address + 16,
+                "phi",
+                result="buffer_for_decode",
+                inputs=["buffer_path", "buffer_register"],
+            ),
+            _instruction(
+                address + 20,
+                "phi",
+                result="capacity_for_decode",
+                inputs=[capacity, capacity],
+            ),
+            _instruction(
+                address + 24,
+                "call",
+                result="decoded",
+                inputs=["buffer_for_decode", "capacity_for_decode"],
+                target="decode_rows",
+            ),
+            _instruction(address + 28, "return", inputs=["decoded"]),
+        ],
+    )
+    ir, packet, _, _, _ = _fixture(tmp_path, extra_functions=[target_payload])
+    target = next(item for item in ir.functions if item.start_address == address)
+    provenance_keys = _definition_provenance_instruction_keys(
+        target,
+        {capacity},
+    )
+    by_key = {
+        (instruction.address, instruction.index): instruction
+        for block in target.blocks
+        for instruction in block.instructions
+    }
+    provenance_results = {by_key[key].result for key in provenance_keys}
+    assert capacity in provenance_results
+    assert "allocated_buffer" in provenance_results
+    assert "out_extent_ptr" in provenance_results
+    assert "extent_before_call" not in provenance_results
+    request = BinaryCodeContextRequest(
+        request_id="codectx-address-taken-allocation-provenance",
+        kind=BinaryCodeContextRequestKind.DEFINITION_USE_CHAIN,
+        rationale="Retain the exact caller allocation, out extent, aliases, and sink.",
+        function_id=target.function_id,
+        address=address + 24,
+        variable="buffer_for_decode",
+        supporting_addresses=(address + 12, address + 24),
+        supporting_variables=("allocated_buffer", "capacity_for_decode"),
+        evidence_ids=(packet.allowed_evidence_ids[0],),
+        maximum_bytes=16 * 1024,
+    )
+
+    response = resolve_binary_code_context(ir=ir, packet=packet, request=request)
+    instructions = tuple(
+        instruction
+        for function in response.functions
+        for block in function.blocks
+        for instruction in block.instructions
+    )
+    results = {item.result for item in instructions}
+
+    assert response.status is BinaryCodeContextStatus.RESOLVED
+    assert {
+        "allocated_bytes",
+        "out_extent_ptr",
+        "allocated_buffer",
+        capacity,
+        "buffer_register",
+        "buffer_path",
+        "buffer_for_decode",
+        "capacity_for_decode",
+    }.issubset(results)
+    assert any(
+        item.result == capacity
+        and item.operation.value == "indirect"
+        and "side_effect:address_taken_out_parameter" in item.tags
+        and "allocated_buffer" in item.operands
+        for item in instructions
+    )
+    assert any(
+        item.result == "allocated_buffer" and item.operation.value == "allocate"
+        for item in instructions
+    )
+    assert sum(item.operation.value == "unknown" for item in instructions) < 16
 
 
 def test_definition_use_block_target_prioritizes_immediate_cfg_successors(tmp_path) -> None:
