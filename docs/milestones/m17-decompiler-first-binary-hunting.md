@@ -858,6 +858,60 @@ copy and failure behavior were outside that final 32 KiB slice. This is a
 bounded proof-depth limit, not evidence that a destination guard is absent, and
 M17-13 does not produce a reportable finding.
 
+### M17-14 — Single-root final-reader proof closure
+
+#### Trigger
+
+The exact M17-13 KTX chain consumed three continuations to reach
+`IIOImageRead::getBytesAtOffset`. Its terminal assessment requested one final
+definition/use slice for the requested byte count and the omitted provider copy
+blocks. The request is address-bound and uses evidence already present in the
+frozen IR, but the three-continuation cardinality prevented the broker from
+answering it.
+
+#### Implementation scope
+
+- Allow an explicitly configured root to receive a fourth same-session context
+  continuation while retaining the default of three.
+- Keep the existing 288 KiB total evidence ceiling and 96 KiB per-response
+  ceiling; do not increase packet, token, session, or root budgets.
+- Permit only one root per CLI run to cross the two-continuation baseline. Once
+  an admitted root consumes a third or fourth continuation, all remaining roots
+  are capped at two continuations and 192 KiB.
+- Extend only the persisted chain cardinalities and ordinals needed to represent
+  the fourth response. Preserve all request types, evidence validation,
+  reportability thresholds, and static-only constraints.
+- Do not add ImageIO names, addresses, vulnerability patterns, generated inputs,
+  dynamic experiments, or model instructions that assume a vulnerability.
+
+#### Exit criteria
+
+A synthetic four-step proof must remain in one Hunter session, append exactly
+four digest-linked entries, make four continuation calls, and terminate with a
+schema-valid hypothesis. A fifth continuation must be rejected by policy. The
+existing three-step proof and all prior M17/M15 regression gates must remain
+unchanged. The real KTX run must answer the final reader request without image
+execution, fuzzing, a VM, or another decompiler invocation; its terminal result
+is accepted whether vulnerable, safe, or inconclusive only when that conclusion
+is supported by the newly supplied frozen evidence.
+
+#### Current-ImageIO observation
+
+The unchanged frozen KTX root completed four same-session responses with one
+Hunter session, six total model calls, 643,418 input tokens, 11,403 output
+tokens, and 198,025 evidence bytes. The fourth definition/use response confirmed
+that the wrapper forwards the destination, offset, and 64-bit requested length
+unchanged and recovered the visible underlying-reader range predicates. It did
+not expose a write to the destination: the same 17 decisive successor blocks
+remained omitted because the request inherited the prior 32 KiB bound.
+
+The terminal assessment therefore remained `needs_code_context` and requested
+the same address-bound chain with a 96 KiB response. This is not a Hunter
+reasoning miss and is not evidence of a vulnerability or a safe path. M17-14
+proves that a fourth bounded continuation works and localizes the remaining gap
+to one enlarged final-reader response. The run invoked no image, fuzzer, VM,
+dynamic experiment, or decompiler.
+
 ## Per-PR validation and merge procedure
 
 For each M17 PR:

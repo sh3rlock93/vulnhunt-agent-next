@@ -194,7 +194,7 @@ async def _main() -> int:
             results.append(_read_model(persisted, DecompilerContextRunResult))
         else:
             pending.append(item)
-    third_continuation_used = any(len(item.entries) == 3 for item in results)
+    extended_continuation_used = any(len(item.entries) >= 3 for item in results)
     client = None
     if pending:
         client = LLMClient(arguments.model)
@@ -217,17 +217,9 @@ async def _main() -> int:
     for item in pending:
         assert client is not None
         budgeted = BudgetedLLMClient(client, controller, work_id=item.packet.work_id)
-        root_policy = policy
-        if third_continuation_used and policy.maximum_continuations_per_root == 3:
-            root_policy = policy.model_copy(
-                update={
-                    "maximum_continuations_per_root": 2,
-                    "maximum_total_evidence_bytes": min(
-                        policy.maximum_total_evidence_bytes,
-                        192 * 1024,
-                    ),
-                }
-            )
+        root_policy = policy.for_remaining_root(
+            extended_continuation_used=extended_continuation_used
+        )
         try:
             result = await continue_decompiler_hunter_session(
                 store_root=store,
@@ -239,7 +231,7 @@ async def _main() -> int:
                 policy=root_policy,
             )
             results.append(result)
-            third_continuation_used = third_continuation_used or len(result.entries) == 3
+            extended_continuation_used = extended_continuation_used or len(result.entries) >= 3
         except BudgetExceededError as exc:
             budget_deferred.append(
                 {

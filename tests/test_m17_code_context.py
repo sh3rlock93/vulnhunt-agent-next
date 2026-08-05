@@ -965,6 +965,103 @@ async def test_one_root_can_close_a_proof_on_third_continuation(tmp_path) -> Non
     assert client.calls == 3
 
 
+@pytest.mark.asyncio
+async def test_one_root_can_close_a_proof_on_fourth_continuation(tmp_path) -> None:
+    metadata = _function(
+        0x100007000,
+        "decode_metadata",
+        [
+            _instruction(0x100007000, "param", result="metadata"),
+            _instruction(0x100007004, "return", inputs=["metadata"]),
+        ],
+    )
+    geometry = _function(
+        0x100008000,
+        "decode_geometry",
+        [
+            _instruction(0x100008000, "param", result="geometry"),
+            _instruction(0x100008004, "return", inputs=["geometry"]),
+        ],
+    )
+    ir, packet, _caller, worker, sink = _fixture(
+        tmp_path,
+        extra_functions=[metadata, geometry],
+    )
+    metadata_function = next(item for item in ir.functions if item.name == "decode_metadata")
+    geometry_function = next(item for item in ir.functions if item.name == "decode_geometry")
+    first = _request(
+        packet,
+        BinaryCodeContextRequestKind.EXACT_FUNCTION,
+        function_id=metadata_function.function_id,
+    ).model_copy(update={"request_id": "codectx-first-proof"})
+    first_response = resolve_binary_code_context(ir=ir, packet=packet, request=first)
+    second = _request(
+        packet,
+        BinaryCodeContextRequestKind.EXACT_FUNCTION,
+        function_id=geometry_function.function_id,
+    ).model_copy(update={"request_id": "codectx-second-proof"})
+    second_response = resolve_binary_code_context(ir=ir, packet=packet, request=second)
+    third = _request(
+        packet,
+        BinaryCodeContextRequestKind.DEFINITION_USE_CHAIN,
+        function_id=worker.function_id,
+        variable="tmp13",
+    ).model_copy(update={"request_id": "codectx-third-proof"})
+    third_response = resolve_binary_code_context(ir=ir, packet=packet, request=third)
+    fourth = _request(
+        packet,
+        BinaryCodeContextRequestKind.DIRECT_CALLEE,
+        function_id=worker.function_id,
+        related=sink.function_id,
+    ).model_copy(update={"request_id": "codectx-fourth-proof"})
+    fourth_response = resolve_binary_code_context(ir=ir, packet=packet, request=fourth)
+    client = _FakeClient(
+        [
+            json.dumps(_needs_next(packet, first_response, second)),
+            json.dumps(_needs_next(packet, second_response, third)),
+            json.dumps(_needs_next(packet, third_response, fourth)),
+            json.dumps(_hypothesis(packet, fourth_response, sink)),
+        ]
+    )
+
+    result = await continue_decompiler_hunter_session(
+        store_root=tmp_path,
+        ir=ir,
+        packet=packet,
+        initial_assessment=_needs(packet, first),
+        initial_usage=_initial_usage(packet),
+        client=client,
+        policy=BinaryCodeContextPolicy(maximum_continuations_per_root=4),
+    )
+
+    assert len(result.entries) == 4
+    assert result.terminal_status is DecompilerContextTerminalStatus.COMPLETED
+    assert result.terminal_assessment.disposition is DecompilerHunterDisposition.CODE_HYPOTHESIS
+    assert result.sessions == 1
+    assert result.model_calls == 5
+    assert client.calls == 4
+
+
+def test_context_policy_rejects_a_fifth_continuation() -> None:
+    with pytest.raises(ValidationError):
+        BinaryCodeContextPolicy(maximum_continuations_per_root=5)
+
+
+def test_only_one_root_can_consume_an_extended_continuation() -> None:
+    policy = BinaryCodeContextPolicy(
+        maximum_continuations_per_root=4,
+        maximum_total_evidence_bytes=288 * 1024,
+    )
+
+    first = policy.for_remaining_root(extended_continuation_used=False)
+    remaining = policy.for_remaining_root(extended_continuation_used=True)
+
+    assert first is policy
+    assert first.maximum_continuations_per_root == 4
+    assert remaining.maximum_continuations_per_root == 2
+    assert remaining.maximum_total_evidence_bytes == 192 * 1024
+
+
 def test_typed_broker_resolves_block_defuse_and_return_use(tmp_path) -> None:
     ir, packet, _, worker, sink = _fixture(tmp_path)
     worker_block = worker.blocks[0]
