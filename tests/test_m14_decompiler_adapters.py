@@ -369,6 +369,80 @@ def test_coverage_manifest_is_deterministic_and_digest_bound() -> None:
     )
 
 
+def test_v3_virtual_method_reference_is_normalized_and_digest_bound() -> None:
+    payload = _coverage_export()
+    payload["schema_version"] = "ghidra-imageio-export-v3"
+    payload["virtual_methods"] = [
+        {
+            "owner": "SGIReadPlugin",
+            "vtable_symbol": "SGIReadPlugin::vtable",
+            "vtable_address": "0x200000000",
+            "address_point": "0x200000010",
+            "slot_offset": 0xD8,
+            "reference_address": "0x2000000e8",
+            "target_entry": "0x100000100",
+        }
+    ]
+    adapter = GhidraJSONAdapter()
+
+    first = adapter.normalize(payload, expected_snapshot_sha256=_SNAPSHOT, created_at=_NOW)
+    second = adapter.normalize(payload, expected_snapshot_sha256=_SNAPSHOT, created_at=_NOW)
+
+    assert first.virtual_methods == second.virtual_methods
+    assert first.virtual_methods[0].owner == "SGIReadPlugin"
+    assert first.virtual_methods[0].slot_offset == 0xD8
+    assert first.virtual_methods[0].reference_address == 0x2000000E8
+    assert first.virtual_methods[0].target_function_id == first.functions[0].function_id
+    assert first.ir_sha256 == second.ir_sha256
+
+    changed = copy.deepcopy(payload)
+    virtual_methods = cast(list[dict[str, Any]], changed["virtual_methods"])
+    virtual_methods[0]["slot_offset"] = 0xE0
+    virtual_methods[0]["reference_address"] = "0x2000000f0"
+    changed_ir = adapter.normalize(
+        changed, expected_snapshot_sha256=_SNAPSHOT, created_at=_NOW
+    )
+    assert changed_ir.ir_sha256 != first.ir_sha256
+
+
+def test_v3_virtual_method_reference_rejects_misaligned_slot() -> None:
+    payload = _coverage_export()
+    payload["schema_version"] = "ghidra-imageio-export-v3"
+    payload["virtual_methods"] = [
+        {
+            "owner": "SGIReadPlugin",
+            "vtable_symbol": "SGIReadPlugin::vtable",
+            "vtable_address": "0x200000000",
+            "address_point": "0x200000010",
+            "slot_offset": 3,
+            "reference_address": "0x200000013",
+            "target_entry": "0x100000100",
+        }
+    ]
+
+    with pytest.raises(ValidationError, match="pointer aligned"):
+        GhidraJSONAdapter().normalize(payload, expected_snapshot_sha256=_SNAPSHOT)
+
+
+def test_v3_virtual_method_reference_rejects_absent_target() -> None:
+    payload = _coverage_export()
+    payload["schema_version"] = "ghidra-imageio-export-v3"
+    payload["virtual_methods"] = [
+        {
+            "owner": "SGIReadPlugin",
+            "vtable_symbol": "SGIReadPlugin::vtable",
+            "vtable_address": "0x200000000",
+            "address_point": "0x200000010",
+            "slot_offset": 0xD8,
+            "reference_address": "0x2000000e8",
+            "target_entry": "0x1000ffff0",
+        }
+    ]
+
+    with pytest.raises(ValidationError, match="absent or mismatched function"):
+        GhidraJSONAdapter().normalize(payload, expected_snapshot_sha256=_SNAPSHOT)
+
+
 def test_v2_export_must_exactly_match_coverage_selection() -> None:
     payload = _coverage_export()
     functions = cast(list[dict[str, Any]], payload["functions"])

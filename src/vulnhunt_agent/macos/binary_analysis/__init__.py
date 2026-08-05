@@ -25,6 +25,7 @@ from .ir import (
     IRInstruction,
     IROperation,
     IRStringReference,
+    IRVirtualMethodReference,
     NormalizedBinaryIR,
 )
 from .discovery import (
@@ -382,6 +383,7 @@ __all__ = [
     "IRInstruction",
     "IROperation",
     "IRStringReference",
+    "IRVirtualMethodReference",
     "ImageIOEntryRoute",
     "ImageIOParserDiscovery",
     "ImageIOPilotResult",

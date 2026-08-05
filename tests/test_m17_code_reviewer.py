@@ -401,6 +401,7 @@ async def test_valid_fixture_requires_fresh_reviewer_and_becomes_reportable(tmp_
     assert client.calls[0]["system"] == CODE_REVIEWER_SYSTEM_PROMPT
     assert CODE_REVIEWER_SYSTEM_PROMPT != DECOMPILER_HUNTER_SYSTEM_PROMPT
     assert "virtual_selector" in CODE_REVIEWER_SYSTEM_PROMPT
+    assert "virtual_vtable" in CODE_REVIEWER_SYSTEM_PROMPT
     assert "dominating_guard_block_ids" in CODE_REVIEWER_SYSTEM_PROMPT
     assert "Hunter conversation" not in client.calls[0]["messages"][0]["content"][0]["text"]
     assert result.image_executions == result.fuzzer_invocations == result.vm_boots == 0

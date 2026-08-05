@@ -669,6 +669,68 @@ file-byte-to-geometry provenance, and the complete allocation-to-row-base
 invariant remain separate proof gaps. This observation is not a vulnerability
 claim.
 
+### M17-11 — Address-backed C++ vtable binding
+
+#### Trigger
+
+M17-10 recovered the generic `callDecodeImage` dispatch and its `0xd8` slot,
+but only selector names and arity were present in normalized IR. That evidence
+left 25 compatible `decodeImageImp` implementations and could not establish
+that the selected KTX root occupied the recovered slot. Reducing that set from
+names alone would have converted decompiler hints into a false exact edge.
+
+#### Implementation scope
+
+- Extend the Ghidra export with bounded Itanium C++ vtable references for
+  selected functions. Accept only aligned data references whose closest
+  preceding demangled `Owner::vtable` symbol has the same owner as the target
+  method; derive the address point as two pointer entries after the table
+  symbol and cap slot offsets at 64 KiB.
+- Normalize owner, table symbol/address, address point, slot offset, data
+  reference address, and target function into a canonically ordered IR record.
+  Include non-empty records in the normalized-IR digest while retaining v1/v2
+  compatibility when no records exist.
+- Promote an indirect edge to `virtual_vtable` only when the call's immediately
+  preceding address-backed pointer-add has one aligned slot constant and
+  exactly one same-owner vtable record maps that slot to the requested target.
+  Otherwise retain the M17-10 `virtual_selector` candidate set.
+- Expose the complete binding metadata to Hunter and Reviewer. Treat it as an
+  exact static table-to-method mapping, not proof that attacker input selects
+  that receiver type at runtime. Do not change reportability rules or execute
+  an image, fuzzer, VM, generated input, or dynamic experiment.
+
+#### Exit criteria
+
+Synthetic tests must bind a KTX method only when both the owner and `0xd8`
+slot match, retain selector-only semantics on a mismatched slot, preserve old
+v1/v2 IR digests, and reject malformed or unaligned table references. A real
+ImageIO v3 export must deterministically recover the KTX table symbol, address
+point, slot reference, target address, generic callsite, and dominating guards
+within the existing 32 KiB route budget. Existing direct and selector-only
+edge behavior and all prior binary regression gates must remain unchanged.
+
+#### Current-ImageIO observation
+
+The real v3 export contained 1,200 functions and 260 bounded virtual-method
+records. For KTX it recovered `KTXReadPlugin::vtable` at `0x1ee968fd0`, the
+Itanium address point at `0x1ee968fe0`, and the `decodeImageImp` data reference
+at `0x1ee9690b8`; the resulting slot offset is exactly `0xd8`. The frozen route
+then resolved twice to the same digest in 32,160 bytes, promoted callsite
+`0x18d6f6968` from 25 selector candidates to one `virtual_vtable` target, and
+retained five CFG-dominating guard blocks. All image, input-generation,
+dynamic-experiment, fuzzer, and VM counters remained zero.
+
+The first KTX Hunter attempt remained schema-invalid after its repair call and
+produced no accepted evidence; the required retry completed in one model call
+and requested a
+definition/use chain for `sVar23`, allocation/IOSurface capacity, and
+`getBytesAtOffset`. That 32 KiB slice could not fit the existing evidence
+budget, so the broker returned `evidence_budget_exceeded` and no code
+hypothesis or Reviewer reportability decision was produced. M17-11 therefore
+closes only the exact static vtable-binding gap. Budgeted definition/use
+compaction and attacker-controlled file-byte-to-size provenance remain the
+next separate gaps. This observation is not a vulnerability claim.
+
 ## Per-PR validation and merge procedure
 
 For each M17 PR:

@@ -111,6 +111,29 @@ class IRStringReference(DomainModel):
         return self
 
 
+class IRVirtualMethodReference(DomainModel):
+    """Address-backed Itanium C++ vtable entry for one exported function."""
+
+    owner: str = Field(min_length=1, max_length=500)
+    vtable_symbol: str = Field(min_length=1, max_length=1000)
+    vtable_address: int = Field(ge=0)
+    address_point: int = Field(ge=0)
+    slot_offset: int = Field(ge=0, le=64 * 1024)
+    reference_address: int = Field(ge=0)
+    target_function_id: str = Field(pattern=r"^fn_[0-9a-f]{20}$")
+    target_address: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def validate_reference(self) -> "IRVirtualMethodReference":
+        if self.address_point <= self.vtable_address:
+            raise ValueError("vtable address point must follow the table symbol")
+        if self.slot_offset % 8:
+            raise ValueError("vtable slot offset must be pointer aligned")
+        if self.reference_address != self.address_point + self.slot_offset:
+            raise ValueError("vtable reference address does not match its slot")
+        return self
+
+
 class IRFunction(DomainModel):
     function_id: str = Field(pattern=r"^fn_[0-9a-f]{20}$")
     name: str = Field(min_length=1, max_length=500)
@@ -245,6 +268,9 @@ class NormalizedBinaryIR(DomainModel):
     decompiler_version: str = Field(min_length=1, max_length=120)
     imports: tuple[str, ...] = Field(default=(), max_length=50000)
     strings: tuple[IRStringReference, ...] = Field(default=(), max_length=100000)
+    virtual_methods: tuple[IRVirtualMethodReference, ...] = Field(
+        default=(), max_length=100000
+    )
     functions: tuple[IRFunction, ...] = Field(min_length=1, max_length=100000)
     function_coverage: IRFunctionCoverageManifest | None = None
     ir_sha256: str = Field(pattern=SHA256_PATTERN)
@@ -258,6 +284,18 @@ class NormalizedBinaryIR(DomainModel):
         string_order = tuple((item.address, item.value) for item in self.strings)
         if tuple(sorted(set(string_order))) != string_order:
             raise ValueError("IR strings must be canonically ordered and unique")
+        virtual_order = tuple(
+            (
+                item.target_address,
+                item.slot_offset,
+                item.vtable_address,
+                item.reference_address,
+                item.owner,
+            )
+            for item in self.virtual_methods
+        )
+        if tuple(sorted(set(virtual_order))) != virtual_order:
+            raise ValueError("IR virtual methods must be canonically ordered and unique")
         function_order = tuple(item.start_address for item in self.functions)
         if tuple(sorted(set(function_order))) != function_order:
             raise ValueError("IR functions must be ordered at unique start addresses")
@@ -271,6 +309,13 @@ class NormalizedBinaryIR(DomainModel):
             }
             if selected_ids != {item.function_id for item in self.functions}:
                 raise ValueError("IR functions do not match the function coverage selection")
+        functions_by_id = {item.function_id: item for item in self.functions}
+        if any(
+            item.target_function_id not in functions_by_id
+            or functions_by_id[item.target_function_id].start_address != item.target_address
+            for item in self.virtual_methods
+        ):
+            raise ValueError("IR virtual method targets an absent or mismatched function")
         expected = normalized_ir_digest(
             snapshot_sha256=self.snapshot_sha256,
             image_name=self.image_name,
@@ -281,6 +326,7 @@ class NormalizedBinaryIR(DomainModel):
             decompiler_version=self.decompiler_version,
             imports=self.imports,
             strings=self.strings,
+            virtual_methods=self.virtual_methods,
             functions=self.functions,
             function_coverage=self.function_coverage,
         )
@@ -315,6 +361,7 @@ def normalized_ir_digest(
     imports: tuple[str, ...],
     strings: tuple[IRStringReference, ...],
     functions: tuple[IRFunction, ...],
+    virtual_methods: tuple[IRVirtualMethodReference, ...] = (),
     function_coverage: IRFunctionCoverageManifest | None = None,
 ) -> str:
     payload = {
@@ -332,6 +379,10 @@ def normalized_ir_digest(
     }
     if function_coverage is not None:
         payload["function_coverage"] = function_coverage.model_dump(mode="json")
+    if virtual_methods:
+        payload["virtual_methods"] = [
+            item.model_dump(mode="json") for item in virtual_methods
+        ]
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     return "sha256:" + hashlib.sha256(canonical).hexdigest()
 
