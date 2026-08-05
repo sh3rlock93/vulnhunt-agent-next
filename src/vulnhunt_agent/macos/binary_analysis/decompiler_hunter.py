@@ -51,8 +51,8 @@ DECOMPILER_HUNTER = "decompiler-imageio-analysis"
 DECOMPILER_HUNTER_PLANNING_POLICY: Literal["decompiler-hunter-planning-v1"] = (
     "decompiler-hunter-planning-v1"
 )
-DECOMPILER_HUNTER_PROMPT_VERSION: Literal["decompiler-imageio-hunter-v2"] = (
-    "decompiler-imageio-hunter-v2"
+DECOMPILER_HUNTER_PROMPT_VERSION: Literal["decompiler-imageio-hunter-v3"] = (
+    "decompiler-imageio-hunter-v3"
 )
 _MAX_PACKET_BYTES = 512 * 1024
 _MAX_RAW_RESPONSE_BYTES = 128 * 1024
@@ -105,7 +105,11 @@ cite a guard or safe failure/return-use path.
 When a hypothesis depends on whether a range-reader writes or clamps its
 requested length, do not infer that callee's behavior from its name. Request
 direct_callee using the caller and exact address-backed related function IDs
-from the supplied call edge when that implementation is omitted.
+from the supplied call edge when that implementation is omitted. A
+direct_callee request cannot carry supporting proof anchors. If the packet has
+no exact related call-edge ID, do not invent one; request a caller-side
+definition_use_chain for the relevant variable and put any secondary variables,
+addresses, or field offsets in that request's supporting proof anchors.
 
 Return only one JSON object matching the packet's response contract. Preserve
 work_id, root_id, capsule_sha256, and admission_rank exactly. Use only IDs and
@@ -299,6 +303,7 @@ class DecompilerHunterPacket(DomainModel):
     prompt_version: Literal[
         "decompiler-imageio-hunter-v1",
         "decompiler-imageio-hunter-v2",
+        "decompiler-imageio-hunter-v3",
     ] = DECOMPILER_HUNTER_PROMPT_VERSION
     work_id: str = Field(pattern=r"^work_[0-9a-f]{64}$")
     root_id: str = Field(pattern=r"^coderoot_[0-9a-f]{20}$")
@@ -500,6 +505,7 @@ class DecompilerHunterAgent:
                 totals[field] += int(getattr(response, field))
             raw_responses.append(response.text[:_MAX_RAW_RESPONSE_BYTES])
             parsed = try_extract_object(response.text)
+            validation_error = "response did not contain a JSON object"
             try:
                 if parsed is not None:
                     assessment = DecompilerHunterAssessment.model_validate(parsed)
@@ -509,8 +515,8 @@ class DecompilerHunterAgent:
                         _budget_usage(work_item, self.client, calls, totals),
                         tuple(raw_responses),
                     )
-            except ValueError:
-                pass
+            except ValueError as exc:
+                validation_error = str(exc)[:1000]
             messages.extend(
                 (
                     {"role": "assistant", "content": response.content_blocks},
@@ -519,7 +525,9 @@ class DecompilerHunterAgent:
                         "content": [
                             {
                                 "text": (
-                                    "Return only schema-valid JSON. Preserve work_id, root_id, "
+                                    "Validation error: "
+                                    + validation_error
+                                    + "\nReturn only schema-valid JSON. Preserve work_id, root_id, "
                                     "capsule_sha256, and admission_rank. Cite only packet fact IDs, "
                                     "functions, blocks, and addresses. Sort every evidence-ID array "
                                     "lexicographically and remove duplicates; preserve call-path and "

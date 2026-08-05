@@ -440,8 +440,71 @@ async def test_json_repair_preserves_work_order_and_usage(tmp_path) -> None:
     assert assessment.work_id == plan.routing.work_items[packet.admission_rank - 1].work_id
     assert usage.calls == 2
     assert len(raw) == 2
+    assert "Validation error:" in client.calls[1]["messages"][-1]["content"][0]["text"]
     assert "Preserve work_id" in client.calls[1]["messages"][-1]["content"][0]["text"]
     assert "lexicographically" in client.calls[1]["messages"][-1]["content"][0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_repair_explains_that_direct_callee_cannot_carry_proof_anchors(
+    tmp_path,
+) -> None:
+    _, _, _, work_item, packet = _plan(tmp_path)
+    fact_id = packet.allowed_evidence_ids[0]
+    function_id = packet.frozen_function_ids[0]
+    address = packet.known_addresses[0]
+    base = {
+        "schema_version": "decompiler-hunter-assessment-v1",
+        "work_id": packet.work_id,
+        "root_id": packet.root_id,
+        "capsule_sha256": packet.capsule.capsule_sha256,
+        "admission_rank": packet.admission_rank,
+        "disposition": "needs_code_context",
+        "summary": "The omitted callee body is required to resolve the length relation.",
+        "hypotheses": [],
+        "safe_path_analysis": "",
+        "safe_path_evidence_ids": [],
+        "evidence_ids": [fact_id],
+        "unresolved_questions": ["Does the callee clamp the requested length?"],
+    }
+    invalid = {
+        **base,
+        "context_requests": [
+            {
+                "request_id": "codectx-invalid-direct-callee",
+                "kind": "direct_callee",
+                "rationale": "Recover the omitted transfer implementation.",
+                "function_id": function_id,
+                "supporting_addresses": [address],
+                "evidence_ids": [fact_id],
+            }
+        ],
+    }
+    repaired = {
+        **base,
+        "context_requests": [
+            {
+                "request_id": "codectx-repaired-direct-callee",
+                "kind": "direct_callee",
+                "rationale": "Recover a bounded direct callee from frozen IR.",
+                "function_id": function_id,
+                "evidence_ids": [fact_id],
+            }
+        ],
+    }
+    client = _FakeClient(
+        [json.dumps(invalid), json.dumps(repaired)],
+        transport="codex_subscription",
+    )
+
+    assessment, usage, raw = await DecompilerHunterAgent(client).analyze(work_item, packet)
+
+    repair_prompt = client.calls[1]["messages"][-1]["content"][0]["text"]
+    assert assessment.context_requests[0].kind is BinaryCodeContextRequestKind.DIRECT_CALLEE
+    assert usage.calls == 2
+    assert len(raw) == 2
+    assert "Validation error:" in repair_prompt
+    assert "supporting proof anchors require a definition/use request" in repair_prompt
 
 
 def test_plan_admits_exact_budget_prefix_without_reordering(tmp_path) -> None:

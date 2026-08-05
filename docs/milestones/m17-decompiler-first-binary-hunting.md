@@ -1106,6 +1106,63 @@ contract: when the omitted callee has no packet edge, it must select a
 caller-side definition/use slice and receive the concrete validation error on
 its bounded repair turn.
 
+### M17-18 — Bounded Hunter validation feedback
+
+#### Trigger
+
+Both M17-17 rank-one Hunter attempts described the same allocation-size
+mismatch and requested useful frozen code, but repeated an invalid
+`direct_callee` shape on the one permitted repair turn. The validator correctly
+rejected supporting proof anchors on that request kind; the repair prompt hid
+that exact reason and supplied only generic schema instructions.
+
+#### Implementation scope
+
+- Preserve the existing strict assessment and context-request validators. Do
+  not coerce, delete, or reinterpret invalid fields.
+- Capture only the most recent model-response validation error, truncate it to
+  1,000 characters, and include it in the existing single schema-repair prompt.
+  A response without a JSON object receives an equally explicit bounded error.
+- Clarify that `direct_callee` cannot carry supporting proof anchors. When no
+  exact related call-edge ID exists, the Hunter must not invent one and should
+  request a caller-side `definition_use_chain` for the relevant variable.
+- Bump the Hunter prompt identity to v3. Do not add model calls, retries,
+  sessions, evidence, output tokens, dynamic activity, or reportability paths.
+
+#### Exit criteria
+
+An automated model-contract test must replay the observed invalid
+`direct_callee` request, prove that the repair turn contains the precise
+validator reason, and accept a corrected request without relaxing validation.
+The existing wrong-identity repair test must also prove that validation feedback
+is present while call and usage accounting remains two. Focused tests must pass
+twice, followed by all M14/M16/M17, full, type, lint, and unchanged M15 blind
+gates. Only then may the rank-one KTX Hunter be rerun against the exact frozen
+M17-17 export; no new decompilation, image execution, generated input, fuzzing,
+VM boot, or dynamic experiment is permitted.
+
+#### Current-ImageIO observation
+
+The first rank-one replay produced a valid caller-side
+`definition_use_chain` shape but cited one unknown IR variable. Its conservative
+250k input-token reservation stopped before repair after one call and 75,954
+input tokens. A fresh replay with a 500k reservation completed on its first call
+with a schema-valid request, 75,960 input tokens, 1,391 output tokens, and no
+repair. The broker resolved 32,328 bytes from the same frozen IR. The first
+continuation recovered the exact forwarding-wrapper call edge, and the second
+showed that the wrapper passes destination, offset, and requested length to one
+internal reader while the root ignores the wrapper's return value.
+
+The third continuation response then remained invalid after its repair because
+it attached definition/use proof anchors to a `direct_callee` request. The
+continuation agent records the precise validation error for its terminal
+exception but, unlike M17-18's initial Hunter, does not include that error in
+its repair prompt. No vulnerability is claimed. All ImageIO execution,
+generated-input, dynamic-experiment, fuzzer, VM, and new-decompiler counts
+remained zero. The next change must apply the same bounded validation feedback
+to continuation repair without changing schemas, retry counts, context budgets,
+or reportability.
+
 ## Per-PR validation and merge procedure
 
 For each M17 PR:
