@@ -888,7 +888,8 @@ answering it.
 
 A synthetic four-step proof must remain in one Hunter session, append exactly
 four digest-linked entries, make four continuation calls, and terminate with a
-schema-valid hypothesis. A fifth continuation must be rejected by policy. The
+schema-valid hypothesis. At the M17-14 revision, a fifth continuation must be
+rejected by policy. The
 existing three-step proof and all prior M17/M15 regression gates must remain
 unchanged. The real KTX run must answer the final reader request without image
 execution, fuzzing, a VM, or another decompiler invocation; its terminal result
@@ -911,6 +912,72 @@ reasoning miss and is not evidence of a vulnerability or a safe path. M17-14
 proves that a fourth bounded continuation works and localizes the remaining gap
 to one enlarged final-reader response. The run invoked no image, fuzzer, VM,
 dynamic experiment, or decompiler.
+
+### M17-15 — Continuation-aware omitted-block frontier
+
+#### Trigger
+
+Replaying the M17-14 terminal 96 KiB request directly through the deterministic
+broker produced only 12,934 bytes and omitted the same 17 blocks as the prior
+32 KiB response. The larger byte allowance was ineffective because block
+ranking selected the same semantic prefix before deduplication. The remaining
+failure was therefore a stagnant context frontier, not a token or session
+shortage.
+
+#### Implementation scope
+
+- Permit an explicitly configured root to receive one fifth same-session
+  continuation while retaining the default of three and the single extended
+  root lease.
+- Recognize a refinement only when a later `definition_use_chain` or
+  `exact_function` targets the same function. A repeated typed request must
+  increase its byte bound and preserve all prior variables and supporting
+  addresses; a larger exact request may continue that typed frontier, and a
+  typed request may follow a broader same-function slice at an equal or larger
+  bound.
+- For that refinement only, prioritize previously omitted blocks within each
+  semantic priority tier and allow up to the existing schema maxima of 32
+  blocks and 512 instructions. Deduplication still removes already supplied
+  instructions afterward.
+- Keep the total evidence ceiling at 288 KiB, the response ceiling at 96 KiB,
+  and every frozen-IR identity, citation, reportability, and no-execution rule.
+- Canonically sort only set-like model arrays before validation. For a
+  `definition_use_chain` only, discard an unknown optional `block_id` hint and
+  retain strict validation of its function, variables, addresses, and evidence;
+  block-addressed request kinds still reject unknown blocks.
+- Do not use rationale text, function names, ImageIO addresses, parser formats,
+  or expected vulnerability classes to activate refinement.
+
+#### Exit criteria
+
+A synthetic wide reader must omit a late write in its first 32 KiB response and
+recover it in a strictly larger typed refinement without changing the frozen
+IR. Non-refinement requests and the existing three- and four-continuation tests
+must remain unchanged, while a sixth continuation is rejected. On the real KTX
+chain, the offline final-reader refinement must move beyond the prior 17-block
+frontier and expose concrete write-capable calls or fail explicitly without
+repeating the same slice. Full, type, lint, M14/M16/M17, and unchanged M15 blind
+gates must pass before the actual fifth Hunter judgment is accepted.
+
+#### Current-ImageIO observation
+
+The continuation-aware replay expanded the fifth response from the stagnant
+12,934-byte prefix to 55,050 bytes and reduced the omitted reader blocks from
+17 to 5. It exposed three feasible transfer-dispatch calls at `0x18d76fb6c`,
+`0x18d76fb94`, and `0x18d76fc04`, together with their destination, offset, and
+length arguments. The five-entry chain used one Hunter session, six total
+model calls, 701,316 input tokens, 12,840 output tokens, and 253,075 evidence
+bytes. Every image, generated-input, dynamic-experiment, fuzzer, VM, and new
+decompiler counter remained zero.
+
+The terminal judgment correctly remains `needs_code_context`. The dispatched
+length is a PHI that can select either the original requested length or a value
+defined in one of the five remaining blocks. The visible diagnostic calls do
+not terminate their CFG paths, and no destination-capacity invariant has yet
+been proved. M17-15 therefore closes the stagnant-frontier defect and reaches
+the concrete write boundary, but it does not claim a vulnerability. The next
+milestone must recover the final PHI definition and then follow only the exact
+write helper required to decide the inequality.
 
 ## Per-PR validation and merge procedure
 
