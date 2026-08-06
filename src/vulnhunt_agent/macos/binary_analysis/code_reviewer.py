@@ -38,6 +38,7 @@ from .code_context import (
     BinaryCodeContextResponse,
     BinaryCodeContextStatus,
     DecompilerContextChainEntry,
+    _is_recoverable_proof_unavailable,
     resolve_binary_code_context,
 )
 from .decompiler_hunter import (
@@ -570,7 +571,11 @@ def build_binary_code_reviewer_packet(
     if len(selected) != 1:
         raise ValueError("Reviewer packet requires exactly one selected hypothesis")
     hypothesis = selected[0]
-    responses = tuple(item.response for item in context_entries)
+    responses = tuple(
+        item.response
+        for item in context_entries
+        if item.response.status is BinaryCodeContextStatus.RESOLVED
+    )
     expected_chain = (
         context_entries[-1].chain_sha256
         if context_entries
@@ -579,8 +584,12 @@ def build_binary_code_reviewer_packet(
     chain = context_chain_sha256 or expected_chain
     if chain != expected_chain:
         raise ValueError("Reviewer context-chain digest differs from supplied entries")
-    if any(item.status is not BinaryCodeContextStatus.RESOLVED for item in responses):
-        raise ValueError("Reviewer packet cannot include unresolved Hunter context")
+    if any(
+        item.response.status is not BinaryCodeContextStatus.RESOLVED
+        and not _is_recoverable_proof_unavailable(item.response)
+        for item in context_entries
+    ):
+        raise ValueError("Reviewer packet cannot include non-recoverable Hunter context")
     if route_context_response is None:
         route_context_response = _resolve_reviewer_route_context(
             ir=ir,

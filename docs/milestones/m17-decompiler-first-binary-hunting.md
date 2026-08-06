@@ -1870,6 +1870,80 @@ The real run used five unique model calls across one root session and four
 resolved continuations (585,458 input and 11,993 output tokens); all image,
 generated-input, fuzzer, VM, and dynamic-experiment counters remained zero.
 
+### M17-30 — Recoverable context-request repair
+
+#### Trigger
+
+The M17-29 rank-3 run failed before the broker could return useful code because
+the model used `supporting_field_offsets` for ordinary structure variables.
+The broker correctly emitted `unavailable/proof_unavailable` with zero evidence,
+but the controller treated every non-resolved response as terminal. A valid
+same-session correction was therefore impossible even though no decompilation,
+new root, or external experiment was required.
+
+#### Implementation scope
+
+- Permit exactly one model-assisted correction per root when, and only when,
+  the latest broker response is `unavailable/proof_unavailable`.
+- Persist that zero-evidence response, correction assessment, usage, raw-response
+  digest, and immutable chain digest in the original root session.
+- Require the correction to remain `needs_code_context`, contain exactly one
+  selection-distinct typed request, and forbid both vulnerability and safe
+  conclusions from the unavailable response.
+- Preserve immediate terminal behavior for duplicate, circular, unknown,
+  outside-image, unsupported, and evidence-budget failures. A second
+  proof-unavailable response is also terminal and causes no additional model
+  call.
+- Clarify that `supporting_field_offsets` selects cross-function decoder-object
+  state, not ordinary variables or addresses. Do not add roots, image execution,
+  fuzzing, generated inputs, VM work, dynamic experiments, or Reviewer threshold
+  changes.
+
+#### Exit criteria
+
+A synthetic chain must correct one proof-unavailable request and complete using
+resolved code in the same root session. Renaming an identical request must fail
+selection-distinct validation; proof-unavailable must not support a code
+hypothesis; a second unavailable response and an evidence-budget rejection must
+not cause another paid call. Run all M14/M16/M17 tests, the repository suite,
+Ruff, project-standard mypy, and the unchanged M15 blind gate twice. Finally
+rerun the same frozen rank-3 ImageIO Hunter/context chain and independent
+Reviewer without an image, generated input, fuzzer, VM, or dynamic experiment.
+
+#### Current observation
+
+Implemented and validated on the unchanged rank-3 GIF root and frozen ImageIO
+IR (`sha256:4a3f525b12e50f5b553315fa4837bd4800d458ed3ace652080324ee04aaa46b7`).
+The original field-offset request reproduced as `proof_unavailable` with zero
+evidence. The same root then corrected its request, resolved the remaining six
+broker responses, and completed at seven entries with
+`codehypothesis-wrapped-dimension-output-write`. The immutable chain digest is
+`sha256:ca6e601a4723ddbe4eadac48bfd6a1f1fbd36e4597f10aa2d9fe55a93397995d`.
+It used one Hunter root session, ten total Hunter/continuation calls including
+schema repairs, 1,310,919 input tokens, 23,257 output tokens, and 279,990
+evidence bytes.
+
+The independent Reviewer packet retains that complete chain digest but excludes
+the zero-evidence unavailable response from its evidence array. The Reviewer
+made two calls with 411,701 input and 6,986 output tokens, including its one
+permitted 32,107-byte caller-capacity slice, and returned
+`reviewer_inconclusive` with `reportable_static=0`. It proved the route, guarded
+store path, caller's 64-bit allocation product, and propagation of the allocated
+pointer and output capacity. It could not prove caller/callee dimension-field
+identity, the `__ImageIO_Malloc` output-capacity contract, or attacker provenance
+for those dimensions. The result is therefore a conditional static hypothesis,
+not an Apple-submission-ready vulnerability.
+
+Synthetic tests prove same-session correction, zero-evidence conclusion bans,
+selection-distinct requests, the one-repair ceiling, non-retryable budget
+boundaries, and Reviewer audit-chain preservation. No image, generated input,
+fuzzer, VM, decompiler invocation, or dynamic experiment occurred in either
+real run. The M14/M16/M17 suite passed 276 tests and the complete repository
+suite passed 822 tests with 8 environment-dependent skips. Ruff passed, mypy
+passed 197 source files, and the unchanged M15 gate passed twice with TP=6,
+FP=0, FN=0 and stable observation digest
+`sha256:84e4a0cdbbf6b44c689a259c579ef57f475e8064bcad549b3b68adec783795a4`.
+
 ## Per-PR validation and merge procedure
 
 For each M17 PR:

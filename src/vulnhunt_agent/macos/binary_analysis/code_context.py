@@ -45,8 +45,8 @@ from .ir import (
     NormalizedBinaryIR,
 )
 
-DECOMPILER_CONTEXT_PROMPT_VERSION: Literal["decompiler-code-context-v12"] = (
-    "decompiler-code-context-v12"
+DECOMPILER_CONTEXT_PROMPT_VERSION: Literal["decompiler-code-context-v13"] = (
+    "decompiler-code-context-v13"
 )
 _MAX_RAW_RESPONSE_BYTES = 128 * 1024
 _MAX_PACKET_BYTES = 768 * 1024
@@ -78,7 +78,13 @@ facts. A newly supplied caller guard may require not_vulnerable; a newly
 supplied callee sink may complete a code_hypothesis. If one more slice is
 strictly required, return needs_code_context with exactly one typed request.
 Never treat a rejected or unavailable response as evidence that a guard is
-absent. When one proof obligation spans independent allocation and destination
+absent. An unavailable response with rejection=proof_unavailable contains zero
+code evidence. When it is the latest response, do not return code_hypothesis or
+not_vulnerable: correct the failed selection by returning needs_code_context
+with exactly one selection-distinct request. Remove supporting_field_offsets
+when the named values are ordinary variables or addresses; those offsets are
+only for cross-function decoder-object state fields. When one proof obligation
+spans independent allocation and destination
 expressions in the same function, encode every required secondary variable in
 supporting_variables and every sink/guard address in supporting_addresses of a
 single definition_use_chain request. Natural-language rationale does not expand
@@ -132,6 +138,13 @@ class BinaryCodeContextRejection(StrEnum):
     PROOF_UNAVAILABLE = "proof_unavailable"
 
 
+def _is_recoverable_proof_unavailable(response: BinaryCodeContextResponse) -> bool:
+    return (
+        response.status is BinaryCodeContextStatus.UNAVAILABLE
+        and response.rejection is BinaryCodeContextRejection.PROOF_UNAVAILABLE
+    )
+
+
 class DecompilerContextTerminalStatus(StrEnum):
     COMPLETED = "completed"
     REVIEWER_INCONCLUSIVE = "reviewer_inconclusive"
@@ -149,6 +162,7 @@ class BinaryCodeContextPolicy(DomainModel):
     maximum_instructions_per_response: int = Field(default=320, ge=8, le=512)
     maximum_pseudocode_bytes_per_function: int = Field(default=8 * 1024, ge=0, le=32 * 1024)
     maximum_attempts_per_continuation: int = Field(default=2, ge=1, le=2)
+    maximum_proof_unavailable_repairs_per_root: int = Field(default=1, ge=0, le=1)
     maximum_output_tokens_per_call: int = Field(default=8000, ge=512, le=32000)
 
     def for_remaining_root(self, *, extended_continuation_used: bool) -> "BinaryCodeContextPolicy":
@@ -366,6 +380,7 @@ class DecompilerContinuationPacket(DomainModel):
         "decompiler-code-context-v10",
         "decompiler-code-context-v11",
         "decompiler-code-context-v12",
+        "decompiler-code-context-v13",
     ] = DECOMPILER_CONTEXT_PROMPT_VERSION
     work_id: str = Field(pattern=r"^work_[0-9a-f]{64}$")
     root_id: str = Field(pattern=r"^coderoot_[0-9a-f]{20}$")
@@ -400,10 +415,19 @@ class DecompilerContinuationPacket(DomainModel):
             raise ValueError("continuation packet changed the root-session identity")
         if self.continuation_ordinal != len(self.context_responses):
             raise ValueError("continuation ordinal differs from its response chain")
+        recoverable_unavailable = tuple(
+            item for item in self.context_responses if _is_recoverable_proof_unavailable(item)
+        )
+        if len(recoverable_unavailable) > 1:
+            raise ValueError("model continuation may contain only one recoverable unavailable")
         if any(
-            item.status is not BinaryCodeContextStatus.RESOLVED for item in self.context_responses
+            item.status is not BinaryCodeContextStatus.RESOLVED
+            and not _is_recoverable_proof_unavailable(item)
+            for item in self.context_responses
         ):
-            raise ValueError("model continuation may contain only resolved context")
+            raise ValueError(
+                "model continuation may contain only resolved or recoverable unavailable context"
+            )
         evidence = self.base_packet.capsule.evidence_bytes + sum(
             item.evidence_bytes for item in self.context_responses
         )
@@ -436,10 +460,28 @@ class DecompilerContextChainEntry(DomainModel):
     def validate_entry(self) -> "DecompilerContextChainEntry":
         if self.request_sha256 != self.response.request_sha256:
             raise ValueError("chain request and response digests differ")
-        if (self.assessment is None) != (
-            self.response.status is not BinaryCodeContextStatus.RESOLVED
-        ):
-            raise ValueError("only resolved context may carry a continuation assessment")
+        if self.response.status is BinaryCodeContextStatus.RESOLVED:
+            if self.assessment is None:
+                raise ValueError("resolved context requires a continuation assessment")
+        elif self.assessment is not None:
+            if not _is_recoverable_proof_unavailable(self.response):
+                raise ValueError(
+                    "only resolved or recoverable unavailable context may carry an assessment"
+                )
+            if (
+                self.assessment.disposition
+                is not DecompilerHunterDisposition.NEEDS_CODE_CONTEXT
+                or len(self.assessment.context_requests) != 1
+            ):
+                raise ValueError(
+                    "recoverable unavailable entry requires exactly one corrected request"
+                )
+            if _request_fingerprint(
+                self.assessment.context_requests[0]
+            ) == _request_fingerprint(self.response.request):
+                raise ValueError(
+                    "recoverable unavailable entry must persist a different request selection"
+                )
         if (self.usage is None) != (self.assessment is None):
             raise ValueError("continuation usage and assessment must be persisted together")
         if self.usage is not None:
@@ -1053,6 +1095,12 @@ async def continue_decompiler_hunter_session(
     current = entries[-1].assessment if entries else initial_assessment
     if current is None:
         raise RuntimeError("resolved context chain lost its assessment")
+    proof_unavailable_repairs = sum(
+        1
+        for entry in entries
+        if _is_recoverable_proof_unavailable(entry.response)
+        and entry.assessment is not None
+    )
     for ordinal in range(len(entries) + 1, active.maximum_continuations_per_root + 1):
         if current.disposition is not DecompilerHunterDisposition.NEEDS_CODE_CONTEXT:
             break
@@ -1081,6 +1129,39 @@ async def continue_decompiler_hunter_session(
         )
         previous = initial_sha if not entries else entries[-1].chain_sha256
         if response.status is not BinaryCodeContextStatus.RESOLVED:
+            if (
+                _is_recoverable_proof_unavailable(response)
+                and proof_unavailable_repairs
+                < active.maximum_proof_unavailable_repairs_per_root
+            ):
+                responses = tuple(item.response for item in entries) + (response,)
+                continuation_packet = _make_continuation_packet(
+                    packet=packet,
+                    prior_assessment=current,
+                    responses=responses,
+                    ordinal=ordinal,
+                    previous=previous,
+                )
+                assessment, usage, raw = await DecompilerContinuationAgent(
+                    client, active
+                ).analyze(
+                    continuation_packet,
+                    run_id=initial_usage.run_id,
+                )
+                entry = _make_entry(
+                    packet=packet,
+                    ordinal=ordinal,
+                    previous=previous,
+                    response=response,
+                    assessment=assessment,
+                    usage=usage,
+                    raw=raw,
+                )
+                _persist_entry(directory, entry, raw)
+                entries.append(entry)
+                current = assessment
+                proof_unavailable_repairs += 1
+                continue
             entry = _make_entry(
                 packet=packet,
                 ordinal=ordinal,
@@ -1176,6 +1257,21 @@ def validate_continuation_assessment(
         or assessment.admission_rank != base.admission_rank
     ):
         raise ValueError("continuation assessment changed root-session identity")
+    latest_response = packet.context_responses[-1]
+    if _is_recoverable_proof_unavailable(latest_response):
+        if (
+            assessment.disposition is not DecompilerHunterDisposition.NEEDS_CODE_CONTEXT
+            or len(assessment.context_requests) != 1
+        ):
+            raise ValueError(
+                "proof-unavailable context is zero evidence and requires exactly one corrected request"
+            )
+        if _request_fingerprint(assessment.context_requests[0]) == _request_fingerprint(
+            latest_response.request
+        ):
+            raise ValueError(
+                "proof-unavailable correction must select a different frozen-IR slice"
+            )
     facts = {item.fact_id: item for item in base.capsule.facts}
     functions = set(base.known_function_ids)
     blocks = set(_continuation_known_block_ids(packet))
