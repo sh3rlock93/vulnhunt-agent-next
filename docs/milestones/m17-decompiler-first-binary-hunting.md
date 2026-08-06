@@ -1796,6 +1796,80 @@ range, the initialization contract of `__ImageIO_Malloc` or IOSurface storage,
 or the extent consumed by `createImageBlock`. This remains a conditional
 uninitialized-tail candidate rather than an Apple-submission-ready finding.
 
+### M17-29 — Address-taken call-output provenance
+
+#### Trigger
+
+The rank-3 GIF decoder candidate reached a caller that passes an allocated
+buffer and its returned byte extent into `doDecodeImageData`. Ghidra's
+pseudocode showed the allocation, `&local_a8` out-parameter, and later call,
+but normalized IR represented each post-call stack value as an unknown
+`INDIRECT(value, op-token)`. Same-address compaction then retained the final
+unknown aliases while dropping their PHI origins and the exact address-taking
+definition, so the Reviewer could not bind the decoder destination and capacity
+to the caller allocation.
+
+#### Implementation scope
+
+- Preserve Ghidra `INDIRECT` as its own IR operation instead of treating it as
+  an unspecified opcode. Retain the internal op token without interpreting it
+  as a runtime value.
+- When a call operand is defined by pointer arithmetic for the exact stack
+  storage named by a same-address `INDIRECT` result, record an address-backed
+  out-parameter dependency. Do not infer output equality, capacity equality,
+  or allocator semantics from that dependency.
+- Protect a bounded, deterministic, exact-instruction provenance chain through
+  INDIRECT, PHI, cast, arithmetic, load, and allocation definitions. This must
+  retain required definitions even when many decompiler side effects share one
+  machine address.
+- Do not add sessions, target names, target addresses, Reviewer threshold
+  changes, dynamic execution, fuzzing, generated inputs, or VM work.
+
+#### Exit criteria
+
+A synthetic Ghidra export must bind a generic address-taken stack output to its
+call argument and return dependency. A bounded definition/use request with
+same-address noise must retain the out value, PHI aliases, allocation result,
+allocation-size arithmetic, and exact address-taking definition while still
+compacting unrelated unknown operations. Run focused adapter/context tests,
+all M14/M16/M17 binary tests, the full suite, Ruff, project-standard mypy, and
+the unchanged M15 blind gate twice. Finally regenerate normalized IR from the
+unchanged frozen ImageIO export and repeat the rank-3 caller-capacity request
+before rerunning the independent Reviewer.
+
+#### Current observation
+
+Implemented and validated against the unchanged 1,262-function frozen ImageIO
+export. The new IR digest is
+`sha256:4a3f525b12e50f5b553315fa4837bd4800d458ed3ace652080324ee04aaa46b7`.
+At the real allocation address, the returned extent now carries the exact
+address-taking pointer operand, allocation result dependency, call-argument
+index, and an explicit non-equality semantic warning. The prior Reviewer's
+caller-capacity request resolves in 32,001 bytes and retains the allocation,
+allocation-size multiplication, out-parameter pointer, buffer-return cast, PHI
+aliases, and decoder call.
+
+A controlled rank-3 continuation reached the direct caller in four resolved
+responses. Its fifth model request incorrectly used `supporting_field_offsets`
+for ordinary structure offsets already described by variables and addresses;
+the broker correctly returned `proof_unavailable`. The same mistake occurred
+in a fresh autonomous initial request. Because the current session controller
+terminates immediately on a recoverable unavailable response, no new Reviewer
+decision was produced. This is a separate request-repair/session-continuation
+gap, not a failure of the M17-29 out-parameter evidence. M17-30 must permit one
+bounded same-session correction after a proof-unavailable broker response while
+forbidding a vulnerability or safe conclusion from that response itself.
+
+The focused adapter/context suite passed 67 tests, the M14/M16/M17 suite passed
+270 tests, and the full repository suite passed 816 tests with 8
+environment-dependent skips. Ruff passed, binary-analysis mypy passed 16 source
+files, and the unchanged M15 gate passed twice with TP=6, FP=0, FN=0 and stable
+observation digest
+`sha256:84e4a0cdbbf6b44c689a259c579ef57f475e8064bcad549b3b68adec783795a4`.
+The real run used five unique model calls across one root session and four
+resolved continuations (585,458 input and 11,993 output tokens); all image,
+generated-input, fuzzer, VM, and dynamic-experiment counters remained zero.
+
 ## Per-PR validation and merge procedure
 
 For each M17 PR:

@@ -641,6 +641,65 @@ def test_unknown_operation_is_preserved_without_guessing() -> None:
     assert "source_op:float_negate" in normalized.tags
 
 
+def test_ghidra_indirect_preserves_address_taken_call_output_dependency() -> None:
+    payload = _ghidra_export()
+    functions = cast(list[dict[str, Any]], payload["functions"])
+    functions[0]["blocks"] = [
+        {
+            "name": "entry",
+            "start": "0x100001000",
+            "size": 32,
+            "successors": [],
+            "instructions": [
+                {
+                    "address": "0x100001000",
+                    "op": "int_sub",
+                    "result": "out_extent_ptr",
+                    "inputs": ["sp", "const_ffffffffffffff58"],
+                    "tags": ["pointer_arithmetic"],
+                    "text": "PTRSUB sp, 0xffffffffffffff58",
+                },
+                {
+                    "address": "0x100001008",
+                    "op": "alloc",
+                    "result": "buffer",
+                    "inputs": ["bytes", "alignment", "out_extent_ptr"],
+                    "target": "__ImageIO_Malloc",
+                    "text": "buffer = __ImageIO_Malloc(bytes, alignment, &extent)",
+                },
+                {
+                    "address": "0x100001008",
+                    "op": "INDIRECT",
+                    "result": (
+                        "local_a8_stack_ffffffffffffff58_8_100001008_6260"
+                    ),
+                    "inputs": ["extent_before_call", "const_e3"],
+                    "width": 64,
+                    "text": "INDIRECT extent",
+                },
+            ],
+        }
+    ]
+    functions[0]["pseudocode"] = (
+        "buffer = __ImageIO_Malloc(bytes, alignment, &local_a8);"
+    )
+
+    ir = GhidraJSONAdapter().normalize(payload, expected_snapshot_sha256=_SNAPSHOT)
+    instructions = ir.functions[0].blocks[0].instructions
+    effect = next(item for item in instructions if item.operation is IROperation.INDIRECT)
+
+    assert effect.operands == (
+        "extent_before_call",
+        "const_e3",
+        "out_extent_ptr",
+        "buffer",
+    )
+    assert "source_op:indirect" in effect.tags
+    assert "side_effect:address_taken_out_parameter" in effect.tags
+    assert "out_parameter_index:2" in effect.tags
+    assert "address-taken call output argument 2: out_extent_ptr" in effect.text
+
+
 def test_file_loader_rejects_symlink_and_loads_regular_json(tmp_path: Path) -> None:
     export = tmp_path / "ghidra.json"
     export.write_text(json.dumps(_ghidra_export()), encoding="utf-8")
