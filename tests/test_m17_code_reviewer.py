@@ -23,7 +23,9 @@ from vulnhunt_agent.macos.binary_analysis import (
     create_binary_research_scope,
     discover_imageio_parsers,
     rank_binary_functions,
+    resolve_binary_code_context,
 )
+from vulnhunt_agent.macos.binary_analysis.code_context import _make_entry
 from vulnhunt_agent.macos.binary_analysis.code_reviewer import (
     CODE_REVIEWER_SYSTEM_PROMPT,
     BinaryCodeReviewerDisposition,
@@ -40,6 +42,7 @@ from vulnhunt_agent.macos.binary_analysis.code_reviewer import (
 )
 from vulnhunt_agent.macos.binary_analysis.decompiler_hunter import (
     DECOMPILER_HUNTER_SYSTEM_PROMPT,
+    BinaryCodeContextRequest,
     BinaryCodeContextRequestKind,
     DecompilerHunterPacket,
     DecompilerVulnerabilityClass,
@@ -366,6 +369,49 @@ class _FakeClient:
             stop_reason="end_turn",
             content_blocks=[{"text": value}],
         )
+
+
+def test_reviewer_preserves_repaired_chain_digest_but_excludes_zero_evidence() -> None:
+    ir, hunter_packet, assessment, _ = _fixture()
+    root = hunter_packet.capsule.root_function_id
+    request = BinaryCodeContextRequest(
+        request_id="codectx-reviewer-recoverable-unavailable",
+        kind=BinaryCodeContextRequestKind.DEFINITION_USE_CHAIN,
+        rationale="Request unavailable decoder-object field provenance.",
+        function_id=root,
+        variable="bytes",
+        supporting_field_offsets=(0x70,),
+        evidence_ids=(hunter_packet.allowed_evidence_ids[0],),
+    )
+    unavailable = resolve_binary_code_context(
+        ir=ir,
+        packet=hunter_packet,
+        request=request,
+    )
+    assert unavailable.status is BinaryCodeContextStatus.UNAVAILABLE
+    assert unavailable.evidence_bytes == 0
+    from vulnhunt_agent.macos.binary_analysis.decompiler_hunter import _digest
+
+    entry = _make_entry(
+        packet=hunter_packet,
+        ordinal=1,
+        previous=_digest(assessment.model_dump(mode="json")),
+        response=unavailable,
+    )
+
+    reviewer_packet = build_binary_code_reviewer_packet(
+        ir=ir,
+        hunter_packet=hunter_packet,
+        hunter_assessment=assessment,
+        context_entries=(entry,),
+        context_chain_sha256=entry.chain_sha256,
+        product_version="26.5.2",
+        build_version="25F84",
+    )
+
+    assert reviewer_packet.context_chain_sha256 == entry.chain_sha256
+    assert reviewer_packet.hunter_context_responses == ()
+    assert reviewer_packet.hypothesis == assessment.hypotheses[0]
 
 
 @pytest.mark.asyncio

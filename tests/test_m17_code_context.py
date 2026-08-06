@@ -3019,6 +3019,223 @@ def test_invalid_duplicate_out_of_image_file_and_budget_requests_are_rejected(tm
 
 
 @pytest.mark.asyncio
+async def test_proof_unavailable_gets_one_same_session_request_correction(tmp_path) -> None:
+    ir, packet, caller, worker, _ = _fixture(tmp_path)
+    unavailable_request = _request(
+        packet,
+        BinaryCodeContextRequestKind.DEFINITION_USE_CHAIN,
+        function_id=worker.function_id,
+        variable="tmp13",
+        supporting_field_offsets=(0x70,),
+    )
+    unavailable = resolve_binary_code_context(
+        ir=ir,
+        packet=packet,
+        request=unavailable_request,
+    )
+    assert unavailable.status is BinaryCodeContextStatus.UNAVAILABLE
+    assert unavailable.rejection is BinaryCodeContextRejection.PROOF_UNAVAILABLE
+    assert unavailable.evidence_bytes == 0
+    corrected = _request(
+        packet,
+        BinaryCodeContextRequestKind.DIRECT_CALLER,
+        function_id=worker.function_id,
+        related=caller.function_id,
+    )
+    corrected_response = resolve_binary_code_context(
+        ir=ir,
+        packet=packet,
+        request=corrected,
+    )
+    client = _FakeClient(
+        [
+            _needs(packet, corrected).model_dump_json(),
+            json.dumps(_not_vulnerable(packet, corrected_response)),
+        ]
+    )
+
+    result = await continue_decompiler_hunter_session(
+        store_root=tmp_path,
+        ir=ir,
+        packet=packet,
+        initial_assessment=_needs(packet, unavailable_request),
+        initial_usage=_initial_usage(packet),
+        client=client,
+    )
+
+    assert result.terminal_status is DecompilerContextTerminalStatus.COMPLETED
+    assert result.terminal_assessment.disposition is DecompilerHunterDisposition.NOT_VULNERABLE
+    assert len(result.entries) == 2
+    assert result.entries[0].response == unavailable
+    assert result.entries[0].assessment is not None
+    assert result.entries[0].usage is not None
+    assert result.entries[0].usage.sessions == 0
+    assert result.model_calls == 3
+    assert client.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_proof_unavailable_repair_rejects_the_same_selection(tmp_path) -> None:
+    ir, packet, caller, worker, _ = _fixture(tmp_path)
+    unavailable_request = _request(
+        packet,
+        BinaryCodeContextRequestKind.DEFINITION_USE_CHAIN,
+        function_id=worker.function_id,
+        variable="tmp13",
+        supporting_field_offsets=(0x70,),
+    )
+    repeated = unavailable_request.model_copy(
+        update={"request_id": "codectx-proof-unavailable-renamed"}
+    )
+    corrected = _request(
+        packet,
+        BinaryCodeContextRequestKind.DIRECT_CALLER,
+        function_id=worker.function_id,
+        related=caller.function_id,
+    )
+    client = _FakeClient(
+        [
+            _needs(packet, repeated).model_dump_json(),
+            _needs(packet, corrected).model_dump_json(),
+        ]
+    )
+
+    result = await continue_decompiler_hunter_session(
+        store_root=tmp_path,
+        ir=ir,
+        packet=packet,
+        initial_assessment=_needs(packet, unavailable_request),
+        initial_usage=_initial_usage(packet),
+        client=client,
+        policy=BinaryCodeContextPolicy(maximum_continuations_per_root=1),
+    )
+
+    assert result.terminal_status is DecompilerContextTerminalStatus.REVIEWER_INCONCLUSIVE
+    assert result.entries[0].assessment is not None
+    assert result.entries[0].assessment.context_requests == (corrected,)
+    assert client.calls == 2
+    assert "must select a different frozen-IR slice" in client.last_user_texts[1]
+
+
+@pytest.mark.asyncio
+async def test_proof_unavailable_cannot_support_a_vulnerability_conclusion(tmp_path) -> None:
+    ir, packet, caller, worker, sink = _fixture(tmp_path)
+    unavailable_request = _request(
+        packet,
+        BinaryCodeContextRequestKind.DEFINITION_USE_CHAIN,
+        function_id=worker.function_id,
+        variable="tmp13",
+        supporting_field_offsets=(0x70,),
+    )
+    corrected = _request(
+        packet,
+        BinaryCodeContextRequestKind.DIRECT_CALLER,
+        function_id=worker.function_id,
+        related=caller.function_id,
+    )
+    unrelated_sink = _request(
+        packet,
+        BinaryCodeContextRequestKind.EXACT_FUNCTION,
+        function_id=sink.function_id,
+    )
+    sink_response = resolve_binary_code_context(
+        ir=ir,
+        packet=packet,
+        request=unrelated_sink,
+    )
+    client = _FakeClient(
+        [
+            json.dumps(_hypothesis(packet, sink_response, sink)),
+            _needs(packet, corrected).model_dump_json(),
+        ]
+    )
+
+    result = await continue_decompiler_hunter_session(
+        store_root=tmp_path,
+        ir=ir,
+        packet=packet,
+        initial_assessment=_needs(packet, unavailable_request),
+        initial_usage=_initial_usage(packet),
+        client=client,
+        policy=BinaryCodeContextPolicy(maximum_continuations_per_root=1),
+    )
+
+    assert result.terminal_assessment.disposition is (
+        DecompilerHunterDisposition.NEEDS_CODE_CONTEXT
+    )
+    assert client.calls == 2
+    assert "zero evidence" in client.last_user_texts[1]
+
+
+@pytest.mark.asyncio
+async def test_only_one_proof_unavailable_response_is_repaired_per_root(tmp_path) -> None:
+    ir, packet, _, worker, _ = _fixture(tmp_path)
+    first = _request(
+        packet,
+        BinaryCodeContextRequestKind.DEFINITION_USE_CHAIN,
+        function_id=worker.function_id,
+        variable="tmp13",
+        supporting_field_offsets=(0x70,),
+    )
+    second = first.model_copy(
+        update={
+            "request_id": "codectx-second-proof-unavailable",
+            "supporting_field_offsets": (0x74,),
+        }
+    )
+    client = _FakeClient([_needs(packet, second).model_dump_json()])
+
+    result = await continue_decompiler_hunter_session(
+        store_root=tmp_path,
+        ir=ir,
+        packet=packet,
+        initial_assessment=_needs(packet, first),
+        initial_usage=_initial_usage(packet),
+        client=client,
+    )
+
+    assert result.terminal_status is DecompilerContextTerminalStatus.REVIEWER_INCONCLUSIVE
+    assert len(result.entries) == 2
+    assert all(
+        entry.response.rejection is BinaryCodeContextRejection.PROOF_UNAVAILABLE
+        for entry in result.entries
+    )
+    assert result.entries[0].assessment is not None
+    assert result.entries[1].assessment is None
+    assert result.model_calls == 2
+    assert client.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_evidence_budget_rejection_is_not_sent_to_the_model(tmp_path) -> None:
+    ir, packet, caller, worker, _ = _fixture(tmp_path)
+    request = _request(
+        packet,
+        BinaryCodeContextRequestKind.DIRECT_CALLER,
+        function_id=worker.function_id,
+        related=caller.function_id,
+    )
+    client = _FakeClient([])
+
+    result = await continue_decompiler_hunter_session(
+        store_root=tmp_path,
+        ir=ir,
+        packet=packet,
+        initial_assessment=_needs(packet, request),
+        initial_usage=_initial_usage(packet),
+        client=client,
+        policy=BinaryCodeContextPolicy(maximum_total_evidence_bytes=16 * 1024),
+    )
+
+    assert result.entries[0].response.rejection is (
+        BinaryCodeContextRejection.EVIDENCE_BUDGET_EXCEEDED
+    )
+    assert result.entries[0].assessment is None
+    assert result.model_calls == 1
+    assert client.calls == 0
+
+
+@pytest.mark.asyncio
 async def test_repeated_context_is_rejected_without_another_paid_call(tmp_path) -> None:
     ir, packet, caller, worker, _ = _fixture(tmp_path)
     request = _request(
